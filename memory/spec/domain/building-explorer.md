@@ -19,8 +19,24 @@ basemap for satellite imagery and reduces buildings/parts to boundaries only.
   has both, else 3 m for residential subtypes (apartments etc.) and 4 m otherwise. Parts use
   their building's value, so they stack instead of drifting — a part computing its own level
   height from its own type misplaces it whenever the building has a measured height.
-- `building:min_level` is the number of skipped levels below the part (per the OSM wiki), so
-  base = `building:min_level` × level height and `building:levels` must exceed it.
+- `building:min_level` is the number of skipped levels below the part (per the OSM wiki, it is
+  "analogous to `min_height`"), so base = `building:min_level` × level height and
+  `building:levels` must exceed it.
+
+### Worked example: levels are counts, not floor names
+
+A 5-level base occupies 5 level-heights, 0-20 m at 4 m per level. For a tower resting on it:
+
+| tagging                                      | renders           | meaning                                                 |
+| -------------------------------------------- | ----------------- | ------------------------------------------------------- |
+| `building:min_level=6` + `building:levels=8` | 24-32 m, 2 levels | 6 level-heights of empty space below — leaves a 4 m gap |
+| `building:min_level=5` + `building:levels=8` | 20-32 m, 3 levels | flush on the base, floors 6-8                           |
+
+Writing the floor's number (6) instead of the count of levels skipped beneath it (5) both
+lifts the part by one level and makes it one level thinner. This is a common tagging slip;
+way/1545666244 and way/1545666247 on way/111680989 have it. The renderer reads counts, which
+is correct, so such data legitimately shows a gap.
+
 - A building with parts renders only its parts in 3D unless they leave the footprint mostly
   uncovered; see [Building parts](#building-parts).
 

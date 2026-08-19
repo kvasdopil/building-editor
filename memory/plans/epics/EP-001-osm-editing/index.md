@@ -22,6 +22,11 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
 - **FT-04 Local edit model — next.** Dirty state, undo, and a pending-change set held client-side. Acceptance: edits survive panning and are clearly distinguishable from upstream data.
 - **FT-05 OAuth 2.0 PKCE sign-in** against `api06.dev.openstreetmap.org`. Acceptance: token acquired and refreshed without the app ever handling a password.
 - **FT-06 Changeset upload** with version conflict handling, dev API only. Acceptance: a round-trip edit is visible on the dev server; a stale version produces a clean conflict message, not a silent overwrite.
+- **FT-08 Validation hints.** Flag suspect geometry and tagging in the inspector rather than
+  silently rendering it: a part floating above everything below it (likely `building:min_level`
+  off by one, see the worked example in the domain spec), parts overflowing their outline, and
+  parts leaving the footprint mostly uncovered. Acceptance: way/111680989's two floating parts
+  are flagged with the suggested `building:min_level` value.
 - **FT-07 Production switch.** Only after FT-06 is proven on the dev API.
 
 ## Verification notes
