@@ -42,8 +42,10 @@ Measured on the Stockholm test area: 10 simultaneous requests for one tile produ
 Sources are normalized onto shared property names (`src/lib/buildings.ts`), so one implementation covers both. For OSM that means `height`, `building:levels`, `min_height` and `building:min_level`, with units like `40 ft` parsed. Then (see `src/lib/heights.ts`):
 
 1. `height` (meters) when present;
-2. otherwise floor count × **3 m** for residential buildings (apartments etc.) or × **4 m** for everything else;
-3. minimum height, else minimum floor × the same per-floor height, lifts the base (parts hovering above ground render correctly).
+2. otherwise level count × the building's **level height**;
+3. minimum height, else minimum level × the same level height, lifts the base (so parts starting above ground float correctly).
+
+The level height is derived per building, not per part: `height ÷ building:levels` when the building has both, else 3 m for residential buildings (apartments etc.) and 4 m for everything else. Every part of a building uses its building's value, so parts stack on each other instead of drifting apart. `building:min_level` is read as the OSM wiki defines it — the number of skipped levels below the part — so a part with `building:min_level=6` sits at the height of six levels.
 
 A part is attributed to a building when at least 50% of its area falls inside that building's outline — adjacent OSM buildings share walls and vertices, so touching proves nothing. Parts replace the outline in 3D only when they cover at least 85% of the footprint; otherwise the outline is drawn too, since partial part coverage would otherwise make most of the building vanish.
 

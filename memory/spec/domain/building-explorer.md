@@ -13,10 +13,16 @@ basemap for satellite imagery and reduces buildings/parts to boundaries only.
 ## Height rules (authoritative)
 
 - `height` (m) wins.
-- Else `num_floors` × 3 m if residential subtype (apartments etc.), × 4 m otherwise.
-- Base: `min_height`, else `min_floor` × the same per-floor height.
-- Parts inherit the parent building's subtype for the per-floor estimate.
-- A building with parts renders only its parts in 3D; the outline is a fallback.
+- Else level count × the building's level height.
+- Base: `min_height`, else minimum level × the same level height.
+- **Level height is per building, not per part**: `height ÷ building:levels` when the building
+  has both, else 3 m for residential subtypes (apartments etc.) and 4 m otherwise. Parts use
+  their building's value, so they stack instead of drifting — a part computing its own level
+  height from its own type misplaces it whenever the building has a measured height.
+- `building:min_level` is the number of skipped levels below the part (per the OSM wiki), so
+  base = `building:min_level` × level height and `building:levels` must exceed it.
+- A building with parts renders only its parts in 3D unless they leave the footprint mostly
+  uncovered; see [Building parts](#building-parts).
 
 ## Building parts
 

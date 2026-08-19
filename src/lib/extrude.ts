@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { verticalExtent } from "./heights";
+import { levelHeight, verticalExtent } from "./heights";
 import { partsCoverage } from "./parts";
 import type {
   BuildingElement,
@@ -55,11 +55,11 @@ function footprintShape(footprint: Footprint, projector: Projector): THREE.Shape
 function extrudeElement(
   element: BuildingElement,
   projector: Projector,
-  parentSubtype: string | undefined,
+  metersPerLevel: number,
   color: number,
   edgeOpacity: number,
 ): THREE.Object3D {
-  const { top, base } = verticalExtent(element.properties, parentSubtype);
+  const { top, base } = verticalExtent(element.properties, metersPerLevel);
   const group = new THREE.Group();
   const material = new THREE.MeshLambertMaterial({ color });
   const edgeMaterial = new THREE.LineBasicMaterial({
@@ -92,11 +92,12 @@ function extrudeBuildingWithParts(
   edgeOpacity: number,
 ): THREE.Group {
   const group = new THREE.Group();
-  const subtype = building.properties.subtype;
+  // One level height for the whole building, so its parts stack on each other.
+  const metersPerLevel = levelHeight(building.properties);
   const covered = partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
   const elements = covered ? parts : [building, ...parts];
   elements.forEach((element, index) => {
-    group.add(extrudeElement(element, projector, subtype, colorFor(index), edgeOpacity));
+    group.add(extrudeElement(element, projector, metersPerLevel, colorFor(index), edgeOpacity));
   });
   return group;
 }
