@@ -1,4 +1,4 @@
-import type { OvertureProperties } from "./overture";
+import type { BuildingProperties } from "./buildings";
 
 function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -20,7 +20,7 @@ interface VerticalExtent {
  * Parts inherit the parent building's subtype for the per-floor estimate.
  */
 export function verticalExtent(
-  properties: OvertureProperties,
+  properties: BuildingProperties,
   parentSubtype?: string,
 ): VerticalExtent {
   const subtype = properties.subtype ?? parentSubtype;

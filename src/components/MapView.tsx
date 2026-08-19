@@ -5,7 +5,9 @@ import {
   addProtocol,
   AttributionControl,
   type ExpressionSpecification,
+  type FilterSpecification,
   type GeoJSONSource,
+  type LayerSpecification,
   Map as MaplibreMap,
   type MapMouseEvent,
   NavigationControl,
@@ -18,9 +20,20 @@ import { useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
-import { BUILDINGS_PMTILES_URL, type BuildingSelection, buildSelection } from "@/lib/overture";
+import type { BuildingSelection } from "@/lib/buildings";
+import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
+import { selectFromOsm } from "@/lib/osm/select";
+import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
+import { BUILDINGS_PMTILES_URL, buildSelection } from "@/lib/overture";
 
 const MIN_BUILDING_ZOOM = 10;
+
+/**
+ * At and above this zoom the map switches from the Overture overview snapshot
+ * to live OSM data, which is the only source that shows recent edits and the
+ * only one we can edit against (ADR 0001).
+ */
+const LIVE_ZOOM = OSM_TILE_ZOOM;
 
 /**
  * Buildings and parts are colored by the height data they carry: a measured
@@ -54,6 +67,58 @@ const LEGEND: [keyof typeof HEIGHT_DATA_COLORS, string][] = [
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 
+interface FootprintLayerOptions {
+  /** Layer id prefix; `-fill` and `-line` are appended. */
+  id: string;
+  source: string;
+  sourceLayer?: string;
+  /** Draw building parts rather than outlines: fainter, dashed. */
+  part?: boolean;
+  /** Live layers take over from the Overture overview at LIVE_ZOOM. */
+  live?: boolean;
+}
+
+/**
+ * The fill + line pair for one class of footprint. Overture separates buildings
+ * from parts by source layer; the live source is one collection, so it filters
+ * on the normalized `role` instead.
+ */
+function footprintLayers({
+  id,
+  source,
+  sourceLayer,
+  part = false,
+  live = false,
+}: FootprintLayerOptions): LayerSpecification[] {
+  const zoom = live ? { minzoom: LIVE_ZOOM } : { minzoom: MIN_BUILDING_ZOOM, maxzoom: LIVE_ZOOM };
+  const shared = {
+    source,
+    ...(sourceLayer ? { "source-layer": sourceLayer } : {}),
+    ...(live
+      ? { filter: [part ? "==" : "!=", ["get", "role"], "part"] as FilterSpecification }
+      : {}),
+    ...zoom,
+  };
+  return [
+    {
+      ...shared,
+      id: `${id}-fill`,
+      type: "fill",
+      paint: { "fill-color": heightDataColor("map"), "fill-opacity": part ? 0.25 : 0.35 },
+    },
+    {
+      ...shared,
+      id: `${id}-line`,
+      type: "line",
+      paint: {
+        "line-color": heightDataColor("map"),
+        "line-width": part ? 0.8 : 1.2,
+        ...(part ? { "line-dasharray": [2, 1] } : {}),
+      },
+    },
+  ];
+}
+
 function mapStyle(): StyleSpecification {
   return {
     version: 8,
@@ -79,47 +144,21 @@ function mapStyle(): StyleSpecification {
         url: `pmtiles://${BUILDINGS_PMTILES_URL}`,
         attribution: "Buildings © Overture Maps Foundation",
       },
+      live: { type: "geojson", data: EMPTY, attribution: "© OpenStreetMap contributors" },
       selection: { type: "geojson", data: EMPTY },
     },
     layers: [
       { id: "osm", type: "raster", source: "osm" },
       { id: "photos", type: "raster", source: "photos", layout: { visibility: "none" } },
-      {
-        id: "building-fill",
-        type: "fill",
+      ...footprintLayers({ id: "building", source: "overture", sourceLayer: "building" }),
+      ...footprintLayers({
+        id: "part",
         source: "overture",
-        "source-layer": "building",
-        minzoom: MIN_BUILDING_ZOOM,
-        paint: { "fill-color": heightDataColor("map"), "fill-opacity": 0.35 },
-      },
-      {
-        id: "building-line",
-        type: "line",
-        source: "overture",
-        "source-layer": "building",
-        minzoom: MIN_BUILDING_ZOOM,
-        paint: { "line-color": heightDataColor("map"), "line-width": 1.2 },
-      },
-      {
-        id: "part-fill",
-        type: "fill",
-        source: "overture",
-        "source-layer": "building_part",
-        minzoom: MIN_BUILDING_ZOOM,
-        paint: { "fill-color": heightDataColor("map"), "fill-opacity": 0.25 },
-      },
-      {
-        id: "part-line",
-        type: "line",
-        source: "overture",
-        "source-layer": "building_part",
-        minzoom: MIN_BUILDING_ZOOM,
-        paint: {
-          "line-color": heightDataColor("map"),
-          "line-width": 0.8,
-          "line-dasharray": [2, 1],
-        },
-      },
+        sourceLayer: "building_part",
+        part: true,
+      }),
+      ...footprintLayers({ id: "live-building", source: "live", live: true }),
+      ...footprintLayers({ id: "live-part", source: "live", live: true, part: true }),
       {
         id: "selection-casing",
         type: "line",
@@ -139,7 +178,19 @@ function mapStyle(): StyleSpecification {
 /** Main screen: MapLibre map with Overture buildings and the 3D side panel. */
 export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [map, setMap] = useState<MaplibreMap | null>(null);
+  const loaderRef = useRef<TileLoader | null>(null);
+  const liveFeaturesRef = useRef<FeatureCollection>(EMPTY);
+  // The instance lives in a ref, not state: cleanup nulls it synchronously, so
+  // a sibling effect re-running after a remount can never touch a removed map
+  // (MapLibre drops its style on remove(), and every paint call then throws).
+  const mapRef = useRef<MaplibreMap | null>(null);
+  const [mapReady, setMapReady] = useState(false);
+  const [live, setLive] = useState(false);
+  const [loaderStatus, setLoaderStatus] = useState<LoaderStatus>({
+    tiles: 0,
+    pending: 0,
+    failed: 0,
+  });
   const [photos, setPhotos] = useState(false);
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
@@ -173,18 +224,52 @@ export function MapView() {
     instance.addControl(new NavigationControl({ showCompass: false }), "top-left");
     instance.addControl(new AttributionControl({ compact: true }), "bottom-left");
 
-    const onZoom = () => setZoomedIn(instance.getZoom() > MIN_BUILDING_ZOOM);
+    const onZoom = () => {
+      const zoom = instance.getZoom();
+      setZoomedIn(zoom > MIN_BUILDING_ZOOM);
+      setLive(zoom >= LIVE_ZOOM);
+    };
     instance.on("zoom", onZoom);
     onZoom();
+
+    // Live tiles are requested only once the map settles, and only at edit
+    // zoom, so panning never turns into a burst of upstream reads (ADR 0002).
+    const loader = createTileLoader((features, status) => {
+      liveFeaturesRef.current = features;
+      const source = instance.getSource<GeoJSONSource>("live");
+      void source?.setData(features);
+      setLoaderStatus(status);
+    });
+    loaderRef.current = loader;
+    instance.on("idle", () => {
+      if (instance.getZoom() < LIVE_ZOOM) return;
+      const bounds = instance.getBounds();
+      loader.load([bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]);
+    });
 
     const setCursor = (cursor: string) => () => {
       instance.getCanvas().style.cursor = cursor;
     };
-    instance.on("mouseenter", "building-fill", setCursor("pointer"));
-    instance.on("mouseleave", "building-fill", setCursor(""));
+    for (const layer of ["building-fill", "live-building-fill"]) {
+      instance.on("mouseenter", layer, setCursor("pointer"));
+      instance.on("mouseleave", layer, setCursor(""));
+    }
 
     instance.on("click", (event: MapMouseEvent) => {
       if (instance.getZoom() <= MIN_BUILDING_ZOOM) return;
+
+      if (instance.getZoom() >= LIVE_ZOOM) {
+        const liveHits = instance.queryRenderedFeatures(event.point, {
+          layers: ["live-building-fill", "live-part-fill"],
+        });
+        const liveHit = liveHits.find((f) => f.properties.role !== "part") ?? liveHits[0];
+        const liveId = liveHit?.properties.id;
+        setSelection(
+          typeof liveId === "string" ? selectFromOsm(liveFeaturesRef.current, liveId) : null,
+        );
+        return;
+      }
+
       const hits = instance.queryRenderedFeatures(event.point, {
         layers: ["building-fill", "part-fill"],
       });
@@ -206,34 +291,42 @@ export function MapView() {
     });
 
     instance.on("error", (e) => console.error("map error:", e.error?.message ?? e));
-    instance.on("load", () => setMap(instance));
+    mapRef.current = instance;
+    instance.on("load", () => setMapReady(true));
     return () => {
+      loader.stop();
+      loaderRef.current = null;
+      mapRef.current = null;
+      setMapReady(false);
       instance.remove();
       removeProtocol("pmtiles");
-      setMap(null);
     };
   }, []);
 
   // Photo underlay: swap basemaps and keep only boundaries over imagery.
   useEffect(() => {
-    if (!map) return;
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
     map.setLayoutProperty("photos", "visibility", photos ? "visible" : "none");
     map.setLayoutProperty("osm", "visibility", photos ? "none" : "visible");
-    map.setPaintProperty("building-fill", "fill-opacity", photos ? 0 : 0.35);
-    map.setPaintProperty("part-fill", "fill-opacity", photos ? 0 : 0.25);
     const color = heightDataColor(photos ? "photo" : "map");
-    map.setPaintProperty("building-line", "line-color", color);
-    map.setPaintProperty("part-line", "line-color", color);
-    map.setPaintProperty("building-line", "line-width", photos ? 1.6 : 1.2);
-    map.setPaintProperty("part-line", "line-width", photos ? 1.1 : 0.8);
-  }, [map, photos]);
+    for (const prefix of ["", "live-"]) {
+      map.setPaintProperty(`${prefix}building-fill`, "fill-opacity", photos ? 0 : 0.35);
+      map.setPaintProperty(`${prefix}part-fill`, "fill-opacity", photos ? 0 : 0.25);
+      map.setPaintProperty(`${prefix}building-line`, "line-color", color);
+      map.setPaintProperty(`${prefix}part-line`, "line-color", color);
+      map.setPaintProperty(`${prefix}building-line`, "line-width", photos ? 1.6 : 1.2);
+      map.setPaintProperty(`${prefix}part-line`, "line-width", photos ? 1.1 : 0.8);
+    }
+  }, [mapReady, photos]);
 
   // Keep the selection highlight in sync with the selected building.
   useEffect(() => {
-    if (!map) return;
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
     const source = map.getSource<GeoJSONSource>("selection");
     void source?.setData(selection ? selection.outline : EMPTY);
-  }, [map, selection]);
+  }, [mapReady, selection]);
 
   return (
     <div className="relative h-dvh w-full overflow-hidden">
@@ -275,6 +368,17 @@ export function MapView() {
               </li>
             ))}
           </ul>
+          <p className="mt-2 border-t border-slate-100 pt-1.5 text-[11px] text-slate-500">
+            {live ? (
+              <>
+                Live OSM · {loaderStatus.tiles} tiles
+                {loaderStatus.pending > 0 && " · loading…"}
+                {loaderStatus.failed > 0 && ` · ${loaderStatus.failed} failed`}
+              </>
+            ) : (
+              "Overture overview · zoom in for live OSM"
+            )}
+          </p>
         </div>
       )}
 

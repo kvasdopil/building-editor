@@ -6,7 +6,7 @@ import type {
   BuildingWithParts,
   Footprint,
   LngLat,
-} from "./overture";
+} from "./buildings";
 
 const EARTH_METERS_PER_DEG_LAT = 111320;
 

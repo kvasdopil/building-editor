@@ -2,7 +2,7 @@
 
 import { Building3D } from "./Building3D";
 import { verticalExtent } from "@/lib/heights";
-import type { BuildingSelection } from "@/lib/overture";
+import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
 
 function buildingTitle(selection: BuildingSelection): string {
   const props = selection.building.properties;
@@ -17,9 +17,15 @@ function tagValue(value: unknown): string {
   return JSON.stringify(value) ?? "";
 }
 
-/** Every tag on the feature, alphabetically, empty values dropped. */
-function tagRows(properties: Record<string, unknown>): [string, string][] {
-  return Object.entries(properties)
+/**
+ * Every tag on the feature, alphabetically, empty values dropped. Live OSM
+ * features carry their real tags under `tags`; those are shown as rows rather
+ * than one unreadable JSON blob. Overture features are shown as-is.
+ */
+function tagRows(properties: BuildingProperties): [string, string][] {
+  const raw = properties.tags;
+  const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : properties;
+  return Object.entries(source)
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
     .map(([key, value]): [string, string] => [key, tagValue(value)])
     .sort(([a], [b]) => a.localeCompare(b));
@@ -37,7 +43,9 @@ export function BuildingPanel({
 
   const props = selection.building.properties;
   const tags = tagRows(props);
+  const version = typeof props.version === "number" ? `v${props.version}` : null;
   const summary = [
+    typeof props.osm_type === "string" ? `${props.id} · ${version ?? ""}`.trim() : null,
     `≈${verticalExtent(props).top.toFixed(1)} m`,
     selection.parts.length > 0 ? `${selection.parts.length} parts` : null,
   ]

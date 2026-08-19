@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { buildScene } from "@/lib/extrude";
-import type { BuildingSelection } from "@/lib/overture";
+import type { BuildingSelection } from "@/lib/buildings";
 
 /** Interactive 3D view of the selected building (orbit to rotate, wheel to zoom). */
 export function Building3D({ selection }: { selection: BuildingSelection }) {

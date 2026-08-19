@@ -14,13 +14,35 @@ Browse a map, click a building, inspect it in 3D.
 - **Inspector**: below the 3D view the panel lists every tag on the selected feature, raw and alphabetized.
 - **Photos**: toggle a satellite-imagery underlay (Esri World Imagery); with photos on, only building and part boundaries are drawn.
 
+## Data sources
+
+Two sources, split on purpose (see [ADR 0001](memory/adr/0001-live-osm-data-for-editing.md)):
+
+| Zoom  | Source                    | Why                                                                                                                                               |
+| ----- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 10-15 | Overture PMTiles snapshot | Global, free, no rate limits — good for an overview. Lags OSM by weeks, and its geometry has no OSM node identity, so it is never an edit target. |
+| 16+   | Live OSM API, proxied     | Shows edits made minutes ago and carries element type, id, version and node ids, which is what editing needs.                                     |
+
+The legend shows which one is active.
+
+### The OSM read path
+
+Every upstream request goes through this app; the browser never calls OSM directly. This is a hard requirement, not an optimization — see [ADR 0002](memory/adr/0002-cached-rate-limited-osm-proxy.md).
+
+- `GET /api/osm/tile/16/:x/:y` — buildings and parts for one z16 tile. Off-grid requests are rejected, which keeps the cache key space bounded.
+- `GET /api/osm/stats` — upstream and cache counters, so the request cost is observable at any time.
+
+Layers: IndexedDB in the browser, then an in-memory LRU and a disk store under `.cache/osm/`. Concurrent requests for one tile collapse into a single upstream fetch, upstream calls are spaced ~1.1 s apart with one in flight, 429/504 back off honoring `Retry-After`, and a circuit breaker serves stale data rather than retrying. Tiles are fetched only at z >= 16, on debounced map idle, nearest-first and capped per viewport.
+
+Measured on the Stockholm test area: 10 simultaneous requests for one tile produced 1 upstream call, and a full page reload produced none at all.
+
 ## Height rules
 
-For each building or part (see `src/lib/heights.ts`):
+Sources are normalized onto shared property names (`src/lib/buildings.ts`), so one implementation covers both. For OSM that means `height`, `building:levels`, `min_height` and `building:min_level`, with units like `40 ft` parsed. Then (see `src/lib/heights.ts`):
 
 1. `height` (meters) when present;
-2. otherwise `num_floors` × **3 m** for residential buildings (apartments etc.) or × **4 m** for everything else;
-3. `min_height`, else `min_floor` × the same per-floor height, lifts the base (parts hovering above ground render correctly).
+2. otherwise floor count × **3 m** for residential buildings (apartments etc.) or × **4 m** for everything else;
+3. minimum height, else minimum floor × the same per-floor height, lifts the base (parts hovering above ground render correctly).
 
 Buildings with parts are rendered from their parts; the outline is used only when no parts exist.
 
