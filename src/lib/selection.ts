@@ -1,7 +1,14 @@
 import { featureCollection } from "@turf/helpers";
 import type { Feature, MultiPolygon } from "geojson";
 import type { BuildingElement, BuildingSelection, BuildingWithParts } from "./buildings";
-import { boundsCenter, boundsOverlap, distanceSq, elementBounds, padBounds } from "./geometry";
+import {
+  boundsCenter,
+  boundsOverlap,
+  distanceSq,
+  elementBounds,
+  elementFeature,
+  padBounds,
+} from "./geometry";
 
 /** How far around the selected building to pull in 3D context, in meters. */
 const NEIGHBOR_PADDING_M = 80;
@@ -13,14 +20,7 @@ function footprintFeature(
   element: BuildingElement,
   role: "building" | "part",
 ): Feature<MultiPolygon> {
-  return {
-    type: "Feature",
-    properties: { role },
-    geometry: {
-      type: "MultiPolygon",
-      coordinates: element.polygons.map((p) => [p.outer, ...p.holes]),
-    },
-  };
+  return { ...elementFeature(element), properties: { role } };
 }
 
 /**

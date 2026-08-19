@@ -1,6 +1,6 @@
 "use client";
 
-import type { FeatureCollection, MultiPolygon, Polygon } from "geojson";
+import type { FeatureCollection } from "geojson";
 import {
   addProtocol,
   AttributionControl,
@@ -24,7 +24,7 @@ import type { BuildingSelection } from "@/lib/buildings";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
 import { selectFromOsm } from "@/lib/osm/select";
 import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
-import { BUILDINGS_PMTILES_URL, buildSelection } from "@/lib/overture";
+import { BUILDINGS_PMTILES_URL } from "@/lib/overture";
 
 const MIN_BUILDING_ZOOM = 10;
 
@@ -194,6 +194,7 @@ export function MapView() {
   const [photos, setPhotos] = useState(false);
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -256,38 +257,20 @@ export function MapView() {
     }
 
     instance.on("click", (event: MapMouseEvent) => {
-      if (instance.getZoom() <= MIN_BUILDING_ZOOM) return;
-
-      if (instance.getZoom() >= LIVE_ZOOM) {
-        const liveHits = instance.queryRenderedFeatures(event.point, {
-          layers: ["live-building-fill", "live-part-fill"],
-        });
-        const liveHit = liveHits.find((f) => f.properties.role !== "part") ?? liveHits[0];
-        const liveId = liveHit?.properties.id;
-        setSelection(
-          typeof liveId === "string" ? selectFromOsm(liveFeaturesRef.current, liveId) : null,
-        );
-        return;
-      }
-
-      const hits = instance.queryRenderedFeatures(event.point, {
-        layers: ["building-fill", "part-fill"],
-      });
-      const hit = hits.find((f) => f.sourceLayer === "building") ?? hits[0];
-      const buildingId =
-        hit?.sourceLayer === "building" ? hit.properties.id : hit?.properties.building_id;
-      if (typeof buildingId !== "string") {
+      // Selection is live-OSM only: the Overture overview is a snapshot we
+      // cannot edit, and its fields are not OSM tags (ADR 0001).
+      if (instance.getZoom() < LIVE_ZOOM) {
+        const overview = instance.queryRenderedFeatures(event.point, { layers: ["building-fill"] });
+        if (overview.length > 0) setNotice("Zoom in for OSM data");
         setSelection(null);
         return;
       }
-      // buildSelection picks out the clicked building and its neighbors, so
-      // hand it every loaded feature rather than filtering per id here.
-      const fragments = (sourceLayer: string) =>
-        instance.querySourceFeatures("overture", { sourceLayer }).map((f) => ({
-          geometry: f.geometry as Polygon | MultiPolygon,
-          properties: f.properties,
-        }));
-      setSelection(buildSelection(buildingId, fragments("building"), fragments("building_part")));
+      const hits = instance.queryRenderedFeatures(event.point, {
+        layers: ["live-building-fill", "live-part-fill"],
+      });
+      const hit = hits.find((f) => f.properties.role !== "part") ?? hits[0];
+      const id = hit?.properties.id;
+      setSelection(typeof id === "string" ? selectFromOsm(liveFeaturesRef.current, id) : null);
     });
 
     instance.on("error", (e) => console.error("map error:", e.error?.message ?? e));
@@ -302,6 +285,13 @@ export function MapView() {
       removeProtocol("pmtiles");
     };
   }, []);
+
+  // Clear the transient hint on its own, so it never sticks around.
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   // Photo underlay: swap basemaps and keep only boundaries over imagery.
   useEffect(() => {
@@ -376,15 +366,15 @@ export function MapView() {
                 {loaderStatus.failed > 0 && ` · ${loaderStatus.failed} failed`}
               </>
             ) : (
-              "Overture overview · zoom in for live OSM"
+              "Overture overview · zoom in to inspect OSM"
             )}
           </p>
         </div>
       )}
 
-      {!zoomedIn && (
+      {(!zoomedIn || notice) && (
         <div className="pointer-events-none absolute top-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-slate-900/75 px-4 py-1.5 text-sm text-white shadow">
-          Zoom in to see buildings
+          {zoomedIn ? notice : "Zoom in to see buildings"}
         </div>
       )}
 

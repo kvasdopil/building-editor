@@ -846,12 +846,33 @@
     postcss "^8.4.41"
     tailwindcss "4.1.16"
 
+"@turf/area@^7.4.0":
+  version "7.4.0"
+  resolved "https://registry.yarnpkg.com/@turf/area/-/area-7.4.0.tgz#9495392ef45f3eb93cc5e54dd857cc4c0faabe97"
+  integrity sha512-B7q5f6QwKIxxbl4/L59lAYA+FF7h2hv6st96PuKue0TGCYGSxAG/lV8LHSPUSOuOrLywN4jytJcKK3vOFBs7Nw==
+  dependencies:
+    "@turf/helpers" "7.4.0"
+    "@turf/meta" "7.4.0"
+    "@types/geojson" "^7946.0.10"
+    tslib "^2.8.1"
+
 "@turf/helpers@7.4.0", "@turf/helpers@^7.4.0":
   version "7.4.0"
   resolved "https://registry.yarnpkg.com/@turf/helpers/-/helpers-7.4.0.tgz#5589f04812ac95f8985e9396db01d9e70f4a35d5"
   integrity sha512-7PAwLZqOdRzTI5g9bHvUwlloAXPDH/mlajtryk0tw4ZwGMtmXsAyF4QundsAMfy4u48Fyd3AUqMXY0SMxqJGWg==
   dependencies:
     "@types/geojson" "^7946.0.10"
+    tslib "^2.8.1"
+
+"@turf/intersect@^7.4.0":
+  version "7.4.0"
+  resolved "https://registry.yarnpkg.com/@turf/intersect/-/intersect-7.4.0.tgz#7bba3b91bf0e3ba198a3ef7ed2f0a6c99435381f"
+  integrity sha512-n/wbZfDPoM1JKwrql8mHBoS9cdRWUC7/VE9IBZOttVPv8Guo0B6+Mzc2Z2e1PdIkSP/1R2yH6lxPpWMuuBfVEA==
+  dependencies:
+    "@turf/helpers" "7.4.0"
+    "@turf/meta" "7.4.0"
+    "@types/geojson" "^7946.0.10"
+    polyclip-ts "^0.16.8"
     tslib "^2.8.1"
 
 "@turf/meta@7.4.0":
@@ -861,17 +882,6 @@
   dependencies:
     "@turf/helpers" "7.4.0"
     "@types/geojson" "^7946.0.10"
-    tslib "^2.8.1"
-
-"@turf/union@^7.4.0":
-  version "7.4.0"
-  resolved "https://registry.yarnpkg.com/@turf/union/-/union-7.4.0.tgz#903a7ce68c90b71bf541235cc54e8551364b32e1"
-  integrity sha512-SYVtsCW9IznTyKlcGWxssRrf90p/hdpch1UeIcZc31pkSVdmeLOyuzPx0ef3UPmaF//fgXAphMph6JWA/FpKbA==
-  dependencies:
-    "@turf/helpers" "7.4.0"
-    "@turf/meta" "7.4.0"
-    "@types/geojson" "^7946.0.10"
-    polyclip-ts "^0.16.8"
     tslib "^2.8.1"
 
 "@tweenjs/tween.js@~23.1.3":

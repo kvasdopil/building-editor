@@ -1,4 +1,4 @@
-import type { MultiPolygon, Polygon } from "geojson";
+import type { Feature, MultiPolygon, Polygon } from "geojson";
 import type { BuildingElement, Footprint, LngLat } from "./buildings";
 
 /** [west, south, east, north] */
@@ -64,15 +64,6 @@ export function pointInRing(point: LngLat, ring: LngLat[]): boolean {
   return inside;
 }
 
-function pointInFootprint(point: LngLat, footprint: Footprint): boolean {
-  if (!pointInRing(point, footprint.outer)) return false;
-  return !footprint.holes.some((hole) => pointInRing(point, hole));
-}
-
-export function pointInElement(point: LngLat, element: BuildingElement): boolean {
-  return element.polygons.some((polygon) => pointInFootprint(point, polygon));
-}
-
 export function ringCenter(ring: LngLat[]): LngLat {
   let lon = 0;
   let lat = 0;
@@ -81,10 +72,6 @@ export function ringCenter(ring: LngLat[]): LngLat {
     lat += point[1];
   }
   return [lon / ring.length, lat / ring.length];
-}
-
-export function elementCenter(element: BuildingElement): LngLat {
-  return boundsCenter(elementBounds(element));
 }
 
 /** Convert GeoJSON polygonal geometry into footprints, dropping degenerate rings. */
@@ -96,4 +83,16 @@ export function toFootprints(geometry: Polygon | MultiPolygon): Footprint[] {
       outer: rings[0].map((p): LngLat => [p[0], p[1]]),
       holes: rings.slice(1).map((ring) => ring.map((p): LngLat => [p[0], p[1]])),
     }));
+}
+
+/** The element as a single GeoJSON feature, for turf operations and outlines. */
+export function elementFeature(element: BuildingElement): Feature<MultiPolygon> {
+  return {
+    type: "Feature",
+    properties: {},
+    geometry: {
+      type: "MultiPolygon",
+      coordinates: element.polygons.map((p) => [p.outer, ...p.holes]),
+    },
+  };
 }

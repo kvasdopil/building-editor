@@ -18,6 +18,25 @@ basemap for satellite imagery and reduces buildings/parts to boundaries only.
 - Parts inherit the parent building's subtype for the per-floor estimate.
 - A building with parts renders only its parts in 3D; the outline is a fallback.
 
+## Building parts
+
+A part belongs to a building when at least **50% of the part's area** falls inside the
+building outline (`src/lib/parts.ts`). Touching is not evidence of ownership: adjacent
+buildings in OSM routinely share walls and therefore vertices, so any test based on
+"a vertex lies inside" attributes a neighbour's parts to the wrong building. Overture
+needs no test at all, since its parts carry `building_id`.
+
+Parts replace the outline in 3D only when they cover at least **85%** of the footprint.
+Partial part coverage is common in OSM, and dropping the outline then makes most of the
+building disappear.
+
+## Selection
+
+Selection and the inspector are **live OSM only**, at z >= 16. The Overture overview is a
+snapshot that cannot be edited and whose fields are not OSM tags (`is_underground`,
+`has_parts`, `@geometry_source`), so clicking it below that zoom shows a hint instead of
+opening the panel.
+
 ## 3D context
 
 Buildings whose footprint falls within `NEIGHBOR_PADDING_M` (80 m) of the selected

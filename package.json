@@ -15,8 +15,9 @@
     "postinstall": "cp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs public/"
   },
   "dependencies": {
+    "@turf/area": "^7.4.0",
     "@turf/helpers": "^7.4.0",
-    "@turf/union": "^7.4.0",
+    "@turf/intersect": "^7.4.0",
     "maplibre-gl": "^6.4.1",
     "next": "16.0.0",
     "pmtiles": "^4.5.0",

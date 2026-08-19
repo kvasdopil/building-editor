@@ -11,7 +11,8 @@ Browse a map, click a building, inspect it in 3D.
   Coverage varies a lot by region: Amsterdam is ~88% green, Stockholm is ~69% blue with ~30% red.
 
 - **3D view**: selecting a building opens a side panel with a [Three.js](https://threejs.org/) extrusion of the building — independent zoom (scroll) and rotate (drag) via OrbitControls, flat ground disc. Adjacent buildings within 80 m are drawn in gray for context (capped at 60, nearest first); the camera frames the selected building only.
-- **Inspector**: below the 3D view the panel lists every tag on the selected feature, raw and alphabetized.
+- **Inspector**: below the 3D view the panel lists every OSM tag on the selected element, raw and alphabetized, with its id and version in the header.
+- **Selection is live OSM only** (z >= 16). Clicking the Overture overview below that zoom shows a hint rather than snapshot fields that are not OSM tags and cannot be edited.
 - **Photos**: toggle a satellite-imagery underlay (Esri World Imagery); with photos on, only building and part boundaries are drawn.
 
 ## Data sources
@@ -44,7 +45,7 @@ Sources are normalized onto shared property names (`src/lib/buildings.ts`), so o
 2. otherwise floor count × **3 m** for residential buildings (apartments etc.) or × **4 m** for everything else;
 3. minimum height, else minimum floor × the same per-floor height, lifts the base (parts hovering above ground render correctly).
 
-Buildings with parts are rendered from their parts; the outline is used only when no parts exist.
+A part is attributed to a building when at least 50% of its area falls inside that building's outline — adjacent OSM buildings share walls and vertices, so touching proves nothing. Parts replace the outline in 3D only when they cover at least 85% of the footprint; otherwise the outline is drawn too, since partial part coverage would otherwise make most of the building vanish.
 
 ## Implementation notes
 

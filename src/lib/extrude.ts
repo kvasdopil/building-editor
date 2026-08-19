@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { verticalExtent } from "./heights";
+import { partsCoverage } from "./parts";
 import type {
   BuildingElement,
   BuildingSelection,
@@ -14,6 +15,13 @@ const PART_COLORS = [0xd97757, 0x6a9bcc, 0x8fbf7f, 0xc4a25a, 0xa384c9, 0x5fb3a1]
 
 /** Adjacent buildings are drawn as flat gray context. */
 const NEIGHBOR_COLOR = 0xc3cbd4;
+
+/**
+ * Parts replace the outline only when they actually cover it. Partial part
+ * coverage is common in OSM, and dropping the outline then makes most of the
+ * building disappear from the view.
+ */
+const OUTLINE_REPLACED_ABOVE = 0.85;
 
 interface Projector {
   toLocal(point: LngLat): [number, number];
@@ -72,7 +80,11 @@ function extrudeElement(
   return group;
 }
 
-/** Extrude a building from its parts when it has any, else from its outline. */
+/**
+ * Extrude a building from its parts, falling back to the outline when it has
+ * none — or drawing the outline underneath when the parts leave most of the
+ * footprint uncovered.
+ */
 function extrudeBuildingWithParts(
   { building, parts }: BuildingWithParts,
   projector: Projector,
@@ -81,7 +93,8 @@ function extrudeBuildingWithParts(
 ): THREE.Group {
   const group = new THREE.Group();
   const subtype = building.properties.subtype;
-  const elements = parts.length > 0 ? parts : [building];
+  const covered = partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
+  const elements = covered ? parts : [building, ...parts];
   elements.forEach((element, index) => {
     group.add(extrudeElement(element, projector, subtype, colorFor(index), edgeOpacity));
   });
