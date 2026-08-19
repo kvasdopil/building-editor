@@ -1,0 +1,7 @@
+{
+  "threshold": 0,
+  "mode": "strict",
+  "reporters": ["console"],
+  "ignore": ["**/node_modules/**", "**/.next/**", "**/out/**", "**/dist/**", "**/.yarn/**"],
+  "pattern": "**/*.{ts,tsx,js,jsx,mjs,cjs}"
+}
