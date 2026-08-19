@@ -3,9 +3,11 @@
 import type { FeatureCollection } from "geojson";
 import { useEffect, useMemo, useState } from "react";
 import { Building3D } from "./Building3D";
+import { ExternalViews } from "./ExternalViews";
 import { type TagRow, TagRows } from "./TagRows";
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
 import { applyEdit, type EditsApi } from "@/lib/edits";
+import { boundsCenter, elementBounds } from "@/lib/geometry";
 import { verticalExtent } from "@/lib/heights";
 import { type Lod1Match, lod1TilesFor, matchLod1, suggestionsFor } from "@/lib/lod1";
 
@@ -159,9 +161,14 @@ export function BuildingPanel({
         </div>
       </header>
 
-      <div className="relative min-h-56 flex-1">
+      <div className="relative min-h-48 flex-1">
         <Building3D selection={edited} />
       </div>
+
+      <ExternalViews
+        center={boundsCenter(elementBounds(edited.building))}
+        height={verticalExtent(props).top}
+      />
 
       <p className="border-y border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
         {match ? (
@@ -181,7 +188,7 @@ export function BuildingPanel({
         )}
       </p>
 
-      <div className="max-h-[45%] overflow-y-auto">
+      <div className="max-h-[32%] min-h-24 overflow-y-auto">
         <TagRows
           rows={rows}
           onApply={(suggestion) =>

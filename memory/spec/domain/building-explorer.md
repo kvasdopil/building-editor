@@ -52,6 +52,14 @@ Parts replace the outline in 3D only when they cover at least **85%** of the foo
 Partial part coverage is common in OSM, and dropping the outline then makes most of the
 building disappear.
 
+## Third-party imagery
+
+The panel's third section frames Bing's `/maps/embed` endpoint (road and aerial; no API key) and
+links out to Bing 3D, Google tilted satellite and Street View. Framing the providers' 3D views is
+not possible: Bing's 3D URL answers `X-Frame-Options: DENY` and Google answers `SAMEORIGIN`, and
+Bing's embed endpoint offers no Birdseye or 3D style. The section is collapsible, since expanding
+it sends the building's coordinates and the user's IP to Microsoft.
+
 ## Finding an element
 
 The search box resolves `#way/<id>`, `way/<id>`, `w<id>`, `r<id>` and pasted openstreetmap.org

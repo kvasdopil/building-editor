@@ -12,6 +12,7 @@ Browse a map, click a building, inspect it in 3D.
   Coverage varies a lot by region: Amsterdam is ~88% green, Stockholm is ~69% blue with ~30% red.
 
 - **3D view**: selecting a building opens a side panel with a [Three.js](https://threejs.org/) extrusion of the building — independent zoom (scroll) and rotate (drag) via OrbitControls, flat ground disc. Adjacent buildings within 80 m are drawn in gray for context (capped at 60, nearest first); the camera frames the selected building only.
+- **Imagery**: a third panel section frames Bing aerial/road imagery of the selected building, with one-click links to Bing 3D, Google tilted satellite and Street View. Collapsing it stops the third-party request.
 - **Inspector**: below the 3D view the panel lists every OSM tag on the selected element, raw and alphabetized, with its id and version in the header.
 - **Selection is live OSM only** (z >= 16). Clicking the Overture overview below that zoom shows a hint rather than snapshot fields that are not OSM tags and cannot be edited.
 - **Photos**: toggle a satellite-imagery underlay (Esri World Imagery); with photos on, only building and part boundaries are drawn.
@@ -59,6 +60,12 @@ Selecting a building matches it against the LOD1 block with the greatest overlap
 Advice appears as a button on the row: green **+** when OSM has no value, amber **!** when OSM disagrees. Pressing it applies the value, which highlights, re-renders the 3D view immediately, and can be reverted per tag or per building. Pending edits live in IndexedDB, so a reload keeps them.
 
 LOD1 footprints are generalized, so coverage is reported both ways. When one LOD1 block spans several OSM buildings its heights describe the whole block, not the selected building — those suggestions are drawn muted and the panel says so.
+
+## Why third-party 3D is a link, not an iframe
+
+Measured 2026-08-19: `bing.com/maps?style=3d` answers `X-Frame-Options: DENY`, and `google.com/maps` answers `SAMEORIGIN` — including the old `output=embed` and `output=svembed` tricks, which no longer frame. `bing.com/maps/embed` does allow framing and needs no API key, but supports only road and aerial styles; Birdseye and 3D are not available there (requesting them yields two tile requests instead of fourteen and no oblique imagery).
+
+So the panel frames what can be framed and links out to the rest. Real photorealistic 3D in-app would mean Google's 3D Tiles with CesiumJS — an API key and a paid quota, not an iframe.
 
 ## Height rules
 
