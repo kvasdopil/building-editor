@@ -24,8 +24,8 @@ function overlapArea(a: BuildingElement, b: BuildingElement): number {
   }
 }
 
-/** Fraction of `part` that lies inside `building`, 0 when they only touch. */
-function overlapFraction(part: BuildingElement, building: BuildingElement): number {
+/** Fraction of `inner` that lies inside `outer`, 0 when they only touch. */
+export function overlapFraction(part: BuildingElement, building: BuildingElement): number {
   const partArea = area(elementFeature(part));
   if (partArea <= 0) return 0;
   return overlapArea(part, building) / partArea;

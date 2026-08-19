@@ -14,3 +14,4 @@ Related documents:
 
 - [0001 - Live OSM data for editing, Overture for overview](0001-live-osm-data-for-editing.md): Why editable geometry comes from the live OSM API while Overture stays a zoomed-out overview, with the staleness and node-identity evidence. Read this before changing a data source.
 - [0002 - All upstream OSM traffic goes through a cached, rate-limited proxy](0002-cached-rate-limited-osm-proxy.md): The mandatory caching and throttling policy that keeps the project from being banned. Read this before adding any upstream request.
+- [0003 - LOD1 is advice, never an import](0003-lod1-as-advice-not-import.md): Why Stockholm's laser-measured heights are offered as per-building suggestions a mapper accepts individually. Read this before adding another reference dataset.

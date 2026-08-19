@@ -76,7 +76,7 @@ function isTruthyTag(value: string | undefined): boolean {
 }
 
 /** Map OSM tags onto the shared normalized properties, keeping the raw tags. */
-function normalizeTags(tags: OsmTags, role: "building" | "part"): BuildingProperties {
+export function normalizeOsmTags(tags: OsmTags, role: "building" | "part"): BuildingProperties {
   const type = tags.building ?? tags["building:part"] ?? "yes";
   const properties: BuildingProperties = { role, tags };
 
@@ -163,7 +163,7 @@ function feature(
     id: `${osmType}/${element.id}`,
     geometry,
     properties: {
-      ...normalizeTags(tags, role),
+      ...normalizeOsmTags(tags, role),
       id: `${osmType}/${element.id}`,
       osm_type: osmType,
       osm_id: element.id,

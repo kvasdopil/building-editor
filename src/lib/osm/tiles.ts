@@ -19,7 +19,7 @@ export function tileKey({ z, x, y }: TileId): string {
   return `${z}/${x}/${y}`;
 }
 
-function tileForLngLat(lng: number, lat: number, z: number = OSM_TILE_ZOOM): TileId {
+export function tileForLngLat(lng: number, lat: number, z: number = OSM_TILE_ZOOM): TileId {
   const n = 2 ** z;
   const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
   const rad = (clampedLat * Math.PI) / 180;
@@ -40,7 +40,7 @@ export function tileBounds({ z, x, y }: TileId): Bounds {
   return [(x / n) * 360 - 180, tileLat(y + 1, z), ((x + 1) / n) * 360 - 180, tileLat(y, z)];
 }
 
-export function isValidTile({ z, x, y }: TileId): boolean {
+function isValidTile({ z, x, y }: TileId): boolean {
   if (z !== OSM_TILE_ZOOM) return false;
   const n = 2 ** z;
   return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < n && y < n;
@@ -70,4 +70,14 @@ export function tilesInBounds(bounds: Bounds, limit: number): TileId[] {
         (a.x - centerX) ** 2 + (a.y - centerY) ** 2 - ((b.x - centerX) ** 2 + (b.y - centerY) ** 2),
     )
     .slice(0, limit);
+}
+
+/** Parse a `[z]/[x]/[y]` route segment triple, or null when off-grid. */
+export function parseTileParams(params: { z: string; x: string; y: string }): TileId | null {
+  const tile: TileId = {
+    z: Number.parseInt(params.z, 10),
+    x: Number.parseInt(params.x, 10),
+    y: Number.parseInt(params.y, 10),
+  };
+  return isValidTile(tile) ? tile : null;
 }

@@ -27,10 +27,13 @@ export function Building3D({ selection }: { selection: BuildingSelection }) {
     // Frame the selected building; neighbors stay visible around it.
     const center = focus.getCenter(new THREE.Vector3());
     const size = focus.getSize(new THREE.Vector3());
-    const radius = Math.max(size.length() / 2, 10);
+    // Floor the framing distance and look down more steeply: a small building
+    // ringed by tall neighbours would otherwise start with the camera inside a
+    // neighbour's wall.
+    const radius = Math.max(size.length() / 2, 18);
 
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, radius * 40);
-    camera.position.set(center.x + radius * 1.8, center.y + radius * 1.4, center.z + radius * 1.8);
+    camera.position.set(center.x + radius * 1.8, center.y + radius * 2.0, center.z + radius * 1.8);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

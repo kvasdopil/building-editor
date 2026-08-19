@@ -37,6 +37,28 @@ Layers: IndexedDB in the browser, then an in-memory LRU and a disk store under `
 
 Measured on the Stockholm test area: 10 simultaneous requests for one tile produced 1 upstream call, and a full page reload produced none at all.
 
+## LOD1 advice
+
+Stockholm's **"SBK 3D-Byggnader (LOD1) generaliserade"** (from [the city's data portal](https://dataportalen.stockholm.se/dataportalen/GetMetaDataById?id=88d3b57c-a914-4922-97a6-a9a76b1e0175)) gives per-building ground, eaves, roof-median and ridge levels measured from airborne laser data. Import it into z16 tiles:
+
+```bash
+node scripts/import-lod1.mjs
+```
+
+That downloads the published shapefiles, reads the MultiPatch solids and their DBF heights, reprojects SWEREF99 18 00 (EPSG:3011) to WGS84, and writes `data/lod1/16/{x}/{y}.json` — 77,743 buildings for the whole city. The files are gitignored; regenerate them rather than committing them.
+
+Selecting a building matches it against the LOD1 block with the greatest overlap and offers:
+
+| tag               | from                                                            |
+| ----------------- | --------------------------------------------------------------- |
+| `height`          | ridge minus ground — what OSM's `height` means                  |
+| `roof:height`     | ridge minus eaves, skipped when implausible                     |
+| `building:levels` | estimated from the facade height at the building's level height |
+
+Advice appears as a button on the row: green **+** when OSM has no value, amber **!** when OSM disagrees. Pressing it applies the value, which highlights, re-renders the 3D view immediately, and can be reverted per tag or per building. Pending edits live in IndexedDB, so a reload keeps them.
+
+LOD1 footprints are generalized, so coverage is reported both ways. When one LOD1 block spans several OSM buildings its heights describe the whole block, not the selected building — those suggestions are drawn muted and the panel says so.
+
 ## Height rules
 
 Sources are normalized onto shared property names (`src/lib/buildings.ts`), so one implementation covers both. For OSM that means `height`, `building:levels`, `min_height` and `building:min_level`, with units like `40 ft` parsed. Then (see `src/lib/heights.ts`):

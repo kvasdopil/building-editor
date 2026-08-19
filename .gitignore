@@ -46,3 +46,6 @@ next-env.d.ts
 
 # cached upstream OSM tiles
 /.cache/
+
+# imported LOD1 tiles, regenerate with scripts/import-lod1.mjs
+/data/lod1/

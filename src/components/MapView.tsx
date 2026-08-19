@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
+import { useBuildingEdits } from "@/lib/edits";
 import type { BuildingSelection } from "@/lib/buildings";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
 import { selectFromOsm } from "@/lib/osm/select";
@@ -195,6 +196,7 @@ export function MapView() {
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const edits = useBuildingEdits();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -378,7 +380,7 @@ export function MapView() {
         </div>
       )}
 
-      <BuildingPanel selection={selection} onClose={() => setSelection(null)} />
+      <BuildingPanel selection={selection} edits={edits} onClose={() => setSelection(null)} />
     </div>
   );
 }

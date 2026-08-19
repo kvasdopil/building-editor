@@ -11,7 +11,8 @@ import {
 } from "@/lib/osm/cache";
 import { fetchUpstream, UpstreamUnavailableError } from "@/lib/osm/limiter";
 import { type OsmMapResponse, osmToBuildings } from "@/lib/osm/parse";
-import { isValidTile, type TileId, tileBounds } from "@/lib/osm/tiles";
+import { type TileId, tileBounds } from "@/lib/osm/tiles";
+import { tileRoute } from "@/lib/tile-route";
 
 /**
  * Serves buildings for one z16 tile, read from OpenStreetMap through the
@@ -47,21 +48,7 @@ function tileResponse(
   });
 }
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ z: string; x: string; y: string }> },
-) {
-  const { z, x, y } = await context.params;
-  const tile: TileId = {
-    z: Number.parseInt(z, 10),
-    x: Number.parseInt(x, 10),
-    y: Number.parseInt(y, 10),
-  };
-  // Refusing off-grid requests keeps the cache key space bounded.
-  if (!isValidTile(tile)) {
-    return NextResponse.json({ error: "Only z16 tiles are served" }, { status: 400 });
-  }
-
+export const GET = tileRoute(async (tile) => {
   const cached = await readCachedTile<FeatureCollection>(tile);
   if (cached && isFresh(cached)) return tileResponse(cached, "hit");
 
@@ -77,4 +64,4 @@ export async function GET(
       { status: 503, headers: { "retry-after": "60" } },
     );
   }
-}
+});

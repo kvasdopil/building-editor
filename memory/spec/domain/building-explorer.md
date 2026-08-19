@@ -52,6 +52,22 @@ Parts replace the outline in 3D only when they cover at least **85%** of the foo
 Partial part coverage is common in OSM, and dropping the outline then makes most of the
 building disappear.
 
+## LOD1 advice and local edits
+
+Stockholm LOD1 (see ADR 0003) is matched to the selected building by greatest area overlap,
+requiring at least 40% of the OSM footprint to be covered. Coverage is computed **both ways**:
+when the OSM building accounts for less than half the LOD1 block, the block is generalized over
+several buildings and its heights are not about this building — advice is then marked
+unreliable rather than hidden, because the mapper decides.
+
+Suggested tags: `height` (ridge minus ground), `roof:height` (ridge minus eaves, dropped when
+taller than half the building, which indicates a merged block), and `building:levels` estimated
+from the facade height at the building's own level height.
+
+Edits are local only: stored per OSM element in IndexedDB, applied over the source tags and
+re-normalized so the 3D view and height rules see them immediately, revertable per tag and per
+building. Nothing is uploaded yet.
+
 ## Selection
 
 Selection and the inspector are **live OSM only**, at z >= 16. The Overture overview is a

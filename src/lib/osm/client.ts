@@ -2,6 +2,7 @@
 
 import type { Feature, FeatureCollection } from "geojson";
 import type { Bounds } from "../geometry";
+import { idbGet, idbPut, TILE_STORE } from "../idb";
 import { type TileId, tileKey, tilesInBounds } from "./tiles";
 
 /**
@@ -19,52 +20,9 @@ const MAX_TILES_PER_VIEW = 12;
 
 const MAX_CONCURRENT_FETCHES = 2;
 
-const DB_NAME = "building-editor";
-const STORE = "osm-tiles";
-
 interface StoredTile {
   fetchedAt: number;
   data: FeatureCollection;
-}
-
-function openDatabase(): Promise<IDBDatabase | null> {
-  return new Promise((resolve) => {
-    if (typeof indexedDB === "undefined") return resolve(null);
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE);
-    };
-    request.onsuccess = () => resolve(request.result);
-    // Private browsing and blocked storage are fine; we just skip the cache.
-    request.onerror = () => resolve(null);
-  });
-}
-
-let databasePromise: Promise<IDBDatabase | null> | null = null;
-
-function database(): Promise<IDBDatabase | null> {
-  databasePromise ??= openDatabase();
-  return databasePromise;
-}
-
-async function readStored(key: string): Promise<StoredTile | null> {
-  const db = await database();
-  if (!db) return null;
-  return new Promise((resolve) => {
-    const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
-    request.onsuccess = () => resolve((request.result as StoredTile | undefined) ?? null);
-    request.onerror = () => resolve(null);
-  });
-}
-
-async function writeStored(key: string, entry: StoredTile): Promise<void> {
-  const db = await database();
-  if (!db) return;
-  await new Promise<void>((resolve) => {
-    const request = db.transaction(STORE, "readwrite").objectStore(STORE).put(entry, key);
-    request.onsuccess = () => resolve();
-    request.onerror = () => resolve();
-  });
 }
 
 export interface TileLoader {
@@ -138,7 +96,7 @@ export function createTileLoader(
       const data = (await response.json()) as FeatureCollection;
       absorb(data);
       loaded.add(key);
-      await writeStored(key, { fetchedAt: Date.now(), data });
+      await idbPut(TILE_STORE, key, { fetchedAt: Date.now(), data } satisfies StoredTile);
     } catch {
       failed++;
       claimed.delete(key);
@@ -152,7 +110,7 @@ export function createTileLoader(
         const key = tileKey(tile);
         if (claimed.has(key)) continue;
         claimed.add(key);
-        void readStored(key).then((stored) => {
+        void idbGet<StoredTile>(TILE_STORE, key).then((stored) => {
           if (stopped) return;
           if (stored && Date.now() - stored.fetchedAt < TILE_TTL_MS) {
             absorb(stored.data);
