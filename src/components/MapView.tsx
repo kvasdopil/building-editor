@@ -16,12 +16,14 @@ import {
   type StyleSpecification,
 } from "maplibre-gl";
 import { Protocol } from "pmtiles";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
+import { IdSearch } from "./IdSearch";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
 import { useBuildingEdits } from "@/lib/edits";
 import type { BuildingSelection } from "@/lib/buildings";
+import { elementBounds, toFootprints } from "@/lib/geometry";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
 import { selectFromOsm } from "@/lib/osm/select";
 import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
@@ -196,6 +198,9 @@ export function MapView() {
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [searchStatus, setSearchStatus] = useState<string | null>(null);
+  /** Element id to select as soon as its tile is loaded. */
+  const pendingSelectRef = useRef<string | null>(null);
   const edits = useBuildingEdits();
 
   useEffect(() => {
@@ -214,17 +219,19 @@ export function MapView() {
       center: [18.0686, 59.3293],
       zoom: 14,
       minZoom: 3,
+      // Bearing is allowed (rotate by right-drag, the compass, or shift+arrows);
+      // pitch stays locked, so buildings are still read from straight above.
       maxPitch: 0,
       pitch: 0,
-      dragRotate: false,
       pitchWithRotate: false,
       touchPitch: false,
       // Placed bottom-left below, where the detail panel cannot cover it.
       attributionControl: false,
     });
-    instance.touchZoomRotate.disableRotation();
-    instance.keyboard.disableRotation();
-    instance.addControl(new NavigationControl({ showCompass: false }), "top-left");
+    instance.addControl(
+      new NavigationControl({ showCompass: true, visualizePitch: false }),
+      "top-left",
+    );
     instance.addControl(new AttributionControl({ compact: true }), "bottom-left");
 
     const onZoom = () => {
@@ -242,6 +249,16 @@ export function MapView() {
       const source = instance.getSource<GeoJSONSource>("live");
       void source?.setData(features);
       setLoaderStatus(status);
+
+      // A search flies to the element first; select it once its tile arrives.
+      const wanted = pendingSelectRef.current;
+      if (!wanted) return;
+      const found = selectFromOsm(features, wanted);
+      if (found) {
+        pendingSelectRef.current = null;
+        setSelection(found);
+        setSearchStatus(null);
+      }
     });
     loaderRef.current = loader;
     instance.on("idle", () => {
@@ -288,6 +305,54 @@ export function MapView() {
     };
   }, []);
 
+  /**
+   * Look up an element by id, centre the map on it at edit zoom, and mark it for
+   * selection once the tile loader has its data.
+   */
+  const searchById = useCallback(async (ref: { type: "way" | "relation"; id: string }) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const target = `${ref.type}/${ref.id}`;
+    setSearchStatus(`Looking up ${target}…`);
+    try {
+      const response = await fetch(`/api/osm/element/${ref.type}/${ref.id}`);
+      if (!response.ok) {
+        setSearchStatus(`Could not load ${target}`);
+        return;
+      }
+      const collection = (await response.json()) as FeatureCollection;
+      const feature = collection.features.find((f) => f.properties?.id === target);
+      if (
+        !feature ||
+        (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon")
+      ) {
+        setSearchStatus(`${target} is not a building`);
+        return;
+      }
+      const [west, south, east, north] = elementBounds({
+        id: target,
+        properties: {},
+        polygons: toFootprints(feature.geometry),
+      });
+      pendingSelectRef.current = target;
+      setSearchStatus(`Centring on ${target}…`);
+      map.fitBounds(
+        [
+          [west, south],
+          [east, north],
+        ],
+        { padding: 120, maxZoom: 18, duration: 800 },
+      );
+      // fitBounds can land below edit zoom for a large building; the live layer
+      // only exists from LIVE_ZOOM up, so nothing would be selectable.
+      map.once("moveend", () => {
+        if (map.getZoom() < LIVE_ZOOM) map.easeTo({ zoom: LIVE_ZOOM, duration: 300 });
+      });
+    } catch {
+      setSearchStatus(`Could not load ${target}`);
+    }
+  }, []);
+
   // Clear the transient hint on its own, so it never sticks around.
   useEffect(() => {
     if (!notice) return;
@@ -323,6 +388,8 @@ export function MapView() {
   return (
     <div className="relative h-dvh w-full overflow-hidden">
       <div ref={containerRef} className="h-full w-full" />
+
+      <IdSearch onSearch={(ref) => void searchById(ref)} status={searchStatus} />
 
       <label
         className={`absolute top-3 z-30 flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 shadow-md select-none ${

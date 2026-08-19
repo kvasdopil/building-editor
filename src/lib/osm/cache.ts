@@ -1,7 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TileId } from "./tiles";
-import { tileKey } from "./tiles";
 
 /**
  * Two-layer server cache for parsed tiles: an in-memory LRU in front of a disk
@@ -55,8 +53,11 @@ export function cacheStats(): CacheStats {
   return { ...state.stats, memoryEntries: state.memory.size };
 }
 
-function diskPath(tile: TileId): string {
-  return path.join(CACHE_DIR, String(tile.z), String(tile.x), `${tile.y}.json`);
+/** Cache key: path segments, e.g. ["16", "36062", "19281"] or ["way", "123"]. */
+type CacheKey = string[];
+
+function diskPath(key: CacheKey): string {
+  return path.join(CACHE_DIR, ...key.slice(0, -1), `${key[key.length - 1]}.json`);
 }
 
 function touchMemory<T>(key: string, entry: CachedTile<T>): void {
@@ -70,9 +71,9 @@ function touchMemory<T>(key: string, entry: CachedTile<T>): void {
   }
 }
 
-export async function readCachedTile<T>(tile: TileId): Promise<CachedTile<T> | null> {
+export async function readCachedTile<T>(cacheKey: CacheKey): Promise<CachedTile<T> | null> {
   const state = cache();
-  const key = tileKey(tile);
+  const key = cacheKey.join("/");
 
   const hot = state.memory.get(key) as CachedTile<T> | undefined;
   if (hot) {
@@ -81,7 +82,7 @@ export async function readCachedTile<T>(tile: TileId): Promise<CachedTile<T> | n
     return hot;
   }
   try {
-    const raw = await readFile(diskPath(tile), "utf8");
+    const raw = await readFile(diskPath(cacheKey), "utf8");
     const entry = JSON.parse(raw) as CachedTile<T>;
     state.stats.diskHits++;
     touchMemory(key, entry);
@@ -92,12 +93,12 @@ export async function readCachedTile<T>(tile: TileId): Promise<CachedTile<T> | n
   }
 }
 
-export async function writeCachedTile<T>(tile: TileId, data: T): Promise<CachedTile<T>> {
+export async function writeCachedTile<T>(cacheKey: CacheKey, data: T): Promise<CachedTile<T>> {
   const state = cache();
   const entry: CachedTile<T> = { fetchedAt: Date.now(), data };
-  touchMemory(tileKey(tile), entry);
+  touchMemory(cacheKey.join("/"), entry);
 
-  const target = diskPath(tile);
+  const target = diskPath(cacheKey);
   await mkdir(path.dirname(target), { recursive: true });
   // Write then rename, so a crash mid-write cannot leave a torn cache file.
   const temporary = `${target}.${process.pid}.tmp`;
@@ -111,9 +112,9 @@ export async function writeCachedTile<T>(tile: TileId, data: T): Promise<CachedT
  * Run `load` for this tile, collapsing concurrent callers onto one execution so
  * a burst of viewport requests makes a single upstream call.
  */
-export async function singleFlight<T>(tile: TileId, load: () => Promise<T>): Promise<T> {
+export async function singleFlight<T>(cacheKey: CacheKey, load: () => Promise<T>): Promise<T> {
   const state = cache();
-  const key = tileKey(tile);
+  const key = cacheKey.join("/");
   const running = state.inFlight.get(key) as Promise<T> | undefined;
   if (running) {
     state.stats.coalesced++;

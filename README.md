@@ -2,7 +2,8 @@
 
 Browse a map, click a building, inspect it in 3D.
 
-- **Map**: [MapLibre GL](https://maplibre.org/) with OpenStreetMap raster tiles. Pan and zoom only (no tilt/bearing).
+- **Map**: [MapLibre GL](https://maplibre.org/) with OpenStreetMap raster tiles. Pan, zoom and rotate — right-drag, the compass, or shift+arrows change bearing; pitch stays locked at 0 so footprints are always read from straight above.
+- **Find by id**: the search box takes `#way/1794585`, `way/1794585`, `w1794585`, or a pasted openstreetmap.org URL. It looks the element up through the cached proxy, centres the map on it at edit zoom, and selects it once its tile arrives.
 - **Buildings**: [Overture Maps](https://overturemaps.org/) buildings theme, streamed straight from the official PMTiles release (`building` + `building_part` layers). Shown from zoom 10 and clickable, colored by the height data each feature carries:
   - 🟩 **green** — a measured `height`
   - 🟦 **blue** — no height, but a `num_floors` count we multiply into one

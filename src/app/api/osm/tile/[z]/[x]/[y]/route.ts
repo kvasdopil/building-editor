@@ -28,10 +28,10 @@ function upstreamUrl(tile: TileId): string {
   return `${OSM_API}/api/0.6/map.json?bbox=${bbox}`;
 }
 
-async function loadTile(tile: TileId): Promise<CachedTile<FeatureCollection>> {
+async function loadTile(tile: TileId, key: string[]): Promise<CachedTile<FeatureCollection>> {
   const body = await fetchUpstream(upstreamUrl(tile));
   const parsed = JSON.parse(body) as OsmMapResponse;
-  return writeCachedTile(tile, osmToBuildings(parsed));
+  return writeCachedTile(key, osmToBuildings(parsed));
 }
 
 function tileResponse(
@@ -49,11 +49,12 @@ function tileResponse(
 }
 
 export const GET = tileRoute(async (tile) => {
-  const cached = await readCachedTile<FeatureCollection>(tile);
+  const key = [String(tile.z), String(tile.x), String(tile.y)];
+  const cached = await readCachedTile<FeatureCollection>(key);
   if (cached && isFresh(cached)) return tileResponse(cached, "hit");
 
   try {
-    const entry = await singleFlight(tile, () => loadTile(tile));
+    const entry = await singleFlight(key, () => loadTile(tile, key));
     return tileResponse(entry, "miss");
   } catch (error) {
     // Stale data beats hammering an upstream that is refusing us.

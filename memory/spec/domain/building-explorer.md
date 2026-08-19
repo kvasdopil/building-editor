@@ -2,7 +2,7 @@
 
 ## WHAT
 
-A single-page map app: OpenStreetMap basemap (MapLibre, pan/zoom only, no tilt/bearing),
+A single-page map app: OpenStreetMap basemap (MapLibre; pan, zoom and bearing, pitch locked at 0),
 Overture buildings + parts rendered in contrast colors from zoom > 10, clickable.
 Selecting a building opens a right-side panel with an interactive 3D extrusion
 (zoom + rotate independent of the map, flat ground), with adjacent buildings
@@ -51,6 +51,14 @@ needs no test at all, since its parts carry `building_id`.
 Parts replace the outline in 3D only when they cover at least **85%** of the footprint.
 Partial part coverage is common in OSM, and dropping the outline then makes most of the
 building disappear.
+
+## Finding an element
+
+The search box resolves `#way/<id>`, `way/<id>`, `w<id>`, `r<id>` and pasted openstreetmap.org
+URLs through `/api/osm/element/<type>/<id>`, which goes through the same limiter and cache as
+tiles. The map fits the element's bounds, never below z16 (below that the live layer does not
+exist, so nothing would be selectable), and the element is selected as soon as the tile loader
+has its data. Nodes are rejected: they are never buildings.
 
 ## LOD1 advice and local edits
 
