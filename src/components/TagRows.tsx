@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type KeyboardEvent, type PointerEvent, useRef, useState } from "react";
 import { FiAlertCircle, FiEdit2, FiPlusCircle, FiXCircle } from "react-icons/fi";
+import { TbArrowsHorizontal } from "react-icons/tb";
 import type { Suggestion } from "@/lib/lod1";
+import { parseMeters } from "@/lib/osm/parse";
+import { ValueEditDialog } from "./ValueEditDialog";
 
 export const EDITABLE_DIMENSION_KEYS = [
   "building:levels",
   "height",
   "building:min_level",
   "min_height",
+  "roof:levels",
 ] as const;
 
 const EDITABLE_LABELS: Record<(typeof EDITABLE_DIMENSION_KEYS)[number], string> = {
@@ -16,6 +20,7 @@ const EDITABLE_LABELS: Record<(typeof EDITABLE_DIMENSION_KEYS)[number], string> 
   height: "height",
   "building:min_level": "min_levels",
   min_height: "min_height",
+  "roof:levels": "roof_levels",
 };
 
 function editableLabel(key: string): string | null {
@@ -80,11 +85,123 @@ function parseNumber(value: string): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+const HEIGHT_DRAG_STEP_M = 0.5;
+const HEIGHT_DRAG_STEP_PX = 8;
+
+function formatDraggedHeight(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+function snapDraggedHeight(value: number): number {
+  return Math.round(value / HEIGHT_DRAG_STEP_M) * HEIGHT_DRAG_STEP_M;
+}
+
+function HeightDragButton({
+  value,
+  edited,
+  minHeight,
+  onChange,
+  onReset,
+}: {
+  value: string;
+  edited: boolean;
+  minHeight?: string;
+  onChange: (value: string) => void;
+  onReset: () => void;
+}) {
+  const drag = useRef<{
+    pointerId: number;
+    startX: number;
+    startValue: number;
+    startRaw: string;
+    wasEdited: boolean;
+    steps: number;
+  } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const applySteps = (steps: number) => {
+    const current = drag.current;
+    if (!current || steps === current.steps) return;
+    current.steps = steps;
+    if (steps === 0) {
+      if (current.wasEdited) onChange(current.startRaw);
+      else onReset();
+      return;
+    }
+    const next = current.startValue + steps * HEIGHT_DRAG_STEP_M;
+    if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
+    onChange(formatDraggedHeight(next));
+  };
+
+  const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    drag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startValue: snapDraggedHeight(parseMeters(value) ?? 0),
+      startRaw: value,
+      wasEdited: edited,
+      steps: 0,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+
+  const onPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    event.preventDefault();
+    applySteps(Math.trunc((event.clientX - current.startX) / HEIGHT_DRAG_STEP_PX));
+  };
+
+  const finishDrag = (event: PointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    drag.current = null;
+    setDragging(false);
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+    const next = snapDraggedHeight(parseMeters(value) ?? 0) + direction * HEIGHT_DRAG_STEP_M;
+    if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
+    onChange(formatDraggedHeight(next));
+  };
+
+  return (
+    <button
+      type="button"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      onKeyDown={onKeyDown}
+      aria-label="Drag horizontally to change height"
+      title="Drag left or right to change height by 0.5 m"
+      className={`shrink-0 touch-none rounded p-0.5 transition-colors select-none ${
+        dragging
+          ? "cursor-ew-resize bg-violet-100 text-violet-700"
+          : "cursor-ew-resize text-slate-400 hover:bg-violet-50 hover:text-violet-700"
+      }`}
+    >
+      <TbArrowsHorizontal className="h-4 w-4" aria-hidden />
+    </button>
+  );
+}
+
 function editError(draft: EditDraft, rows: TagRow[]): string | null {
   const label = editableLabel(draft.key) ?? draft.key;
   const value = parseNumber(draft.value);
   if (value === undefined) return `${label} must be a number`;
-  const minimumCanBeZero = draft.key === "building:min_level" || draft.key === "min_height";
+  // A flat roof is `roof:levels=0`, and a part can start at ground level.
+  const minimumCanBeZero = ["building:min_level", "min_height", "roof:levels"].includes(draft.key);
   if (minimumCanBeZero ? value < 0 : value <= 0)
     return `${label} must be ${minimumCanBeZero ? "at least" : "greater than"} 0`;
 
@@ -129,17 +246,6 @@ export function TagRows({
     setEditing(null);
   };
 
-  useEffect(() => {
-    if (!editing) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setEditing(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editing]);
-
   return (
     <>
       <table className="w-full table-fixed text-xs">
@@ -152,7 +258,18 @@ export function TagRows({
                   scope="row"
                   className="w-2/5 px-4 py-1.5 text-left font-medium break-words text-slate-500"
                 >
-                  {row.key}
+                  <span className="flex items-center gap-1">
+                    {row.key === "height" && (
+                      <HeightDragButton
+                        value={row.value}
+                        edited={row.edited}
+                        minHeight={rows.find((candidate) => candidate.key === "min_height")?.value}
+                        onChange={(value) => onEdit(row.key, value)}
+                        onReset={() => onRevert(row.key)}
+                      />
+                    )}
+                    <span>{row.key}</span>
+                  </span>
                 </th>
                 <td className="px-4 py-1.5 break-words text-slate-900">
                   <span className="flex flex-wrap items-center gap-1.5">
@@ -221,70 +338,17 @@ export function TagRows({
       </table>
 
       {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <button
-            type="button"
-            aria-label="Cancel editing value"
-            onClick={() => setEditing(null)}
-            className="absolute inset-0 bg-slate-950/45"
-          />
-          <dialog
-            open
-            aria-modal="true"
-            aria-labelledby="edit-tag-title"
-            className="relative m-0 w-full max-w-sm rounded-xl border border-slate-200 bg-white p-0 shadow-2xl"
-          >
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                saveEditing();
-              }}
-            >
-              <div className="p-5">
-                <h3 id="edit-tag-title" className="text-lg font-semibold text-slate-900">
-                  Edit {editableLabel(editing.key)}
-                </h3>
-                <p className="mt-0.5 font-mono text-xs text-slate-500">{editing.key}</p>
-                <input
-                  autoFocus
-                  type="text"
-                  inputMode="decimal"
-                  value={editing.value}
-                  onFocus={(event) => event.currentTarget.select()}
-                  onChange={(event) =>
-                    setEditing((current) =>
-                      current ? { ...current, value: event.target.value } : current,
-                    )
-                  }
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    event.preventDefault();
-                    saveEditing();
-                  }}
-                  aria-invalid={Boolean(error)}
-                  className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2 text-base text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                />
-                {error && <p className="mt-1.5 text-xs text-rose-700">{error}</p>}
-              </div>
-              <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
-                <button
-                  type="button"
-                  onClick={() => setEditing(null)}
-                  className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={Boolean(error) || editing.value.trim() === editing.original.trim()}
-                  className="rounded-lg bg-violet-700 px-3.5 py-2 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
-                >
-                  Apply
-                </button>
-              </div>
-            </form>
-          </dialog>
-        </div>
+        <ValueEditDialog
+          title={`Edit ${editableLabel(editing.key)}`}
+          subtitle={editing.key}
+          value={editing.value}
+          onChange={(value) => setEditing((current) => (current ? { ...current, value } : current))}
+          error={error}
+          unchanged={editing.value.trim() === editing.original.trim()}
+          numeric
+          onCancel={() => setEditing(null)}
+          onApply={saveEditing}
+        />
       )}
     </>
   );

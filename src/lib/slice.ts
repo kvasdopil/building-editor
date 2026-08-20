@@ -34,6 +34,11 @@ interface Region {
   area: number;
 }
 
+interface PartShape {
+  element: BuildingElement;
+  polygon: Flatten.Polygon;
+}
+
 interface SliceAddition extends Region {
   tags: Record<string, string>;
 }
@@ -143,6 +148,14 @@ function partition(
   return [...polygonRegions(outside, projection), ...polygonRegions(inside, projection)];
 }
 
+/**
+ * A slice end may rest on any outer or interior ring of the building outline
+ * or an existing part: all are real boundaries of the region the polyline divides.
+ */
+function onAnyBoundary(point: Flatten.Point, polygons: Flatten.Polygon[]): boolean {
+  return polygons.some((polygon) => polygon.findEdgeByPoint(point) !== undefined);
+}
+
 function rawTags(properties: BuildingProperties): Record<string, string> {
   return properties.tags && typeof properties.tags === "object"
     ? { ...(properties.tags as Record<string, string>) }
@@ -166,9 +179,18 @@ function tagsForNewPart(properties: BuildingProperties): Record<string, string> 
 }
 
 /**
- * Partition a building and every existing part with one open boundary-to-boundary
- * polyline or one closed loop. The building outline remains unchanged; uncovered
- * regions become new generic parts, while split existing parts keep their tags.
+ * Divide a building with one path, in one of two modes.
+ *
+ * An **open polyline**, whose ends rest on the outline or on an existing part,
+ * partitions what it crosses: uncovered regions become new generic parts, split
+ * existing parts keep their tags, and the building outline is left alone.
+ *
+ * A **closed loop** only adds the region it encloses, and changes nothing else.
+ * Partitioning by it would also produce the complement — a ring around the loop —
+ * and a ring is a polygon with a hole, which OSM can express only as a
+ * multipolygon relation. Drawing a tower on a roof must not turn what is beneath
+ * it into one. The cost is that the rest of the outline then has no part, which
+ * the `outline-not-covered` check reports.
  */
 export function sliceBuilding(
   building: BuildingElement,
@@ -181,44 +203,76 @@ export function sliceBuilding(
   const buildingPolygon = geometryPolygon(elementGeometry(building), projection);
   if (!buildingPolygon.isValid()) return null;
 
-  const points = nodes.map((node) => projection.point(node));
+  const partShapes: PartShape[] = parts.map((element) => ({
+    element,
+    polygon: geometryPolygon(elementGeometry(element), projection),
+  }));
+
+  // A closed path has to wind counter-clockwise: Flatten reads a clockwise face
+  // as a hole, and then intersect and subtract both hand back the loop itself
+  // instead of the two sides of the cut, duplicating the region.
+  const points = (closed ? orientRing(nodes, "ccw") : nodes).map((node) => projection.point(node));
   const cuttingSegments = segments(points, closed);
   if (cuttingSegments.some((segment) => !buildingPolygon.contains(segment))) return null;
   if (!closed) {
-    if (!buildingPolygon.findEdgeByPoint(points[0])) return null;
-    if (!buildingPolygon.findEdgeByPoint(points[points.length - 1])) return null;
+    const boundaries = [buildingPolygon, ...partShapes.map((shape) => shape.polygon)];
+    if (!onAnyBoundary(points[0], boundaries)) return null;
+    if (!onAnyBoundary(points[points.length - 1], boundaries)) return null;
   } else {
     const loop = new Flatten.Polygon(points);
     if (!loop.isValid() || loop.area() < MIN_PART_AREA_M2 || !buildingPolygon.contains(loop))
       return null;
+
+    // A loop adds the region it encloses and changes nothing else. Partitioning
+    // the building by it would also yield the complement — a ring around the loop
+    // — and a ring is a polygon with a hole, which OSM can only express as a
+    // multipolygon relation. Drawing a tower on a roof should not turn what is
+    // underneath it into one.
+    try {
+      const additions = polygonRegions(loop, projection).map((region) => ({
+        ...region,
+        tags: tagsForNewPart(building.properties),
+      }));
+      return additions.length > 0 ? { replacements: {}, additions } : null;
+    } catch {
+      return null;
+    }
   }
 
   try {
+    // From here the path is an open polyline, which does divide what it crosses.
+    // It has to divide something: the outline, an existing part, or the area no
+    // part covers yet. A cut that ends on a part boundary leaves the outline
+    // whole, so the outline alone cannot decide this.
     const originalIslands = buildingPolygon.splitToIslands().length;
-    const buildingRegions = partition(buildingPolygon, cuttingSegments, closed, projection);
-    if (buildingRegions.length <= originalIslands) return null;
+    let divided =
+      partition(buildingPolygon, cuttingSegments, closed, projection).length > originalIslands;
 
     const replacements: Record<string, EditableGeometry> = {};
     const additions: SliceAddition[] = [];
     let uncovered = buildingPolygon.clone();
 
-    for (const part of parts) {
-      const partPolygon = geometryPolygon(elementGeometry(part), projection);
-      uncovered = Flatten.BooleanOperations.subtract(uncovered, partPolygon);
-      const regions = partition(partPolygon, cuttingSegments, closed, projection).sort(
+    for (const { element, polygon } of partShapes) {
+      uncovered = Flatten.BooleanOperations.subtract(uncovered, polygon);
+      const regions = partition(polygon, cuttingSegments, closed, projection).sort(
         (a, b) => b.area - a.area,
       );
       if (regions.length <= 1) continue;
-      replacements[part.id] = regions[0].geometry;
+      divided = true;
+      replacements[element.id] = regions[0].geometry;
       additions.push(
         ...regions
           .slice(1)
-          .map((region) => ({ ...region, tags: tagsForExistingPart(part.properties) })),
+          .map((region) => ({ ...region, tags: tagsForExistingPart(element.properties) })),
       );
     }
 
+    const uncoveredRegions = partition(uncovered, cuttingSegments, closed, projection);
+    if (uncoveredRegions.length > polygonRegions(uncovered, projection).length) divided = true;
+    if (!divided) return null;
+
     additions.push(
-      ...partition(uncovered, cuttingSegments, closed, projection).map((region) => ({
+      ...uncoveredRegions.map((region) => ({
         ...region,
         tags: tagsForNewPart(building.properties),
       })),

@@ -5,7 +5,15 @@ import intersect from "@turf/intersect";
 import union from "@turf/union";
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import type { BuildingElement, LngLat } from "../buildings";
-import { elementFeature, openRing, ringCenter } from "../geometry";
+import {
+  boundsOverlap,
+  closestPointOnSegment,
+  elementBounds,
+  elementFeature,
+  openRing,
+  padBounds,
+  ringCenter,
+} from "../geometry";
 import { ringIsSimple } from "../geometry-edits";
 import { levelHeight, verticalExtent } from "../heights";
 import { overlapFraction } from "../parts";
@@ -16,6 +24,7 @@ import {
   MAX_WAY_NODES,
 } from "./changeset";
 import { hasErrors, issue, type Issue, sortIssues } from "./issues";
+import { metersBetween } from "./precision";
 import { selectFromOsm } from "./select";
 
 /**
@@ -64,6 +73,13 @@ const MIN_PART_AREA_M2 = 1;
 /** A part is at ground level when its base is within this of zero. */
 const GROUND_BASE_M = 0.5;
 
+/**
+ * How close two part footprints must come to count as touching. A shared wall is
+ * usually shared nodes, but parts that merely abut are still one structure, and a
+ * node's worth of slack absorbs the grid.
+ */
+const PART_TOUCH_METERS = 0.05;
+
 /** Coverage gaps below both thresholds are rounding, not missing parts. */
 const COVERAGE_GAP_FRACTION = 0.02;
 const COVERAGE_GAP_M2 = 2;
@@ -79,12 +95,28 @@ export function isUsableComment(comment: string): boolean {
   return comment.trim().length >= COMMENT_MIN_LENGTH;
 }
 
+/**
+ * The comment's own findings, kept apart from `validateChangeset` because they are
+ * the only ones that change while somebody types. Folding them in would mean
+ * re-running boolean geometry over every part on each keystroke.
+ */
+export function commentIssues(comment: string): Issue[] {
+  return isUsableComment(comment)
+    ? []
+    : [
+        issue(
+          "error",
+          "changeset-comment-missing",
+          "A changeset needs a comment saying what changed and where the data came from.",
+          [],
+        ),
+      ];
+}
+
 interface ValidationInput {
   /** Features with the pending edits applied: what an upload would produce. */
   displayed: FeatureCollection;
   plan: ChangesetPlan;
-  /** The changeset comment the user typed. */
-  comment: string;
 }
 
 interface ValidationResult {
@@ -119,7 +151,7 @@ function safeIntersect(a: Polygonal, b: Polygonal): Polygonal | null {
 }
 
 /** Structural checks on the elements the changeset would write. */
-function checkPlan(plan: ChangesetPlan, comment: string): Issue[] {
+function checkPlan(plan: ChangesetPlan): Issue[] {
   const issues: Issue[] = [...plan.issues];
   const size = changesetSize(plan);
 
@@ -145,17 +177,6 @@ function checkPlan(plan: ChangesetPlan, comment: string): Issue[] {
       ),
     );
   }
-  if (!isUsableComment(comment)) {
-    issues.push(
-      issue(
-        "error",
-        "changeset-comment-missing",
-        "A changeset needs a comment saying what changed and where the data came from.",
-        [],
-      ),
-    );
-  }
-
   for (const way of plan.ways) {
     if (way.nodes.length > MAX_WAY_NODES) {
       issues.push(
@@ -409,6 +430,74 @@ function groundCoverageGap(
   };
 }
 
+/** Every ring of an element, as plain coordinate lists. */
+function ringsOf(element: BuildingElement): LngLat[][] {
+  return element.polygons.flatMap((footprint) => [footprint.outer, ...footprint.holes]);
+}
+
+/** Distance from a point to a segment, in meters. */
+function distanceToSegment(point: LngLat, start: LngLat, end: LngLat): number {
+  return metersBetween(point, closestPointOnSegment(point, start, end).closest);
+}
+
+/**
+ * Whether two parts are part of the same structure: they overlap, or a wall of one
+ * runs along a wall of the other. Testing vertices against segments rather than
+ * only shared nodes means parts that abut without being glued still count — the
+ * question here is whether the building holds together, not whether it is glued.
+ */
+function partsTouch(a: BuildingElement, b: BuildingElement): boolean {
+  if (!boundsOverlap(padBounds(elementBounds(a), PART_TOUCH_METERS), elementBounds(b)))
+    return false;
+  if (safeArea(safeIntersect(polygonal(a), polygonal(b))) > 0) return true;
+  const ringsA = ringsOf(a);
+  const ringsB = ringsOf(b);
+  for (const [from, to] of [
+    [ringsA, ringsB],
+    [ringsB, ringsA],
+  ] as const) {
+    for (const ring of from) {
+      for (const point of ring) {
+        for (const other of to) {
+          for (let i = 1; i < other.length; i++) {
+            if (distanceToSegment(point, other[i - 1], other[i]) <= PART_TOUCH_METERS) return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Parts that touch nothing else in the building. Simple 3D Buildings allows parts
+ * to "be disjunct, depending on the building", so this is a warning, not a rule:
+ * a wing across a courtyard is legitimately separate, while a part sitting on its
+ * own is more often one that was drawn in the wrong place.
+ */
+function disconnectedPartGroups(parts: BuildingElement[]): BuildingElement[][] {
+  if (parts.length < 2) return [];
+  const remaining = new Set(parts.keys());
+  const groups: BuildingElement[][] = [];
+  while (remaining.size > 0) {
+    const [seed] = remaining;
+    remaining.delete(seed);
+    const group = [seed];
+    // Breadth-first over "touches", so a chain of parts counts as one structure.
+    for (let head = 0; head < group.length; head++) {
+      // Deleting from a Set while iterating it only skips entries not yet reached,
+      // which is exactly what claiming a part into this group should do.
+      for (const candidate of remaining) {
+        if (!partsTouch(parts[group[head]], parts[candidate])) continue;
+        remaining.delete(candidate);
+        group.push(candidate);
+      }
+    }
+    groups.push(group.map((index) => parts[index]));
+  }
+  return groups.length > 1 ? groups : [];
+}
+
 /** Simple 3D Buildings checks across one building and its parts. */
 function checkBuilding(
   building: BuildingElement,
@@ -498,6 +587,21 @@ function checkBuilding(
     }
   }
 
+  for (const group of disconnectedPartGroups(parts)) {
+    // Name the smaller groups: with one big structure and one stray part, the
+    // stray is what the reviewer needs to look at.
+    if (group.length > parts.length / 2) continue;
+    issues.push(
+      issue(
+        "warning",
+        "disconnected-parts",
+        `${group.map((part) => part.id).join(", ")} ${group.length === 1 ? "touches" : "touch"} no other part of ${building.id}. Disjunct parts are allowed, so check this is deliberate rather than a part in the wrong place.`,
+        [...group.map((part) => part.id), building.id],
+        ringCenter(group[0].polygons[0].outer),
+      ),
+    );
+  }
+
   if (parts.length > 0) {
     const coverage = groundCoverageGap(building, parts);
     if (coverage && coverage.fraction > COVERAGE_GAP_FRACTION && coverage.gap > COVERAGE_GAP_M2) {
@@ -518,8 +622,8 @@ function checkBuilding(
 
 /** Run every pre-upload check over the plan and the geometry it would produce. */
 export function validateChangeset(input: ValidationInput): ValidationResult {
-  const { displayed, plan, comment } = input;
-  const issues = checkPlan(plan, comment);
+  const { displayed, plan } = input;
+  const issues = checkPlan(plan);
 
   const buildings = new Map<string, { building: BuildingElement; parts: BuildingElement[] }>();
   /** Elements this changeset writes: only their own defects are ours to block on. */

@@ -74,6 +74,30 @@ export function ringCenter(ring: LngLat[]): LngLat {
   return [lon / ring.length, lat / ring.length];
 }
 
+/**
+ * Where `point` falls on the segment: `at` is the unclamped parametric position,
+ * so 0 and 1 are the endpoints and anything outside that is past them, while
+ * `closest` is the nearest point on the segment itself. Longitude is scaled by
+ * latitude, so "nearest" means nearest on the ground rather than in degrees.
+ */
+export function closestPointOnSegment(
+  point: LngLat,
+  start: LngLat,
+  end: LngLat,
+): { at: number; closest: LngLat } {
+  const cosLat = Math.cos((point[1] * Math.PI) / 180);
+  const dx = (end[0] - start[0]) * cosLat;
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return { at: 0, closest: start };
+  const at = ((point[0] - start[0]) * cosLat * dx + (point[1] - start[1]) * dy) / lengthSquared;
+  const clamped = Math.max(0, Math.min(1, at));
+  return {
+    at,
+    closest: [start[0] + clamped * (end[0] - start[0]), start[1] + clamped * (end[1] - start[1])],
+  };
+}
+
 function cross(a: LngLat, b: LngLat, c: LngLat): number {
   return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }

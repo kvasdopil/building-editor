@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FiAlertTriangle,
   FiCheckCircle,
@@ -23,7 +23,13 @@ import {
   toOsmChangeXml,
 } from "@/lib/osm/changeset";
 import type { Issue } from "@/lib/osm/issues";
-import { COMMENT_MIN_LENGTH, isUsableComment, validateChangeset } from "@/lib/osm/validate";
+import { sortIssues } from "@/lib/osm/issues";
+import {
+  COMMENT_MIN_LENGTH,
+  commentIssues,
+  isUsableComment,
+  validateChangeset,
+} from "@/lib/osm/validate";
 import type { UploadResult } from "@/lib/osm/upload";
 import { type OsmAuth, useOsmAuth } from "@/lib/osm/use-osm-auth";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -38,6 +44,13 @@ import type { FeatureCollection } from "geojson";
  * to is shown here. Sending it is not (FT-06) and is meant to run against the OSM
  * development API first, so the Upload action stays inert on purpose.
  */
+
+/**
+ * The two datasets this editor derives heights from — the national laser point
+ * cloud (ADR 0005) and Stockholm LOD1 (ADR 0003) — so `source` starts out saying
+ * where the numbers came from. It stays editable, and typing over it sticks.
+ */
+const DEFAULT_SOURCE = "Lantmateriet Laserdata, skog; Stockholm LOD1";
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -271,7 +284,7 @@ export function SubmitDialog({
 }) {
   const auth = useOsmAuth();
   const [comment, setComment] = useState("");
-  const [source, setSource] = useState("");
+  const [source, setSource] = useState(DEFAULT_SOURCE);
   const [showXml, setShowXml] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -280,11 +293,28 @@ export function SubmitDialog({
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const plan = useMemo(() => (open ? buildChangeset(input) : null), [input, open]);
+  // Deliberately independent of the comment: this walks every part of every
+  // touched building through boolean geometry, and running it on each keystroke
+  // made the comment field crawl.
   const validation = useMemo(
-    () => (plan ? validateChangeset({ displayed, plan, comment }) : null),
-    [comment, displayed, plan],
+    () => (plan ? validateChangeset({ displayed, plan }) : null),
+    [displayed, plan],
   );
+  const issues = useMemo(
+    () => sortIssues([...commentIssues(comment), ...(validation?.issues ?? [])]),
+    [comment, validation],
+  );
+  const xml = useMemo(() => (plan ? toOsmChangeXml(plan) : ""), [plan]);
+  // Stable, so the memoised element rows below are not rebuilt on every keystroke.
+  const navigate = useCallback((entity: string) => onNavigate(entity.split("#")[0]), [onNavigate]);
   const suggestion = useMemo(() => (plan ? suggestComment(plan) : ""), [plan]);
+  const entryRows = useMemo(
+    () =>
+      plan?.entries.map((entry) => (
+        <EntryRow key={entry.ref} entry={entry} onNavigate={navigate} />
+      )) ?? null,
+    [navigate, plan],
+  );
 
   // A previous result must not survive into the next review: the dialog stays
   // mounted after it is closed, so without this it would keep offering "Done" for
@@ -308,10 +338,9 @@ export function SubmitDialog({
   if (!open || !plan || !validation) return null;
 
   const commentOk = isUsableComment(comment);
-  const xml = toOsmChangeXml(plan);
   const changesetXml = toChangesetXml(changesetTags({ comment, source }));
-  const errors = validation.issues.filter((found) => found.level === "error");
-  const warnings = validation.issues.filter((found) => found.level === "warning");
+  const errors = issues.filter((found) => found.level === "error");
+  const warnings = issues.filter((found) => found.level === "warning");
   const createdWays = plan.ways.filter((way) => way.action === "create").length;
   const modifiedWays = plan.ways.filter((way) => way.action === "modify").length;
   const createdRelations = plan.relations.filter((r) => r.action === "create").length;
@@ -329,8 +358,6 @@ export function SubmitDialog({
   const readyMessage = auth.production
     ? `Uploads to ${auth.host} are public and attributed to ${auth.user?.name ?? "this account"}.`
     : `Uploading to ${auth.host}.`;
-
-  const navigate = (entity: string) => onNavigate(entity.split("#")[0]);
 
   const copyXml = () => {
     void navigator.clipboard?.writeText(xml).then(() => {
@@ -521,7 +548,7 @@ export function SubmitDialog({
               <h3 className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
                 Checks
               </h3>
-              {validation.issues.length === 0 ? (
+              {issues.length === 0 ? (
                 <p className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs text-emerald-900">
                   <FiCheckCircle className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
                   Every check passed.
@@ -566,11 +593,7 @@ export function SubmitDialog({
                   .filter(Boolean)
                   .join(" · ")}
               </p>
-              <ul className="space-y-2">
-                {plan.entries.map((entry) => (
-                  <EntryRow key={entry.ref} entry={entry} onNavigate={navigate} />
-                ))}
-              </ul>
+              <ul className="space-y-2">{entryRows}</ul>
             </section>
 
             <section className="space-y-2">

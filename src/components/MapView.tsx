@@ -32,7 +32,7 @@ import {
   usePendingGeometry,
 } from "@/lib/edits";
 import type { BuildingElement, BuildingSelection, LngLat } from "@/lib/buildings";
-import { pointInRing, elementBounds, toFootprints } from "@/lib/geometry";
+import { pointInRing, elementBounds, openRing, padBounds, toFootprints } from "@/lib/geometry";
 import { useSelectionHash } from "@/lib/use-selection-hash";
 import {
   applyGeometryEdits,
@@ -225,26 +225,23 @@ function nearestBuildingBoundary(
   let nearestEdge: BoundarySnap | null = null;
   const nodeTolerance = Math.min(tolerance, 9);
   for (const id of new Set(candidateIds)) {
-    const building = selectFromOsm(collection, id)?.building;
-    if (!building) continue;
-    for (const footprint of building.polygons) {
-      const vertices = footprint.outer.slice(
-        0,
-        footprint.outer.length > 1 &&
-          footprint.outer[0][0] === footprint.outer.at(-1)?.[0] &&
-          footprint.outer[0][1] === footprint.outer.at(-1)?.[1]
-          ? -1
-          : undefined,
-      );
-      for (const coordinates of vertices) {
+    const selection = selectFromOsm(collection, id);
+    if (!selection) continue;
+    // Every ring is a real boundary of the solid it encloses: slices may end on
+    // an internal hole or an existing part just as they do on the outer outline.
+    const rings = [selection.building, ...selection.parts].flatMap((element) =>
+      element.polygons.flatMap((footprint) => [footprint.outer, ...footprint.holes]),
+    );
+    for (const ring of rings) {
+      for (const coordinates of openRing(ring)) {
         const projected = map.project(coordinates);
         const distance = Math.hypot(click.x - projected.x, click.y - projected.y);
         if (distance > nodeTolerance || (nearestNode && distance >= nearestNode.distance)) continue;
         nearestNode = { targetId: id, coordinates, distance, kind: "node" };
       }
-      for (let index = 1; index < footprint.outer.length; index++) {
-        const start = footprint.outer[index - 1];
-        const end = footprint.outer[index];
+      for (let index = 1; index < ring.length; index++) {
+        const start = ring[index - 1];
+        const end = ring[index];
         const projectedStart = map.project(start);
         const projectedEnd = map.project(end);
         const dx = projectedEnd.x - projectedStart.x;
@@ -958,7 +955,29 @@ export function MapView() {
    * upload replaced.
    */
   const onUploaded = useCallback(() => {
-    const map = mapRef.current;
+    // Which tiles to refetch is decided from the elements that were just written,
+    // while they are still known. The viewport is the wrong question: it can be
+    // zoomed out over hundreds of tiles, and the per-viewport cap would then keep
+    // the ones nearest its centre rather than the ones that changed.
+    const uploaded = new Set([
+      ...Object.keys(editsRef.current),
+      ...Object.keys(geometryEditsRef.current),
+      ...Object.keys(createdPartsRef.current),
+    ]);
+    const areas = displayedFeaturesRef.current.features
+      .filter((feature) => uploaded.has(String(feature.properties?.id)))
+      .filter(
+        (feature) =>
+          feature.geometry.type === "Polygon" || feature.geometry.type === "MultiPolygon",
+      )
+      .map((feature) =>
+        elementBounds({
+          id: "",
+          properties: {},
+          polygons: toFootprints(feature.geometry as Polygon),
+        }),
+      );
+
     edits.revertAll();
     editsRef.current = {};
     geometryEditsRef.current = {};
@@ -967,14 +986,10 @@ export function MapView() {
     setCreatedParts({});
     refreshDisplayedFeatures({}, {});
     setSelection(null);
-    if (!map) return;
-    const bounds = map.getBounds();
-    loaderRef.current?.refresh([
-      bounds.getWest(),
-      bounds.getSouth(),
-      bounds.getEast(),
-      bounds.getNorth(),
-    ]);
+
+    // Per element rather than one enclosing box: two edits far apart would
+    // otherwise ask for every tile between them.
+    for (const area of areas) loaderRef.current?.refresh(padBounds(area, 30));
   }, [edits, refreshDisplayedFeatures]);
 
   const revertAllChanges = useCallback(() => {
@@ -988,6 +1003,103 @@ export function MapView() {
     const displayed = refreshDisplayedFeatures({}, {});
     setSelection(selectedId ? selectFromOsm(displayed, selectedId) : null);
   }, [edits, refreshDisplayedFeatures, selection]);
+
+  /**
+   * Discard everything pending on one entity: its tag overrides, its footprint
+   * override, and the part itself when it was drawn here. A part drawn in this
+   * session exists only as a pending change, so dropping the change deletes it —
+   * along with its tag overrides, which would otherwise describe nothing.
+   */
+  const revertEntity = useCallback(
+    (entity: string) => {
+      const selectedId = selection?.selected.id;
+      edits.revertBuilding(entity);
+      const nextCreatedParts: CreatedPartMap = Object.fromEntries(
+        Object.entries(createdPartsRef.current).filter(([id]) => id !== entity),
+      );
+      const nextGeometryEdits: GeometryEditMap = Object.fromEntries(
+        Object.entries(geometryEditsRef.current).filter(([id]) => id !== entity),
+      );
+      geometryEditsRef.current = nextGeometryEdits;
+      createdPartsRef.current = nextCreatedParts;
+      setGeometryEdits(nextGeometryEdits);
+      setCreatedParts(nextCreatedParts);
+      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      setSelection(selectedId ? selectFromOsm(displayed, selectedId) : null);
+    },
+    [edits, refreshDisplayedFeatures, selection],
+  );
+
+  /**
+   * Rewrite the tags of a part drawn in this session, and re-render from them.
+   * Its tags live on the feature itself rather than in the override store,
+   * because the element they would override does not exist upstream yet.
+   */
+  const updateDrawnPartTags = useCallback(
+    (entity: string, tags: Record<string, string>) => {
+      const part = createdPartsRef.current[entity];
+      if (!part) return;
+      const nextCreatedParts: CreatedPartMap = {
+        ...createdPartsRef.current,
+        [entity]: createPartFeature(entity, String(part.properties.parent_id), part.geometry, tags),
+      };
+      createdPartsRef.current = nextCreatedParts;
+      setCreatedParts(nextCreatedParts);
+      const displayed = refreshDisplayedFeatures(geometryEditsRef.current, nextCreatedParts);
+      const selectedId = selection?.selected.id;
+      if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+    },
+    [refreshDisplayedFeatures, selection],
+  );
+
+  /**
+   * Drop one pending property. What that means depends on where the property came
+   * from: an override goes back to what OSM has, a drawn part's tag is simply
+   * unset, and a footprint override is discarded.
+   */
+  const removeProperty = useCallback(
+    (entity: string, property: string) => {
+      const drawn = createdPartsRef.current[entity];
+      if (drawn && property !== "geometry") {
+        const tags = { ...((drawn.properties.tags ?? {}) as Record<string, string>) };
+        delete tags[property];
+        // A manual override on the same key would otherwise put it straight back.
+        edits.revertTag(entity, property);
+        updateDrawnPartTags(entity, tags);
+        return;
+      }
+      if (property === "geometry") {
+        const nextGeometryEdits: GeometryEditMap = Object.fromEntries(
+          Object.entries(geometryEditsRef.current).filter(([id]) => id !== entity),
+        );
+        geometryEditsRef.current = nextGeometryEdits;
+        setGeometryEdits(nextGeometryEdits);
+        const displayed = refreshDisplayedFeatures(nextGeometryEdits, createdPartsRef.current);
+        const selectedId = selection?.selected.id;
+        if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+        return;
+      }
+      edits.revertTag(entity, property);
+    },
+    [edits, refreshDisplayedFeatures, selection, updateDrawnPartTags],
+  );
+
+  /** Change what one pending property will be written as. */
+  const editProperty = useCallback(
+    (entity: string, property: string, value: string) => {
+      const drawn = createdPartsRef.current[entity];
+      if (drawn) {
+        updateDrawnPartTags(entity, {
+          ...((drawn.properties.tags ?? {}) as Record<string, string>),
+          [property]: value,
+        });
+        return;
+      }
+      // Keep the first-seen original, so reverting still restores what OSM has.
+      edits.setTag(entity, property, value, edits.edits[entity]?.original[property]);
+    },
+    [edits, updateDrawnPartTags],
+  );
 
   const finishHoleDrawing = useCallback(() => {
     const map = mapRef.current;
@@ -1058,7 +1170,7 @@ export function MapView() {
       setNotice(
         mode === "loop"
           ? "The loop must be simple and fully inside the building"
-          : "The polyline must stay inside and end on another boundary",
+          : "The polyline must stay inside, end on a boundary, and divide something",
       );
       return;
     }
@@ -1115,7 +1227,7 @@ export function MapView() {
     setChangesOpen(false);
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(true);
-    setNotice("Start on a boundary for an open slice, or inside for a closed loop");
+    setNotice("Start on an outline or part edge for an open slice, or inside for a loop");
   }, [cancelHoleDrawing, cancelSliceDrawing, updateSliceDraft]);
 
   useEffect(() => {
@@ -1229,7 +1341,7 @@ export function MapView() {
             nodes: [snap.coordinates],
             snap: null,
           });
-          setNotice("Add bends, then click another point on the boundary");
+          setNotice("Add bends, then click another outline, hole, or part edge");
           return;
         }
         const hit = map.queryRenderedFeatures(event.point, { layers: ["live-building-fill"] })[0];
@@ -1292,7 +1404,7 @@ export function MapView() {
       } else if (event.key === "Enter") {
         event.preventDefault();
         if (sliceDraftRef.current.mode === "loop") finishSliceDrawing();
-        else setNotice("Finish an open slice by clicking the building boundary");
+        else setNotice("Finish an open slice by clicking an outline, hole, or part edge");
       }
     };
 
@@ -1530,6 +1642,9 @@ export function MapView() {
         createdParts={createdParts}
         onClose={() => setChangesOpen(false)}
         onNavigate={navigateToEditedEntity}
+        onRevertEntity={revertEntity}
+        onRemoveProperty={removeProperty}
+        onEditProperty={editProperty}
         onRevertAll={revertAllChanges}
         onSubmit={() => setSubmitOpen(true)}
       />

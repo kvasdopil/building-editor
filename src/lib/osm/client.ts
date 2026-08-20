@@ -20,6 +20,13 @@ const MAX_TILES_PER_VIEW = 12;
 
 const MAX_CONCURRENT_FETCHES = 2;
 
+/**
+ * Tiles a single refresh may refetch. Higher than the per-viewport cap because a
+ * refresh is asked for by element, not by viewport: dropping one of those tiles
+ * would leave the map showing data the upload has already replaced.
+ */
+const MAX_REFRESH_TILES = 24;
+
 interface StoredTile {
   fetchedAt: number;
   data: FeatureCollection;
@@ -133,7 +140,7 @@ export function createTileLoader(
     },
     refresh(bounds) {
       if (stopped) return;
-      for (const tile of tilesInBounds(bounds, MAX_TILES_PER_VIEW)) {
+      for (const tile of tilesInBounds(bounds, MAX_REFRESH_TILES)) {
         const key = tileKey(tile);
         if (queue.some((queued) => queued.fresh && tileKey(queued.tile) === key)) continue;
         // Drop every trace of the old tile: the browser copy, and the record that

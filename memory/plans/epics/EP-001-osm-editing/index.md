@@ -115,6 +115,23 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   off by one, see the worked example in the domain spec), parts overflowing their outline, and
   parts leaving the footprint mostly uncovered. Acceptance: way/111680989's two floating parts
   are flagged with the suggested `building:min_level` value.
+- **FT-10 fix (2026-08-20).** Typing in the changeset comment re-ran every check, because the comment
+  was a dependency of the memo that walks each part through boolean geometry: 12 ms per keystroke on a
+  nine-part building before rendering, and worse on a real changeset. The comment rule now stands on
+  its own (`commentIssues`) and the geometry pass runs once when the dialog opens; the element list is
+  memoised too, since it cannot change while the comment does. Measured in the app on a 70-element
+  changeset: median 2.4 ms per keystroke, down from a per-keystroke validation of 12 ms plus rendering.
+  Numbers are from a development build, where React renders twice.
+
+- **Slice change (2026-08-20).** A closed loop used to partition the building into the loop interior
+  _and its complement_, so drawing a tower inside a footprint produced a ring-shaped part alongside it
+  — and a ring is a polygon with a hole, uploaded as a `type=multipolygon` relation. Four of them
+  landed that way in changeset 187728645. A loop now adds only the region it encloses and changes
+  nothing else: verified on way/16108358, where a loop yields 1 addition, 0 replacements, 1 new way,
+  0 relations, and `outline-not-covered` correctly warns that the rest of the outline now has no part.
+  Open polylines are unaffected — the sweep over two tiles still shows 110 slices and 89 holes with
+  zero structural failures and 2.00 new nodes per slice.
+
 - **FT-07 Production switch.** Only after FT-06 is proven on the dev API. Note that **sign-in** was
   pointed at production early (2026-08-19), because the OAuth application was registered there and the
   two installations do not share registries; that is safe only while nothing writes. FT-06 therefore

@@ -22,6 +22,7 @@
     "@turf/helpers": "^7.4.0",
     "@turf/intersect": "^7.4.0",
     "@turf/union": "^7.4.0",
+    "copc": "^0.0.9",
     "maplibre-gl": "^6.4.1",
     "next": "16.0.0",
     "pmtiles": "^4.5.0",

@@ -1,29 +1,41 @@
 import type { BuildingElement } from "./buildings";
 import { type Bounds, elementBounds, padBounds } from "./geometry";
+import { type RawTile, classOf, decodeTile } from "./lidar-format";
 import { type TileId, tileBounds, tilesForBounds } from "./osm/tiles";
 
 /**
- * Stockholm's airborne laser point cloud, read from the tiles produced by
- * scripts/import-lidar.mjs.
+ * Airborne laser point clouds for the selected building, from two sources that
+ * speak the same tile format (see `lidar-format.ts`):
  *
- * The cloud is raw measurement, not a model: it is the same laser data the LOD1
- * heights were derived from, before generalization into one block per terrace.
- * Heights arrive in RH2000, the same vertical datum as LOD1's own levels, so a
- * ground reference has to be subtracted before they mean anything in a scene
- * whose buildings start at zero.
+ * - `/api/lidar` — Stockholm's own 2023 scan at 25 points/m², imported to disk
+ *   by scripts/import-lidar.mjs. Dense and colour from the orthophoto, but only
+ *   where the city's data has been imported.
+ * - `/api/skog` — Lantmäteriet's national "Laserdata Skog" at 1.4 points/m²,
+ *   read on demand from upstream COPC files. Sparser and without colour, but
+ *   covering the whole country.
+ *
+ * Both sources are read where available. Dense Stockholm points suppress
+ * overlapping Skog points spatially, rather than suppressing a whole tile — a
+ * city scan can end halfway through a z16 tile. Heights stay as survey levels
+ * here; the 3D overlay aligns each survey to Mapterhorn terrain separately.
  */
-
-/** Bytes before the first coordinate array; see the importer for the layout. */
-const HEADER_BYTES = 16;
 
 /** LAS classification for ground returns, used to find the ground level. */
 const GROUND_CLASS = 2;
+
+const METERS_PER_DEG_LAT = 111320;
 
 /**
  * How far past the building the cloud is kept. The 3D view draws neighbors
  * within 80 m, and points beyond them are only download and draw cost.
  */
 const CLOUD_PADDING_M = 100;
+
+/** Resolution of the dense survey's spatial coverage mask. */
+const DENSE_PRIORITY_CELL_M = 1;
+
+/** Which survey a cloud's points came from. Both can appear at a tile border. */
+export type LidarSource = "Stockholm 2023" | "Laserdata Skog" | "both surveys";
 
 /** Points of a laser cloud in lon/lat plus RH2000 height, parallel arrays. */
 export interface LidarCloud {
@@ -36,12 +48,23 @@ export interface LidarCloud {
   colours: Float32Array;
   /** LAS classification per point. */
   classes: Uint8Array;
+  /** 0 for Stockholm 2023, 1 for Laserdata Skog. */
+  surveys: Uint8Array;
   /**
-   * RH2000 level of the ground under the building: the median of the ground
-   * returns nearby, or the lowest point of any class when the roof hides the
-   * ground completely.
+   * Legacy flat-scene fallback: median nearby ground-return level, or the
+   * lowest point when no ground is visible. Mapterhorn replaces this as soon as
+   * terrain is available and remains the source of truth.
    */
   groundZ: number;
+  /**
+   * Typical distance between neighbouring points, meters. The two sources
+   * differ by a factor of four in spacing, so the 3D view sizes its dots from
+   * this instead of a constant: dots the size of the spacing read as a surface,
+   * while city-sized dots on national data read as a faint dusting.
+   */
+  spacing: number;
+  /** The survey behind these points, for the inspector to name. */
+  source: LidarSource;
 }
 
 /** z16 tiles the cloud is read from for one building, padded for context. */
@@ -51,42 +74,6 @@ function lidarTilesFor(building: BuildingElement): TileId[] {
 
 function cloudBounds(building: BuildingElement): Bounds {
   return padBounds(elementBounds(building), CLOUD_PADDING_M);
-}
-
-interface RawTile {
-  count: number;
-  zBase: number;
-  x: Uint16Array;
-  y: Uint16Array;
-  z: Uint16Array;
-  colour: Uint16Array;
-  classes: Uint8Array;
-}
-
-/** Read one tile's planar arrays in place, or null when it is not a tile file. */
-function readTile(buffer: ArrayBuffer): RawTile | null {
-  if (buffer.byteLength < HEADER_BYTES) return null;
-  const header = new DataView(buffer);
-  const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 4));
-  if (magic !== "LDR1") return null;
-  const count = header.getUint32(4, true);
-  if (buffer.byteLength < HEADER_BYTES + count * 9) return null;
-
-  let at = HEADER_BYTES;
-  const take = () => {
-    const array = new Uint16Array(buffer, at, count);
-    at += count * 2;
-    return array;
-  };
-  return {
-    count,
-    zBase: header.getFloat32(8, true),
-    x: take(),
-    y: take(),
-    z: take(),
-    colour: take(),
-    classes: new Uint8Array(buffer, at, count),
-  };
 }
 
 /**
@@ -114,17 +101,39 @@ function median(values: number[]): number {
  * z16 tile is ~300 m across and holds far more of the city than one building's
  * 3D view ever shows.
  */
-function mergeTiles(tiles: { tile: TileId; raw: RawTile }[], bounds: Bounds): LidarCloud | null {
+function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | null {
   const [west, south, east, north] = bounds;
+  const cosLat = Math.cos((((south + north) / 2) * Math.PI) / 180);
+  const area = (east - west) * METERS_PER_DEG_LAT * cosLat * ((north - south) * METERS_PER_DEG_LAT);
   const lon: number[] = [];
   const lat: number[] = [];
   const height: number[] = [];
   const packed: number[] = [];
   const classes: number[] = [];
+  const surveys: number[] = [];
   const groundLevels: number[] = [];
+  const sources = new Set<LidarSource>();
+  const denseCells = new Set<string>();
   let lowest = Infinity;
 
-  for (const { tile, raw } of tiles) {
+  const cellFor = (pointLon: number, pointLat: number): [number, number] => [
+    Math.floor(((pointLon - west) * METERS_PER_DEG_LAT * cosLat) / DENSE_PRIORITY_CELL_M),
+    Math.floor(((pointLat - south) * METERS_PER_DEG_LAT) / DENSE_PRIORITY_CELL_M),
+  ];
+  const nearDensePoint = (cellX: number, cellY: number) => {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (denseCells.has(`${cellX + dx}/${cellY + dy}`)) return true;
+      }
+    }
+    return false;
+  };
+
+  // Dense data is visited first so it can establish the spatial priority mask.
+  const ordered = [...tiles].sort(
+    (a, b) => Number(a.source !== "Stockholm 2023") - Number(b.source !== "Stockholm 2023"),
+  );
+  for (const { tile, raw, source } of ordered) {
     const [tileWest, tileSouth, tileEast, tileNorth] = tileBounds(tile);
     const lonSpan = tileEast - tileWest;
     const latSpan = tileNorth - tileSouth;
@@ -134,12 +143,17 @@ function mergeTiles(tiles: { tile: TileId; raw: RawTile }[], bounds: Bounds): Li
       const pointLat = tileSouth + (raw.y[i] / 0xffff) * latSpan;
       if (pointLat < south || pointLat > north) continue;
       const pointZ = raw.zBase + raw.z[i] / 100;
+      const [cellX, cellY] = cellFor(pointLon, pointLat);
+      if (source === "Laserdata Skog" && nearDensePoint(cellX, cellY)) continue;
+      if (source === "Stockholm 2023") denseCells.add(`${cellX}/${cellY}`);
       lon.push(pointLon);
       lat.push(pointLat);
       height.push(pointZ);
       packed.push(raw.colour[i]);
       classes.push(raw.classes[i]);
-      if (raw.classes[i] === GROUND_CLASS) groundLevels.push(pointZ);
+      surveys.push(source === "Stockholm 2023" ? 0 : 1);
+      sources.add(source);
+      if (classOf(raw.classes[i]) === GROUND_CLASS) groundLevels.push(pointZ);
       if (pointZ < lowest) lowest = pointZ;
     }
   }
@@ -157,31 +171,53 @@ function mergeTiles(tiles: { tile: TileId; raw: RawTile }[], bounds: Bounds): Li
     z: Float32Array.from(height),
     colours,
     classes: Uint8Array.from(classes),
+    surveys: Uint8Array.from(surveys),
     groundZ: groundLevels.length > 0 ? median(groundLevels) : lowest,
+    spacing: Math.sqrt(area / count),
+    source: sources.size === 1 ? [...sources][0] : "both surveys",
   };
 }
 
+interface LoadedTile {
+  tile: TileId;
+  raw: RawTile;
+  source: LidarSource;
+}
+
+/** Both surveys for a tile; overlap is resolved after decoding, not by tile. */
+async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[]> {
+  const routes = [
+    { route: "lidar", source: "Stockholm 2023" },
+    { route: "skog", source: "Laserdata Skog" },
+  ] as const;
+  const loaded = await Promise.all(
+    routes.map(async ({ route, source }): Promise<LoadedTile | null> => {
+      try {
+        const response = await fetch(`/api/${route}/tile/${tile.z}/${tile.x}/${tile.y}`, {
+          signal,
+        });
+        if (!response.ok) return null;
+        const raw = decodeTile(await response.arrayBuffer());
+        return raw && raw.count > 0 ? { tile, raw, source } : null;
+      } catch {
+        // Aborted or offline: treat as no data, like any tile without points.
+        return null;
+      }
+    }),
+  );
+  return loaded.filter((entry): entry is LoadedTile => entry !== null);
+}
+
 /**
- * Fetch the laser cloud around one building. Returns null outside the imported
- * area, which is most of the world: only tiles the importer has run over exist.
+ * Fetch the laser cloud around one building. Returns null where neither source
+ * has points — outside Sweden, or when Skog is not configured.
  */
 export async function fetchLidarCloud(
   building: BuildingElement,
   signal?: AbortSignal,
 ): Promise<LidarCloud | null> {
-  const results = await Promise.all(
-    lidarTilesFor(building).map(async (tile) => {
-      try {
-        const response = await fetch(`/api/lidar/tile/${tile.z}/${tile.x}/${tile.y}`, { signal });
-        if (!response.ok) return null;
-        const raw = readTile(await response.arrayBuffer());
-        return raw ? { tile, raw } : null;
-      } catch {
-        return null;
-      }
-    }),
-  );
-  const loaded = results.filter((entry): entry is { tile: TileId; raw: RawTile } => entry !== null);
+  const results = await Promise.all(lidarTilesFor(building).map((tile) => loadTile(tile, signal)));
+  const loaded = results.flat();
   if (loaded.length === 0) return null;
   return mergeTiles(loaded, cloudBounds(building));
 }

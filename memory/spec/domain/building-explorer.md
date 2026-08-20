@@ -8,7 +8,7 @@ Zoom and bearing controls sit in the visible map's bottom-right corner, shifting
 building panel is open so they remain accessible.
 Selecting a building or building part opens a right-side panel with an interactive 3D extrusion
 (initial bearing copied from the map on every new selection, then zoom + rotate independent of
-the map, flat ground), with adjacent buildings
+the map, Mapterhorn z13 terrain), with adjacent buildings
 drawn in gray as context, and below it an inspector listing every raw tag of the
 selected feature. A "Photos" toggle swaps the basemap for satellite imagery and reduces
 buildings/parts to boundaries only. While Photos is on, a four-way-arrow button toggles imagery
@@ -76,6 +76,13 @@ and **Open in Google** links launch photorealistic 3D centered on the selected b
 URLs are regenerated from the current orbit camera whenever it rotates, tilts or zooms, carrying
 the same heading, tilt and viewing distance as far as each provider's URL format allows. Bing's
 distance is approximate because it exposes zoom and eye height rather than an explicit range.
+
+The **field of view is shared** between the local camera and the Google Earth link — one exported
+constant, `FIELD_OF_VIEW`, used both to construct the `PerspectiveCamera` and to write the `y`
+parameter in the URL. Distance, heading and tilt only agree on framing if the lens does too: at 50°
+locally against the 35° sent to Google, the same distance showed a view 1.48x wider, so the local
+camera looked that much further away than the one the link opened. That gap is a ratio, so starting
+closer would have hidden it for one frame and let it return on the first scroll.
 Creating the links makes no third-party request; coordinates and the user's IP leave the app only
 when a link is opened.
 
@@ -104,15 +111,30 @@ a locally cut outline is authoritative in 3D; otherwise those uncut parts would 
 ## Slicing buildings into parts
 
 At live-OSM zoom, the top **Slice** tool uses a crosshair cursor and creates a partition path using
-the same square-node interaction as **Cut hole**. While the crosshair is within 12 screen pixels of
-an outer building boundary, a purple X previews the closest edge coordinate that will be used. If
-it is within 9 pixels of an existing outer-ring node, a hollow square takes priority and clicking
-reuses that node's exact coordinate. A first boundary click starts an open slice: further clicks
-add polyline bends and clicking another point on that same building's outer boundary completes it.
-A first click inside the footprint starts a closed-loop slice; clicking its first node or pressing
-Enter closes it after at least three nodes. Every segment must remain in the solid building
-footprint and the path must be simple. Escape, pressing **Slice** again, opening pending changes,
-or leaving live-OSM zoom cancels the draft.
+the same square-node interaction as **Cut hole**. A slice boundary is any outer or interior ring of
+the building outline **or of any of its existing parts** — a hole or part edge is a real boundary of
+the area a slice divides, so an open slice may start or end on one. While the crosshair is within 12
+screen pixels of such a boundary, a purple X previews the closest edge coordinate that will be used.
+If it is within 9 pixels of a boundary node, a hollow square takes priority and clicking reuses that
+node's exact coordinate. A first boundary click starts an open slice: further clicks add polyline
+bends and clicking another point on the same building's outline, hole, or part edge completes it.
+A first click inside the footprint, away from every boundary, starts a closed-loop slice; clicking
+its first node or pressing Enter closes it after at least three nodes. Every segment must remain in
+the solid building footprint and the path must be simple.
+
+The two modes differ in what they change:
+
+- An **open polyline** partitions what it crosses, and must divide something — the outline, an
+  existing part, or the area no part covers yet — otherwise it is rejected. A cut that ends on a part
+  edge leaves the outline itself whole.
+- A **closed loop** only adds the region it encloses; nothing else is touched, and no existing part is
+  replaced. Partitioning by the loop would also yield the complement, a ring around it, and a ring is
+  a polygon with a hole — which OSM can express only as a multipolygon relation. Drawing a tower on a
+  roof must not convert what is beneath it into one. The consequence is that the rest of the outline
+  has no part, which `outline-not-covered` reports; completing the model means either a second part
+  over the remaining area, or `min_height` on the loop part so it sits above a part that covers
+  everything. Escape, pressing **Slice** again, opening
+  pending changes, or leaving live-OSM zoom cancels the draft.
 
 The operation follows [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings):
 
@@ -159,38 +181,95 @@ building. The selected building, its parts, and every neighboring context buildi
 these effective properties. The live map source does too, so applying or reverting an edit
 immediately updates the building's height-data color. A global **X changes** button reports tag
 and geometry overrides from the map's top-left corner and opens a left sidebar grouped by entity.
-Each group has one linked building ID header followed by compact, single-line rows containing the
-property, original value, and pending value. Selecting the header closes the sidebar, centers the
-map on its entity through the normal ID lookup flow, and selects that building. The sidebar's
-**Revert all** action opens a confirmation dialog; confirming clears every pending tag edit and every
-geometry override from IndexedDB, and immediately restores the raw OSM properties and geometry in
-both the map and 3D view. Nothing is uploaded yet.
+Each group has one linked building ID header followed by rows laid out like the inspector's tag
+table: the key on the left, then the original value, an arrow, and the pending value highlighted the
+way an edited value is highlighted there. Selecting the header closes the sidebar, centers the map on
+its entity through the normal ID lookup flow, and selects that building. Each header also carries a
+discard action for that entity alone, behind the same confirmation dialog: it drops every tag
+override on the entity plus its footprint override, and for a part drawn in this session — which
+exists only as a pending change — it deletes the part itself, tag overrides included.
 
-For both buildings and parts, `height`, `building:levels`, `min_height`, and
-`building:min_level` always have inspector rows, including a **not set** row when absent. Hovering
+Every row can also be changed or dropped on its own, without leaving the panel:
+
+- **Edit** opens the same value dialog the inspector uses — one shared component, so the two cannot
+  drift apart. Here it accepts any text, because any tag can be pending, while the inspector's
+  dimension rows keep their numeric rules. An override keeps its first-seen original, so reverting
+  still restores what OSM has rather than the value it was last edited to.
+- **Remove** means whatever dropping that property means for where it came from: a tag override goes
+  back to the OSM value, a drawn part's own tag is unset, and a footprint override is discarded.
+- Two rows are deliberately not removable on their own, and say why: the `geometry` row of a drawn
+  part, which _is_ the part (use the entity action, which confirms), and `building:part` on a drawn
+  part, without which the way would not be a part at all.
+- Geometry rows cannot be edited — their value is a description of a footprint change, not a tag
+  anybody could type. The sidebar's **Revert all** action opens the
+  same dialog for every entity at once; confirming clears every pending tag edit and every geometry
+  override from IndexedDB. Either scope immediately restores the raw OSM properties and geometry in
+  the map and 3D view, and reselects the affected entity when it still exists. Nothing is uploaded
+  yet.
+
+For both buildings and parts, `height`, `building:levels`, `min_height`, `building:min_level`, and
+`roof:levels` always have inspector rows, including a **not set** row when absent. Hovering
 their value reveals an edit icon. It opens a numeric modal using the user-facing labels `height`,
-`levels`, `min_height`, and `min_levels`; Escape dismisses it and Enter saves a valid changed
-value. Heights must be positive metres, levels positive counts, minimums non-negative, and total
-height/levels must exceed their corresponding minimum. Saving uses the standard singular OSM key
-`building:min_level` and immediately refreshes the effective map and 3D geometry.
+`levels`, `min_height`, `min_levels`, and `roof_levels`; Escape dismisses it and Enter saves a valid
+changed value. Heights must be positive metres, levels positive counts, and total height/levels must
+exceed their corresponding minimum. `building:min_level`, `min_height` and `roof:levels` may be zero
+— a part can start at ground level and a flat roof has no roof levels — while the others must be
+above it. Saving uses the standard singular OSM key `building:min_level` and immediately refreshes
+the effective map and 3D geometry. `roof:levels` is metadata only: the 3D height comes from `height`
+or `building:levels`, so editing it changes no geometry.
+
+The `height` row also has a horizontal-arrow handle immediately before its property name. Dragging
+the handle left or right changes the effective height live in 0.5 m steps; the left and right arrow
+keys provide the same control when the handle is focused. It accepts unit-bearing source values by
+converting them to metres. A source value outside the 0.5 m grid is first rounded to the nearest step
+before the drag delta is applied. The control never steps to zero, below zero, or to/below
+`min_height`.
 
 ## Laser point cloud
 
-The 3D view draws Stockholm's 2023 airborne laser scan (see ADR 0004) as coloured dots around the
-selected building, when tiles for that area have been imported. Points come from `data/lidar` z16
-binary tiles, are kept within 100 m of the building footprint, and carry the orthophoto colour of
-each return, so the cloud reads as a photographic surface rather than a height ramp.
+Mapterhorn is the 3D preview's ground source of truth (see
+[ADR 0006](../../adr/0006-mapterhorn-defines-3d-ground.md)). Its z13 Terrarium tiles form the
+terrain mesh. Scene zero is the lowest raster sample inside the selected building boundary,
+including sampled boundary vertices for footprints smaller than a raster cell. Every neighboring
+building sits at its own footprint's lowest Mapterhorn elevation relative to that reference; all
+parts of one building share that base. OSM heights remain distances above the building base.
 
-Heights are RH2000 levels, while extruded buildings stand on a zero ground plane. Every dot is
-therefore lowered by one ground level for the whole scene: the median of the nearby ground-class
-returns, or the lowest point of any class when roofs hide the ground completely. Vendor-flagged
-noise (LAS class 7) is dropped at import.
+The 3D view draws airborne laser points as coloured dots around the selected building (see
+ADR 0004), from two sources that share one tile format and are tried in order per z16 tile:
+
+- **Stockholm 2023**, 25 points/m², imported to `data/lidar` and served by `/api/lidar`. Dense, and
+  coloured from the orthophoto, so the cloud reads as a photographic surface. Buildings are a
+  classified LAS class here.
+- **Laserdata Skog**, 1.4 points/m², read on demand from Lantmäteriet by `/api/skog` (see
+  [ADR 0005](../../adr/0005-national-laser-data-read-on-demand.md)). Covers the country. No colour
+  and no building class, so dots are coloured by class — ground, water, bridge — with unclassified
+  points split by return count, one return reading as hard surface and several as vegetation. That
+  split is a hint, not a classification, and it is what makes a roof legible among trees.
+
+Both sources are read where available. Occupied one-meter municipal coverage cells and their
+immediate neighbors suppress national returns, so dense data wins over its actual coverage while
+Skog fills a municipal scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
+carries the LAS class in its low bits and a single-return flag in `0x80`.
+
+LiDAR stays an overlay and never defines ground. For each survey, class-2 returns are compared with
+Mapterhorn at their coordinates; the median residual vertically translates that survey onto the
+terrain datum. The same correction applies to its roofs, preserving measured heights. If one
+survey has no ground returns it shares the other correction, and if neither does, published levels
+are shown without correction. Vendor-flagged noise (LAS class 7) is dropped at import.
+
+The inspector's LOD1 strip carries the cloud's status after the LOD1 sentence: `laser: reading…`
+while tiles are being read, `laser: 345,031 pts · Laserdata Skog` once they are, and
+`laser: no points` where neither survey covers the building. It is keyed to the building it
+describes, so a selection whose lookup is still in flight shows nothing rather than the previous
+building's count. Without it a building still being read looks exactly like one with no data,
+which matters most for the national source, where a first read assembles tiles on demand.
 
 The cloud is evidence only. It suggests no tags and is not matched to parts; a `height` that
 disagrees with the survey shows up as a roof floating above or sunk into the dots, and the mapper
 draws the conclusion. Points arrive after the buildings, are added to the standing scene without
-moving the camera, and are absent outside the imported area, where the tile route answers an
-empty tile.
+moving the camera, and are absent wherever neither source has points — where both tile routes
+answer an empty tile rather than an error, so a missing credential, a missing product permission
+and an upstream outage all look the same to the view: no dots.
 
 ## Selection
 
@@ -248,5 +327,9 @@ Two local reference datasets sit beside them, imported to the same z16 grid and 
 Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)) and the 2023 laser
 point cloud ([ADR 0004](../../adr/0004-laser-point-cloud-as-raw-evidence.md)). Neither is ever an
 edit target.
+
+Mapterhorn z13 terrain is read through the app's fixed-grid `/api/terrain` route and decoded in the
+3D preview. It defines ground elevation only and is never an edit target or a source of OSM height
+tags.
 
 Height and color logic follows OSM tags once FT-03 of [EP-001](../../plans/epics/EP-001-osm-editing/index.md) lands; until then it reads Overture property names.

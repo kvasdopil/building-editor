@@ -2,7 +2,7 @@
 
 import type { FeatureCollection } from "geojson";
 import { useEffect, useMemo, useState } from "react";
-import { Building3D, type CameraView } from "./Building3D";
+import { Building3D, type CameraView, type CloudStatus, type TerrainStatus } from "./Building3D";
 import { External3DLinks } from "./External3DLinks";
 import { Photoreal3D } from "./Photoreal3D";
 import { EDITABLE_DIMENSION_KEYS, type TagRow, TagRows } from "./TagRows";
@@ -81,7 +81,21 @@ export function BuildingPanel({
 }) {
   const match = useLod1(selection);
   const [camera, setCamera] = useState<CameraView | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const [terrainStatus, setTerrainStatus] = useState<TerrainStatus | null>(null);
   const selectedId = selection?.selected.id ?? "";
+  // Laser dots arrive after the 3D view, and a national tile is assembled on
+  // demand, so say which of "reading", "measured" and "nothing here" it is.
+  const laserStatus =
+    cloudStatus === null || cloudStatus.buildingId !== selection?.building.id
+      ? null
+      : cloudStatus.state === "loading"
+        ? "laser: reading…"
+        : cloudStatus.state === "empty"
+          ? "laser: no points"
+          : `laser: ${cloudStatus.points?.toLocaleString()} pts · ${cloudStatus.source}`;
+  const selectedTerrainStatus =
+    terrainStatus?.buildingId === selection?.building.id ? terrainStatus : null;
   const edit = edits.edits[selectedId];
 
   // Project every pending override into the scene so both the selected subject
@@ -187,7 +201,13 @@ export function BuildingPanel({
       </header>
 
       <div className="relative min-h-48 flex-1">
-        <Building3D selection={edited} initialHeading={initialHeading} onCameraChange={setCamera} />
+        <Building3D
+          selection={edited}
+          initialHeading={initialHeading}
+          onCameraChange={setCamera}
+          onCloudStatus={setCloudStatus}
+          onTerrainStatus={setTerrainStatus}
+        />
       </div>
 
       <Photoreal3D
@@ -213,6 +233,28 @@ export function BuildingPanel({
           </>
         ) : (
           "No LOD1 building matches this footprint"
+        )}
+        {laserStatus && <span className="text-slate-400"> · {laserStatus}</span>}
+        {selectedTerrainStatus && (
+          <span className="text-slate-400">
+            {" "}
+            · terrain:{" "}
+            {selectedTerrainStatus.state === "loading"
+              ? "reading…"
+              : selectedTerrainStatus.state === "empty"
+                ? "unavailable"
+                : `${selectedTerrainStatus.groundZ?.toFixed(1)} m ground · `}
+            {selectedTerrainStatus.state === "loaded" && (
+              <a
+                href="https://mapterhorn.com/attribution/"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Mapterhorn z13
+              </a>
+            )}
+          </span>
         )}
       </p>
 

@@ -55,7 +55,7 @@ const RESIDENTIAL_TYPES = new Set([
 ]);
 
 /** Parse an OSM height value ("12", "12.5 m", "40 ft", `20'`) into meters. */
-function parseMeters(value: string | undefined): number | undefined {
+export function parseMeters(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const match = value.trim().match(/^(-?\d+(?:[.,]\d+)?)\s*(m|meters?|ft|feet|')?$/i);
   if (!match) return undefined;

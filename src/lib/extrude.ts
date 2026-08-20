@@ -1,7 +1,9 @@
 import * as THREE from "three";
 import { levelHeight, verticalExtent } from "./heights";
 import type { LidarCloud } from "./lidar";
+import { classOf } from "./lidar-format";
 import { partsCoverage } from "./parts";
+import { minimumTerrainElevation, terrainElevation, type TerrainModel } from "./terrain";
 import type {
   BuildingElement,
   BuildingSelection,
@@ -59,6 +61,7 @@ function extrudeElement(
   metersPerLevel: number,
   color: number,
   edgeOpacity: number,
+  groundOffset: number,
 ): THREE.Object3D {
   const { top, base } = verticalExtent(element.properties, metersPerLevel);
   const group = new THREE.Group();
@@ -79,7 +82,7 @@ function extrudeElement(
     const geometry = new THREE.ExtrudeGeometry(shape, { depth: top - base, bevelEnabled: false });
     // Shape lies in the XY plane extruded along +Z; rotate so height runs along +Y.
     geometry.rotateX(-Math.PI / 2);
-    geometry.translate(0, base, 0);
+    geometry.translate(0, base + groundOffset, 0);
     // ExtrudeGeometry assigns caps to material 0 and every vertical face,
     // including hole walls, to material 1.
     const mesh = new THREE.Mesh(geometry, [roofMaterial, wallMaterial]);
@@ -99,6 +102,7 @@ function extrudeBuildingWithParts(
   projector: Projector,
   colorFor: (element: BuildingElement, index: number) => number,
   edgeOpacity: number,
+  groundOffset: number,
 ): { group: THREE.Group; elements: Map<string, THREE.Object3D> } {
   const group = new THREE.Group();
   const objects = new Map<string, THREE.Object3D>();
@@ -117,6 +121,7 @@ function extrudeBuildingWithParts(
       metersPerLevel,
       colorFor(element, index),
       edgeOpacity,
+      groundOffset,
     );
     objects.set(element.id, object);
     group.add(object);
@@ -146,26 +151,66 @@ interface BuildingScene {
   origin: LngLat;
 }
 
-/** Dot size in meters. Roughly the spacing of a 16 points/m² scan. */
-const POINT_SIZE_M = 0.28;
+/**
+ * Dot size follows the cloud's own point spacing, so both sources read as a
+ * surface rather than the denser one looking solid and the sparser one vanishing.
+ * The floor keeps dense city data from turning into mush, and the ceiling keeps
+ * a thin cloud from covering the building it is meant to measure.
+ */
+const POINT_SIZE_MIN_M = 0.2;
+const POINT_SIZE_MAX_M = 1;
 
 /**
  * The laser cloud as dots in the same local frame as the buildings, so a roof
  * that disagrees with its `height` tag reads as dots floating above or sunk
  * into the extruded solid.
  *
- * Cloud heights are RH2000 levels while buildings stand on a zero ground plane,
- * so every dot drops by the cloud's own ground level. That is one level for the
- * whole neighborhood: on a slope the far side of the view sits slightly off,
- * which is the same simplification the extruded buildings already make.
+ * With terrain available, ground-class returns measure a robust offset for each
+ * survey and Mapterhorn supplies the scene datum. The cloud's own ground level
+ * is only a flat-scene fallback while terrain is still unavailable.
  */
-export function buildPointCloud(cloud: LidarCloud, origin: LngLat): THREE.Points {
+function median(values: number[]): number {
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+/**
+ * Survey-to-terrain offsets from ground returns. Mapterhorn remains the datum:
+ * LiDAR is translated to it, never used to move the terrain or buildings.
+ */
+function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): [number, number] {
+  const residuals: [number[], number[]] = [[], []];
+  // A few thousand evenly distributed ground pairs are enough for a robust
+  // median and keep sorting cost bounded on a dense million-point city tile.
+  const step = Math.max(1, Math.floor(cloud.count / 20_000));
+  for (let i = 0; i < cloud.count; i += step) {
+    if (classOf(cloud.classes[i]) !== 2) continue;
+    const ground = terrainElevation(terrain, [cloud.lon[i], cloud.lat[i]]);
+    if (ground === null) continue;
+    residuals[cloud.surveys[i]].push(cloud.z[i] - ground);
+  }
+  const combined = [...residuals[0], ...residuals[1]];
+  const fallback = combined.length > 0 ? median(combined) : 0;
+  return [
+    residuals[0].length >= 3 ? median(residuals[0]) : fallback,
+    residuals[1].length >= 3 ? median(residuals[1]) : fallback,
+  ];
+}
+
+export function buildPointCloud(
+  cloud: LidarCloud,
+  origin: LngLat,
+  terrain: TerrainModel | null = null,
+): THREE.Points {
   const projector = makeProjector(origin);
   const positions = new Float32Array(cloud.count * 3);
+  const biases = terrain ? lidarTerrainBiases(cloud, terrain) : ([0, 0] as const);
+  const datum = terrain?.referenceZ ?? cloud.groundZ;
   for (let i = 0; i < cloud.count; i++) {
     const [x, y] = projector.toLocal([cloud.lon[i], cloud.lat[i]]);
     positions[i * 3] = x;
-    positions[i * 3 + 1] = cloud.z[i] - cloud.groundZ;
+    const survey = cloud.surveys[i] === 0 ? 0 : 1;
+    positions[i * 3 + 1] = cloud.z[i] - biases[survey] - datum;
     // Three's local axes are east (+X), up (+Y), south (+Z), so north is -Z.
     positions[i * 3 + 2] = -y;
   }
@@ -173,20 +218,70 @@ export function buildPointCloud(cloud: LidarCloud, origin: LngLat): THREE.Points
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute("color", new THREE.BufferAttribute(cloud.colours, 3));
+  const size = Math.min(Math.max(cloud.spacing * 0.9, POINT_SIZE_MIN_M), POINT_SIZE_MAX_M);
   return new THREE.Points(
     geometry,
-    new THREE.PointsMaterial({ size: POINT_SIZE_M, sizeAttenuation: true, vertexColors: true }),
+    new THREE.PointsMaterial({ size, sizeAttenuation: true, vertexColors: true }),
   );
+}
+
+/** Mapterhorn elevation mesh, expressed relative to the selected footprint. */
+function buildTerrainSurface(model: TerrainModel, projector: Projector): THREE.Mesh {
+  const [west, south, east, north] = model.bounds;
+  const middleLat = (south + north) / 2;
+  const width = (east - west) * EARTH_METERS_PER_DEG_LAT * Math.cos((middleLat * Math.PI) / 180);
+  const depth = (north - south) * EARTH_METERS_PER_DEG_LAT;
+  const columns = Math.min(96, Math.max(8, Math.ceil(width / 5)));
+  const rows = Math.min(96, Math.max(8, Math.ceil(depth / 5)));
+  const positions = new Float32Array((columns + 1) * (rows + 1) * 3);
+  const indices: number[] = [];
+
+  for (let row = 0; row <= rows; row++) {
+    const lat = north - (row / rows) * (north - south);
+    for (let column = 0; column <= columns; column++) {
+      const lon = west + (column / columns) * (east - west);
+      const vertex = row * (columns + 1) + column;
+      const [x, y] = projector.toLocal([lon, lat]);
+      positions[vertex * 3] = x;
+      positions[vertex * 3 + 1] =
+        (terrainElevation(model, [lon, lat]) ?? model.referenceZ) - model.referenceZ - 0.04;
+      positions[vertex * 3 + 2] = -y;
+    }
+  }
+
+  for (let row = 0; row < rows; row++) {
+    for (let column = 0; column < columns; column++) {
+      const topLeft = row * (columns + 1) + column;
+      const bottomLeft = topLeft + columns + 1;
+      indices.push(topLeft, bottomLeft, topLeft + 1, topLeft + 1, bottomLeft, bottomLeft + 1);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshLambertMaterial({ color: 0xdde3ea, side: THREE.DoubleSide }),
+  );
+  mesh.userData.terrain = true;
+  return mesh;
 }
 
 /**
  * Build the Three.js scene for a selection: the selected building in color
  * (from its parts when it has any, else its outline), adjacent buildings in
- * gray for context, and a flat ground disc under everything.
+ * gray for context, and Mapterhorn terrain (or a temporary flat fallback).
  */
-export function buildScene(selection: BuildingSelection): BuildingScene {
+export function buildScene(
+  selection: BuildingSelection,
+  terrain: TerrainModel | null = null,
+): BuildingScene {
   const origin = footprintCenter(selection.building);
   const projector = makeProjector(origin);
+  const groundOffset = (building: BuildingElement) =>
+    terrain ? minimumTerrainElevation(terrain, building) - terrain.referenceZ : 0;
 
   const root = new THREE.Group();
   const selected = extrudeBuildingWithParts(
@@ -194,6 +289,7 @@ export function buildScene(selection: BuildingSelection): BuildingScene {
     projector,
     (_element, index) => PART_COLORS[index % PART_COLORS.length],
     0.35,
+    groundOffset(selection.building),
   );
   root.add(selected.group);
   const focusTarget =
@@ -203,7 +299,20 @@ export function buildScene(selection: BuildingSelection): BuildingScene {
   const focus = new THREE.Box3().setFromObject(focusTarget);
 
   for (const neighbor of selection.neighbors) {
-    root.add(extrudeBuildingWithParts(neighbor, projector, () => NEIGHBOR_COLOR, 0.18).group);
+    root.add(
+      extrudeBuildingWithParts(
+        neighbor,
+        projector,
+        () => NEIGHBOR_COLOR,
+        0.18,
+        groundOffset(neighbor.building),
+      ).group,
+    );
+  }
+
+  if (terrain) {
+    root.add(buildTerrainSurface(terrain, projector));
+    return { root, focus, origin };
   }
 
   // Ground spans the half-diagonal of everything drawn, so no building

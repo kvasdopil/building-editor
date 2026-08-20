@@ -60,15 +60,23 @@ function diskPath(key: CacheKey): string {
   return path.join(CACHE_DIR, ...key.slice(0, -1), `${key[key.length - 1]}.json`);
 }
 
-function touchMemory<T>(key: string, entry: CachedTile<T>): void {
-  const { memory } = cache();
+/**
+ * Move `key` to the front of an LRU map and evict from the back. Exported
+ * because the Skog cache next door keeps bytes rather than parsed tiles but
+ * wants exactly this eviction rule.
+ */
+export function touchLru<T>(memory: Map<string, T>, key: string, entry: T, limit: number): void {
   memory.delete(key);
   memory.set(key, entry);
-  while (memory.size > MEMORY_LIMIT) {
+  while (memory.size > limit) {
     const oldest = memory.keys().next().value;
     if (oldest === undefined) break;
     memory.delete(oldest);
   }
+}
+
+function touchMemory<T>(key: string, entry: CachedTile<T>): void {
+  touchLru(cache().memory, key, entry, MEMORY_LIMIT);
 }
 
 export async function readCachedTile<T>(cacheKey: CacheKey): Promise<CachedTile<T> | null> {

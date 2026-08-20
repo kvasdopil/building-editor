@@ -2,7 +2,7 @@ import type { Feature, FeatureCollection } from "geojson";
 import type { BuildingProperties, LngLat } from "../buildings";
 import type { EditMap } from "../edits";
 import type { CreatedPartMap, EditableGeometry, GeometryEditMap } from "../geometry-edits";
-import { openRing } from "../geometry";
+import { closestPointOnSegment, openRing } from "../geometry";
 import { issue, type Issue } from "./issues";
 import { buildNodeIndex, findExistingNode, NODE_REUSE_METERS } from "./nodes";
 import { formatCoordinate, metersBetween, roundToOsmGrid } from "./precision";
@@ -148,19 +148,9 @@ function ringsOf(geometry: EditableGeometry): LngLat[][][] {
  * Endpoints are excluded: a vertex on one would have matched that node exactly.
  */
 function positionOnSegment(point: LngLat, start: LngLat, end: LngLat): number | null {
-  const cosLat = Math.cos((point[1] * Math.PI) / 180);
-  const dx = (end[0] - start[0]) * cosLat;
-  const dy = end[1] - start[1];
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared === 0) return null;
-  const along = (point[0] - start[0]) * cosLat * dx + (point[1] - start[1]) * dy;
-  const amount = along / lengthSquared;
-  if (amount <= 0 || amount >= 1) return null;
-  const closest: LngLat = [
-    start[0] + amount * (end[0] - start[0]),
-    start[1] + amount * (end[1] - start[1]),
-  ];
-  return metersBetween(point, closest) <= NODE_REUSE_METERS ? amount : null;
+  const { at, closest } = closestPointOnSegment(point, start, end);
+  if (at <= 0 || at >= 1) return null;
+  return metersBetween(point, closest) <= NODE_REUSE_METERS ? at : null;
 }
 
 export function buildChangeset(input: ChangesetInput): ChangesetPlan {

@@ -4,9 +4,45 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { buildPointCloud, buildScene } from "@/lib/extrude";
-import { fetchLidarCloud, type LidarCloud } from "@/lib/lidar";
+import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
+import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
 import { mountCanvas } from "@/lib/three-canvas";
 import type { BuildingSelection } from "@/lib/buildings";
+
+/**
+ * What the laser cloud fetch found. Reported to the inspector because a
+ * building with no dots is otherwise ambiguous: a tile assembled on demand can
+ * take a second or two, and "still reading" looks exactly like "nothing here".
+ */
+export interface CloudStatus {
+  /**
+   * The building the status belongs to. Selecting another building takes a
+   * lookup and a fetch, and without this the inspector would keep showing the
+   * previous building's point count as though it were this one's.
+   */
+  buildingId: string;
+  state: "loading" | "loaded" | "empty";
+  points?: number;
+  source?: LidarSource;
+}
+
+/** Mapterhorn ground datum lookup shown beside the LiDAR overlay status. */
+export interface TerrainStatus {
+  buildingId: string;
+  state: "loading" | "loaded" | "empty";
+  /** Lowest z13 elevation inside the building footprint, in meters. */
+  groundZ?: number;
+}
+
+/**
+ * Vertical field of view, in degrees, matched to the `35y` this app hands to
+ * Google Earth in External3DLinks. It is the same scene either way, so the lens
+ * has to be the same too: at 50° the building read about 1.5x further away than
+ * the view the Google link opens. That gap is a ratio, not an offset, so it could
+ * not have been corrected by starting closer — it would return on the first
+ * scroll.
+ */
+export const FIELD_OF_VIEW = 35;
 
 /** Camera values shared with external 3D map links. */
 export interface CameraView {
@@ -16,7 +52,7 @@ export interface CameraView {
   tilt: number;
   /** Straight-line distance from the camera to its target, meters. */
   range: number;
-  /** Camera height above the scene's ground plane, meters. */
+  /** Camera height above the selected building's Mapterhorn reference, meters. */
   eyeHeight: number;
 }
 
@@ -25,17 +61,22 @@ export function Building3D({
   selection,
   initialHeading = 315,
   onCameraChange,
+  onCloudStatus,
+  onTerrainStatus,
 }: {
   selection: BuildingSelection;
   /** Initial compass direction, copied from the map when selection changes. */
   initialHeading?: number;
   onCameraChange?: (view: CameraView) => void;
+  onCloudStatus?: (status: CloudStatus) => void;
+  onTerrainStatus?: (status: TerrainStatus) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Decoded laser cloud for the building on screen. Kept in a ref, not state,
   // so it arriving never re-renders — the scene is built once and the dots are
   // added to it — and so a camera-only rebuild reuses it instead of refetching.
   const cloudRef = useRef<{ id: string; cloud: LidarCloud } | null>(null);
+  const terrainRef = useRef<{ id: string; terrain: TerrainModel } | null>(null);
   /**
    * Last orbit the user set. Switching building or part rebuilds the scene, and
    * restoring this keeps the viewpoint instead of snapping back to the default
@@ -57,23 +98,85 @@ export function Building3D({
     sun.position.set(1, 2, 1.2);
     scene.add(sun);
 
-    const { root, focus, origin } = buildScene(selection);
-    scene.add(root);
+    const id = selection.building.id;
+    let terrain = terrainRef.current?.id === id ? terrainRef.current.terrain : null;
+    let cloud = cloudRef.current?.id === id ? cloudRef.current.cloud : null;
+    let built = buildScene(selection, terrain);
+    if (cloud) built.root.add(buildPointCloud(cloud, built.origin, terrain));
+    scene.add(built.root);
+
+    const disposeRoot = (root: THREE.Object3D) => {
+      root.traverse((object) => {
+        if (
+          object instanceof THREE.Mesh ||
+          object instanceof THREE.LineSegments ||
+          object instanceof THREE.Points
+        ) {
+          object.geometry.dispose();
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach((material) => material.dispose());
+        }
+      });
+    };
+
+    // Rebuilding changes terrain and neighbor base elevations, but never the
+    // selected building's zero: its lowest Mapterhorn sample is the scene datum.
+    const rebuild = () => {
+      const previous = built.root;
+      const next = buildScene(selection, terrain);
+      if (cloud) next.root.add(buildPointCloud(cloud, next.origin, terrain));
+      scene.remove(previous);
+      built = next;
+      scene.add(next.root);
+      disposeRoot(previous);
+    };
+
+    const { focus } = built;
 
     // Laser dots are added to the standing scene rather than awaited, so the
     // buildings appear at once and the cloud follows when its tiles land.
     // Outside the imported area there is no cloud and the view is unchanged.
     let disposed = false;
+    const controller = new AbortController();
+    const addTerrain = async () => {
+      if (!terrain) onTerrainStatus?.({ buildingId: id, state: "loading" });
+      const loaded = terrain ?? (await fetchTerrain(selection, controller.signal));
+      if (!loaded) {
+        if (!disposed) onTerrainStatus?.({ buildingId: id, state: "empty" });
+        return;
+      }
+      terrainRef.current = { id, terrain: loaded };
+      terrain = loaded;
+      if (disposed) return;
+      onTerrainStatus?.({ buildingId: id, state: "loaded", groundZ: loaded.referenceZ });
+      // A cached model was already part of the initial scene.
+      if (built.root.children.some((child) => child.userData.terrain === true)) return;
+      rebuild();
+    };
+    void addTerrain();
+
     const addLidar = async () => {
-      const id = selection.building.id;
-      const cached = cloudRef.current?.id === id ? cloudRef.current : null;
-      const cloud = cached?.cloud ?? (await fetchLidarCloud(selection.building));
-      if (!cloud) return;
+      if (!cloud) onCloudStatus?.({ buildingId: id, state: "loading" });
+      const loaded = cloud ?? (await fetchLidarCloud(selection.building, controller.signal));
+      if (!loaded) {
+        if (!disposed) onCloudStatus?.({ buildingId: id, state: "empty" });
+        return;
+      }
+      if (!disposed)
+        onCloudStatus?.({
+          buildingId: id,
+          state: "loaded",
+          points: loaded.count,
+          source: loaded.source,
+        });
       // Cache before bailing out: a torn-down run still decoded a valid cloud,
       // and the remount that replaced it should not fetch the tiles again.
-      cloudRef.current = { id, cloud };
+      cloudRef.current = { id, cloud: loaded };
+      cloud = loaded;
       if (disposed) return;
-      root.add(buildPointCloud(cloud, origin));
+      // Cached points were already added to the initial scene.
+      if (built.root.children.some((child) => child instanceof THREE.Points)) return;
+      built.root.add(buildPointCloud(loaded, built.origin, terrain));
     };
     void addLidar();
 
@@ -81,21 +184,23 @@ export function Building3D({
     const center = focus.getCenter(new THREE.Vector3());
     const size = focus.getSize(new THREE.Vector3());
     // Orbit the centre of the base, not the building's mid-height: rotating
-    // around the footprint keeps it planted on the ground plane instead of
-    // swinging the ground up and down.
+    // around the footprint keeps it planted on its terrain reference instead
+    // of swinging the terrain up and down.
     const target = new THREE.Vector3(center.x, focus.min.y, center.z);
     // Floor the framing distance and look down more steeply: a small building
     // ringed by tall neighbours would otherwise start with the camera inside a
     // neighbour's wall.
     const radius = Math.max(size.length() / 2, 18);
 
-    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, radius * 40);
+    const camera = new THREE.PerspectiveCamera(FIELD_OF_VIEW, 1, 0.1, radius * 40);
 
     // Default three-quarter framing, used until the user orbits.
     const defaultHorizontal = radius * 1.8 * Math.SQRT2;
     const defaultVertical = radius * 2.0;
     const minDistance = radius * 0.3;
-    const maxDistance = radius * 8;
+    // Reach further out than the framing needs, so the context neighbours stay
+    // reachable at this narrower field of view.
+    const maxDistance = radius * 12;
     const maxTilt = 90 - 0.03 * (180 / Math.PI);
 
     const orbit = orbitRef.current;
@@ -160,22 +265,13 @@ export function Building3D({
 
     return () => {
       disposed = true;
+      controller.abort();
       controls.removeEventListener("change", reportCamera);
       controls.dispose();
       canvas.dispose();
-      scene.traverse((object) => {
-        if (
-          object instanceof THREE.Mesh ||
-          object instanceof THREE.LineSegments ||
-          object instanceof THREE.Points
-        ) {
-          object.geometry.dispose();
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((m) => m.dispose());
-        }
-      });
+      disposeRoot(built.root);
     };
-  }, [initialHeading, onCameraChange, selection]);
+  }, [initialHeading, onCameraChange, onCloudStatus, onTerrainStatus, selection]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

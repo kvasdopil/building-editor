@@ -17,10 +17,14 @@ const FAILURE_THRESHOLD = 3;
 
 const BREAKER_COOLDOWN_MS = 60_000;
 
-/** Identifying the client is required of every upstream call (ADR 0002). */
+/**
+ * Identifying the client is required of every upstream call (ADR 0002), and the
+ * contact has to actually reach someone: OSM's usage policy expects a way to get
+ * in touch before anyone resorts to blocking.
+ */
 export const USER_AGENT =
   process.env.OSM_USER_AGENT ??
-  "building-editor/0.1 (+https://github.com/kvasdopil/nextjs; dev build)";
+  "building-editor/0.1 (+https://github.com/kvasdopil/building-editor)";
 
 interface LimiterStats {
   upstreamRequests: number;

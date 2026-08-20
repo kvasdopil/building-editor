@@ -1,7 +1,7 @@
 "use client";
 
 import { FiExternalLink } from "react-icons/fi";
-import type { CameraView } from "./Building3D";
+import { type CameraView, FIELD_OF_VIEW } from "./Building3D";
 import type { LngLat } from "@/lib/buildings";
 
 /** Match Bing's discrete map zoom to the Three.js camera range. */
@@ -29,7 +29,8 @@ function google3dUrl([lon, lat]: LngLat, camera: CameraView): string {
     lon.toFixed(6),
     "0a",
     `${Math.max(camera.range, 10)}d`,
-    "35y",
+    // The same lens the local camera uses, or the handoff would reframe.
+    `${FIELD_OF_VIEW}y`,
     `${camera.heading}h`,
     `${camera.tilt}t`,
     "0r",
