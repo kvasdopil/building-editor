@@ -49,3 +49,6 @@ next-env.d.ts
 
 # imported LOD1 tiles, regenerate with scripts/import-lod1.mjs
 /data/lod1/
+
+# imported laser point cloud tiles, regenerate with scripts/import-lidar.mjs
+/data/lidar/

@@ -2,19 +2,20 @@
 
 import type { FeatureCollection } from "geojson";
 import { useEffect, useMemo, useState } from "react";
-import { Building3D } from "./Building3D";
-import { ExternalViews } from "./ExternalViews";
-import { type TagRow, TagRows } from "./TagRows";
+import { Building3D, type CameraView } from "./Building3D";
+import { External3DLinks } from "./External3DLinks";
+import { Photoreal3D } from "./Photoreal3D";
+import { EDITABLE_DIMENSION_KEYS, type TagRow, TagRows } from "./TagRows";
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
-import { applyEdit, type EditsApi } from "@/lib/edits";
-import { boundsCenter, elementBounds } from "@/lib/geometry";
-import { verticalExtent } from "@/lib/heights";
+import { applyEditsToSelection, type EditsApi } from "@/lib/edits";
+import { boundsCenter, boundsRadiusMeters, elementBounds } from "@/lib/geometry";
 import { type Lod1Match, lod1TilesFor, matchLod1, suggestionsFor } from "@/lib/lod1";
 
 function buildingTitle(selection: BuildingSelection): string {
-  const props = selection.building.properties;
+  const props = selection.selected.properties;
   if (props["@name"]) return props["@name"];
-  const type = props.class ?? props.subtype ?? "building";
+  const type =
+    props.class ?? props.subtype ?? (props.role === "part" ? "building part" : "building");
   return type.replace(/_/g, " ");
 }
 
@@ -41,10 +42,10 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
 
   useEffect(() => {
     setMatch(null);
-    if (!selection) return;
+    if (!selection || selection.selected.properties.role === "part") return;
     let cancelled = false;
     void Promise.all(
-      lod1TilesFor(selection.building).map((tile) =>
+      lod1TilesFor(selection.selected).map((tile) =>
         fetch(`/api/lod1/tile/${tile.z}/${tile.x}/${tile.y}`)
           .then((response) =>
             response.ok ? (response.json() as Promise<FeatureCollection>) : null,
@@ -54,7 +55,7 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
     ).then((collections) => {
       if (cancelled) return;
       const usable = collections.filter((c): c is FeatureCollection => c !== null);
-      setMatch(matchLod1(selection.building, usable));
+      setMatch(matchLod1(selection.selected, usable));
     });
     return () => {
       cancelled = true;
@@ -67,33 +68,46 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
 /** Side panel: 3D view, LOD1 advice, and the element's tags. */
 export function BuildingPanel({
   selection,
+  initialHeading,
   edits,
+  onSelectEntity,
   onClose,
 }: {
   selection: BuildingSelection | null;
+  initialHeading: number;
   edits: EditsApi;
+  onSelectEntity: (entityId: string) => void;
   onClose: () => void;
 }) {
   const match = useLod1(selection);
-  const buildingId = selection?.building.id ?? "";
-  const edit = edits.edits[buildingId];
+  const [camera, setCamera] = useState<CameraView | null>(null);
+  const selectedId = selection?.selected.id ?? "";
+  const edit = edits.edits[selectedId];
 
-  // The edited building is what gets inspected and extruded, so applying a
-  // suggestion shows up in the 3D view on the same render.
-  const edited = useMemo(() => (selection ? applyEdit(selection, edit) : null), [selection, edit]);
+  // Project every pending override into the scene so both the selected subject
+  // and gray context buildings render from their effective properties.
+  const edited = useMemo(
+    () => (selection ? applyEditsToSelection(selection, edits.edits) : null),
+    [selection, edits.edits],
+  );
 
   // Tags as OSM has them, independent of pending edits: what revert restores
   // and what an edit records as its original value.
   const osmTags = useMemo(
-    () => (selection ? sourceTags(selection.building.properties) : {}),
+    () => (selection ? sourceTags(selection.selected.properties) : {}),
     [selection],
+  );
+
+  const effectiveTags = useMemo(
+    () => (edited ? sourceTags(edited.selected.properties) : {}),
+    [edited],
   );
 
   const rows = useMemo<TagRow[]>(() => {
     if (!edited) return [];
     // Compared against the effective tags, so advice disappears once applied.
-    const tags = sourceTags(edited.building.properties);
-    const suggestions = match ? suggestionsFor(edited.building, match, tags) : [];
+    const tags = effectiveTags;
+    const suggestions = match ? suggestionsFor(edited.selected, match, tags) : [];
     const byKey = new Map(suggestions.map((s) => [s.key, s]));
 
     const known = Object.entries(tags)
@@ -108,22 +122,32 @@ export function BuildingPanel({
         }),
       );
 
-    // Advice for a tag OSM does not have yet needs a row of its own.
-    const extra = suggestions
-      .filter((s) => !(s.key in tags))
-      .map((s): TagRow => ({ key: s.key, value: "", edited: false, suggestion: s }));
+    // Advice and manually editable dimensions need rows even when OSM does not
+    // have those tags yet.
+    const extraKeys = new Set([
+      ...suggestions.filter((s) => !(s.key in tags)).map((s) => s.key),
+      ...EDITABLE_DIMENSION_KEYS.filter((key) => !(key in tags)),
+    ]);
+    const extra = [...extraKeys].map(
+      (key): TagRow => ({ key, value: "", edited: false, suggestion: byKey.get(key) }),
+    );
 
     return [...extra, ...known].sort((a, b) => a.key.localeCompare(b.key));
-  }, [edited, match, edit, osmTags]);
+  }, [edited, effectiveTags, match, edit, osmTags]);
 
   if (!selection || !edited) return null;
 
-  const props = edited.building.properties;
-  const version = typeof props.version === "number" ? `v${props.version}` : null;
+  const props = edited.selected.properties;
+  const selectedIsPart = props.role === "part";
+  const parentId = edited.selected.id !== edited.building.id ? edited.building.id : null;
   const summary = [
-    typeof props.osm_type === "string" ? `${props.id} · ${version ?? ""}`.trim() : null,
-    `≈${verticalExtent(props).top.toFixed(1)} m`,
-    selection.parts.length > 0 ? `${selection.parts.length} parts` : null,
+    selectedIsPart
+      ? parentId
+        ? `part of ${parentId}`
+        : "standalone part"
+      : selection.parts.length > 0
+        ? `${selection.parts.length} parts`
+        : null,
     edit ? `${Object.keys(edit.changed).length} edited` : null,
   ]
     .filter(Boolean)
@@ -131,19 +155,20 @@ export function BuildingPanel({
 
   return (
     <aside className="absolute inset-y-0 right-0 z-20 flex w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl">
-      <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+      <header className="flex items-center gap-2 border-b border-slate-200 px-3 py-1.5">
         <div className="min-w-0">
-          <h2 className="truncate text-lg font-semibold text-slate-900 capitalize">
+          <h2 className="truncate text-sm font-semibold text-slate-900 capitalize">
             {buildingTitle(edited)}
           </h2>
-          <p className="truncate text-xs text-slate-500">{summary}</p>
+          {summary && <p className="truncate text-[11px] text-slate-500">{summary}</p>}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <External3DLinks center={boundsCenter(elementBounds(edited.selected))} camera={camera} />
           {edit && (
             <button
               type="button"
-              onClick={() => edits.revertBuilding(buildingId)}
-              className="rounded-md px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
+              onClick={() => edits.revertBuilding(selectedId)}
+              className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-50"
             >
               Revert all
             </button>
@@ -154,7 +179,7 @@ export function BuildingPanel({
             aria-label="Close panel"
             className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
           >
-            <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
               <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
             </svg>
           </button>
@@ -162,16 +187,19 @@ export function BuildingPanel({
       </header>
 
       <div className="relative min-h-48 flex-1">
-        <Building3D selection={edited} />
+        <Building3D selection={edited} initialHeading={initialHeading} onCameraChange={setCamera} />
       </div>
 
-      <ExternalViews
-        center={boundsCenter(elementBounds(edited.building))}
-        height={verticalExtent(props).top}
+      <Photoreal3D
+        center={boundsCenter(elementBounds(edited.selected))}
+        camera={camera}
+        radius={boundsRadiusMeters(elementBounds(edited.selected))}
       />
 
       <p className="border-y border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
-        {match ? (
+        {selectedIsPart ? (
+          "LOD1 advice is only available for building outlines"
+        ) : match ? (
           <>
             LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
             {match.properties.category ? ` · ${match.properties.category}` : ""}
@@ -192,9 +220,12 @@ export function BuildingPanel({
         <TagRows
           rows={rows}
           onApply={(suggestion) =>
-            edits.setTag(buildingId, suggestion.key, suggestion.value, osmTags[suggestion.key])
+            edits.setTag(selectedId, suggestion.key, suggestion.value, osmTags[suggestion.key])
           }
-          onRevert={(key) => edits.revertTag(buildingId, key)}
+          onEdit={(key, value) => edits.setTag(selectedId, key, value, osmTags[key])}
+          onRevert={(key) => edits.revertTag(selectedId, key)}
+          parentId={parentId}
+          onSelectParent={parentId ? () => onSelectEntity(parentId) : undefined}
         />
       </div>
     </aside>

@@ -17,7 +17,8 @@ const FAILURE_THRESHOLD = 3;
 
 const BREAKER_COOLDOWN_MS = 60_000;
 
-const USER_AGENT =
+/** Identifying the client is required of every upstream call (ADR 0002). */
+export const USER_AGENT =
   process.env.OSM_USER_AGENT ??
   "building-editor/0.1 (+https://github.com/kvasdopil/nextjs; dev build)";
 

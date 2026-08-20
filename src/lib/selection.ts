@@ -31,6 +31,7 @@ function footprintFeature(
 export function assembleSelection(
   target: BuildingWithParts,
   candidates: BuildingWithParts[],
+  selected: BuildingElement = target.building,
 ): BuildingSelection {
   const targetBounds = elementBounds(target.building);
   const searchArea = padBounds(targetBounds, NEIGHBOR_PADDING_M);
@@ -49,9 +50,14 @@ export function assembleSelection(
     .slice(0, MAX_NEIGHBORS)
     .map(({ candidate }) => candidate);
 
-  const outline = featureCollection([
-    footprintFeature(target.building, "building"),
-    ...target.parts.map((part) => footprintFeature(part, "part")),
-  ]);
-  return { ...target, neighbors, outline };
+  const wholeBuilding = selected.id === target.building.id;
+  const outline = featureCollection(
+    wholeBuilding
+      ? [
+          footprintFeature(target.building, "building"),
+          ...target.parts.map((part) => footprintFeature(part, "part")),
+        ]
+      : [footprintFeature(selected, "part")],
+  );
+  return { ...target, selected, neighbors, outline };
 }

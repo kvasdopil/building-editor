@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { levelHeight, verticalExtent } from "./heights";
+import type { LidarCloud } from "./lidar";
 import { partsCoverage } from "./parts";
 import type {
   BuildingElement,
@@ -61,7 +62,13 @@ function extrudeElement(
 ): THREE.Object3D {
   const { top, base } = verticalExtent(element.properties, metersPerLevel);
   const group = new THREE.Group();
-  const material = new THREE.MeshLambertMaterial({ color });
+  const roofMaterial = new THREE.MeshLambertMaterial({ color });
+  const wallMaterial = new THREE.MeshLambertMaterial({
+    color: new THREE.Color(color).multiplyScalar(0.68),
+    // Interior-ring winding varies between OSM and locally drawn geometry.
+    // Two-sided walls keep the inside of every cut visible from the courtyard.
+    side: THREE.DoubleSide,
+  });
   const edgeMaterial = new THREE.LineBasicMaterial({
     color: 0x1f2937,
     transparent: true,
@@ -73,7 +80,9 @@ function extrudeElement(
     // Shape lies in the XY plane extruded along +Z; rotate so height runs along +Y.
     geometry.rotateX(-Math.PI / 2);
     geometry.translate(0, base, 0);
-    const mesh = new THREE.Mesh(geometry, material);
+    // ExtrudeGeometry assigns caps to material 0 and every vertical face,
+    // including hole walls, to material 1.
+    const mesh = new THREE.Mesh(geometry, [roofMaterial, wallMaterial]);
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), edgeMaterial);
     group.add(mesh, edges);
   }
@@ -88,18 +97,31 @@ function extrudeElement(
 function extrudeBuildingWithParts(
   { building, parts }: BuildingWithParts,
   projector: Projector,
-  colorFor: (index: number) => number,
+  colorFor: (element: BuildingElement, index: number) => number,
   edgeOpacity: number,
-): THREE.Group {
+): { group: THREE.Group; elements: Map<string, THREE.Object3D> } {
   const group = new THREE.Group();
+  const objects = new Map<string, THREE.Object3D>();
   // One level height for the whole building, so its parts stack on each other.
   const metersPerLevel = levelHeight(building.properties);
-  const covered = partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
-  const elements = covered ? parts : [building, ...parts];
+  const outlineIsAuthoritative = building.properties.geometry_modified === true;
+  const covered =
+    !outlineIsAuthoritative && partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
+  // A cut belongs to the outline geometry. Rendering covering parts instead
+  // would fill the opening again, so the edited outline becomes the solid.
+  const elements = outlineIsAuthoritative ? [building] : covered ? parts : [building, ...parts];
   elements.forEach((element, index) => {
-    group.add(extrudeElement(element, projector, metersPerLevel, colorFor(index), edgeOpacity));
+    const object = extrudeElement(
+      element,
+      projector,
+      metersPerLevel,
+      colorFor(element, index),
+      edgeOpacity,
+    );
+    objects.set(element.id, object);
+    group.add(object);
   });
-  return group;
+  return { group, elements: objects };
 }
 
 function footprintCenter(element: BuildingElement): LngLat {
@@ -120,6 +142,41 @@ interface BuildingScene {
   root: THREE.Group;
   /** Bounds of the selected building alone, so the camera frames it. */
   focus: THREE.Box3;
+  /** Lon/lat the local metric frame is centered on, for anything added later. */
+  origin: LngLat;
+}
+
+/** Dot size in meters. Roughly the spacing of a 16 points/m² scan. */
+const POINT_SIZE_M = 0.28;
+
+/**
+ * The laser cloud as dots in the same local frame as the buildings, so a roof
+ * that disagrees with its `height` tag reads as dots floating above or sunk
+ * into the extruded solid.
+ *
+ * Cloud heights are RH2000 levels while buildings stand on a zero ground plane,
+ * so every dot drops by the cloud's own ground level. That is one level for the
+ * whole neighborhood: on a slope the far side of the view sits slightly off,
+ * which is the same simplification the extruded buildings already make.
+ */
+export function buildPointCloud(cloud: LidarCloud, origin: LngLat): THREE.Points {
+  const projector = makeProjector(origin);
+  const positions = new Float32Array(cloud.count * 3);
+  for (let i = 0; i < cloud.count; i++) {
+    const [x, y] = projector.toLocal([cloud.lon[i], cloud.lat[i]]);
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = cloud.z[i] - cloud.groundZ;
+    // Three's local axes are east (+X), up (+Y), south (+Z), so north is -Z.
+    positions[i * 3 + 2] = -y;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(cloud.colours, 3));
+  return new THREE.Points(
+    geometry,
+    new THREE.PointsMaterial({ size: POINT_SIZE_M, sizeAttenuation: true, vertexColors: true }),
+  );
 }
 
 /**
@@ -128,20 +185,25 @@ interface BuildingScene {
  * gray for context, and a flat ground disc under everything.
  */
 export function buildScene(selection: BuildingSelection): BuildingScene {
-  const projector = makeProjector(footprintCenter(selection.building));
+  const origin = footprintCenter(selection.building);
+  const projector = makeProjector(origin);
 
   const root = new THREE.Group();
   const selected = extrudeBuildingWithParts(
     selection,
     projector,
-    (index) => PART_COLORS[index % PART_COLORS.length],
+    (_element, index) => PART_COLORS[index % PART_COLORS.length],
     0.35,
   );
-  root.add(selected);
-  const focus = new THREE.Box3().setFromObject(selected);
+  root.add(selected.group);
+  const focusTarget =
+    selection.selected.id === selection.building.id
+      ? selected.group
+      : (selected.elements.get(selection.selected.id) ?? selected.group);
+  const focus = new THREE.Box3().setFromObject(focusTarget);
 
   for (const neighbor of selection.neighbors) {
-    root.add(extrudeBuildingWithParts(neighbor, projector, () => NEIGHBOR_COLOR, 0.18));
+    root.add(extrudeBuildingWithParts(neighbor, projector, () => NEIGHBOR_COLOR, 0.18).group);
   }
 
   // Ground spans the half-diagonal of everything drawn, so no building
@@ -163,5 +225,5 @@ export function buildScene(selection: BuildingSelection): BuildingScene {
   grid.position.set(center.x, -0.04, center.z);
   root.add(grid);
 
-  return { root, focus };
+  return { root, focus, origin };
 }

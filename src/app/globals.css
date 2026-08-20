@@ -146,3 +146,12 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), var(--font-geist-sans), sans-serif;
 }
+
+.map-shell .maplibregl-ctrl-bottom-right {
+  transition: right 150ms ease;
+}
+
+/* Keep zoom and bearing controls in the visible map corner beside the panel. */
+.map-shell.building-panel-open .maplibregl-ctrl-bottom-right {
+  right: 28rem;
+}

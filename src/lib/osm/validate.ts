@@ -1,0 +1,562 @@
+import area from "@turf/area";
+import difference from "@turf/difference";
+import { featureCollection } from "@turf/helpers";
+import intersect from "@turf/intersect";
+import union from "@turf/union";
+import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
+import type { BuildingElement, LngLat } from "../buildings";
+import { elementFeature, openRing, ringCenter } from "../geometry";
+import { ringIsSimple } from "../geometry-edits";
+import { levelHeight, verticalExtent } from "../heights";
+import { overlapFraction } from "../parts";
+import {
+  type ChangesetPlan,
+  changesetSize,
+  MAX_CHANGESET_ELEMENTS,
+  MAX_WAY_NODES,
+} from "./changeset";
+import { hasErrors, issue, type Issue, sortIssues } from "./issues";
+import { selectFromOsm } from "./select";
+
+/**
+ * The checks that run before an upload. Errors block it, warnings are for a
+ * reviewer to accept or fix — the same split JOSM's validator uses.
+ *
+ * Where a rule exists upstream we follow it rather than inventing one: the
+ * numeric formats come from JOSM's `numeric.mapcss`, the geometry rules from its
+ * `geometry.mapcss` and validation tests, and the coverage rule from Simple 3D
+ * Buildings ("the entire building outline should be filled with building:part
+ * areas", which "may overlap each other or may be disjunct", while overlapping
+ * 3D volumes are to be avoided).
+ *
+ * Deliberately absent: any winding-order rule. OSM has none for buildings — "the
+ * direction of the ways does not matter" — and rewriting a way to satisfy one
+ * would bump its version for nothing.
+ */
+
+/** JOSM: `*[building:levels]` must be a non-negative count, halves allowed. */
+const LEVELS_VALUE = /^(([0-9]|[1-9][0-9]*)(\.5)?)$/;
+/** JOSM's preferred length format: a number, optionally followed by " m". */
+const LENGTH_VALUE = /^-?\d+(\.\d+)?( m)?$/;
+/** Feet and inches, which JOSM also accepts: `40'`, `5'11"`. */
+const LENGTH_IMPERIAL = /^\d+'(\d{1,2}(\.\d+)?")?$/;
+const LENGTH_LOOSE = /^-?\d+([.,]\d+)?\s*(metres?|meters?|m|ft|feet|')?$/i;
+
+const LENGTH_KEYS = ["height", "min_height", "roof:height"] as const;
+
+/** JOSM's `deprecated.mapcss`, limited to the keys this editor can produce. */
+const DEPRECATED_KEYS: Record<string, string> = {
+  "building:min_levels": "building:min_level",
+  min_levels: "building:min_level",
+  levels: "building:levels",
+  "building:height": "height",
+};
+
+/** JOSM `geometry.mapcss`: "Too large building". */
+const MAX_BUILDING_AREA_M2 = 920_000;
+
+/** Above this a building is rare enough worldwide to be worth a second look. */
+const IMPLAUSIBLE_HEIGHT_M = 300;
+
+/** A part this small is almost always a slice artefact rather than a structure. */
+const MIN_PART_AREA_M2 = 1;
+
+/** A part is at ground level when its base is within this of zero. */
+const GROUND_BASE_M = 0.5;
+
+/** Coverage gaps below both thresholds are rounding, not missing parts. */
+const COVERAGE_GAP_FRACTION = 0.02;
+const COVERAGE_GAP_M2 = 2;
+
+/**
+ * Shortest changeset comment worth having. Long enough that "ok" or a stray
+ * keystroke does not pass as a description of what changed.
+ */
+export const COMMENT_MIN_LENGTH = 5;
+
+/** The comment rule, shared so the field and the blocking check cannot disagree. */
+export function isUsableComment(comment: string): boolean {
+  return comment.trim().length >= COMMENT_MIN_LENGTH;
+}
+
+interface ValidationInput {
+  /** Features with the pending edits applied: what an upload would produce. */
+  displayed: FeatureCollection;
+  plan: ChangesetPlan;
+  /** The changeset comment the user typed. */
+  comment: string;
+}
+
+interface ValidationResult {
+  issues: Issue[];
+  errors: number;
+  warnings: number;
+  /** False when an upload must not be attempted. */
+  submittable: boolean;
+}
+
+type Polygonal = Feature<Polygon | MultiPolygon>;
+
+function polygonal(element: BuildingElement): Polygonal {
+  return elementFeature(element);
+}
+
+function safeArea(feature: Polygonal | null): number {
+  if (!feature) return 0;
+  try {
+    return area(feature);
+  } catch {
+    return 0;
+  }
+}
+
+function safeIntersect(a: Polygonal, b: Polygonal): Polygonal | null {
+  try {
+    return intersect(featureCollection([a, b])) as Polygonal | null;
+  } catch {
+    return null;
+  }
+}
+
+/** Structural checks on the elements the changeset would write. */
+function checkPlan(plan: ChangesetPlan, comment: string): Issue[] {
+  const issues: Issue[] = [...plan.issues];
+  const size = changesetSize(plan);
+
+  if (size === 0) {
+    issues.push(
+      issue(
+        "error",
+        "changeset-empty",
+        plan.dropped.length > 0
+          ? "Every pending change already matches OSM, so there is nothing to upload."
+          : "There is nothing to upload.",
+        plan.dropped,
+      ),
+    );
+  }
+  if (size > MAX_CHANGESET_ELEMENTS) {
+    issues.push(
+      issue(
+        "error",
+        "changeset-too-large",
+        `${size} elements exceeds the API limit of ${MAX_CHANGESET_ELEMENTS} per changeset; it has to be split.`,
+        [],
+      ),
+    );
+  }
+  if (!isUsableComment(comment)) {
+    issues.push(
+      issue(
+        "error",
+        "changeset-comment-missing",
+        "A changeset needs a comment saying what changed and where the data came from.",
+        [],
+      ),
+    );
+  }
+
+  for (const way of plan.ways) {
+    if (way.nodes.length > MAX_WAY_NODES) {
+      issues.push(
+        issue(
+          "error",
+          "way-too-many-nodes",
+          `${way.ref} would have ${way.nodes.length} nodes, over the API limit of ${MAX_WAY_NODES}.`,
+          [way.ref],
+        ),
+      );
+    }
+    if (way.nodes.length < 4 || way.nodes[0] !== way.nodes[way.nodes.length - 1]) {
+      issues.push(issue("error", "way-not-closed", `${way.ref} is not a closed area.`, [way.ref]));
+      continue;
+    }
+    const ring = way.nodes.slice(0, -1);
+    for (let i = 1; i < ring.length; i++) {
+      if (ring[i] === ring[i - 1]) {
+        issues.push(
+          issue("error", "duplicated-way-nodes", `${way.ref} lists the same node twice in a row.`, [
+            way.ref,
+          ]),
+        );
+        break;
+      }
+    }
+    if (new Set(ring).size !== ring.length) {
+      issues.push(
+        issue(
+          "error",
+          "self-touching-way",
+          `${way.ref} visits the same node twice, so its outline touches itself.`,
+          [way.ref],
+        ),
+      );
+    }
+  }
+
+  for (const relation of plan.relations) {
+    if (relation.tags.type !== "multipolygon") continue;
+    if (!relation.members.some((member) => member.role === "outer")) {
+      issues.push(
+        issue("error", "multipolygon-without-outer", `${relation.ref} has no outer member.`, [
+          relation.ref,
+        ]),
+      );
+    }
+    if (relation.members.some((member) => member.role !== "outer" && member.role !== "inner")) {
+      issues.push(
+        issue(
+          "error",
+          "multipolygon-member-role",
+          `${relation.ref} has a member whose role is neither outer nor inner.`,
+          [relation.ref],
+        ),
+      );
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * JOSM-derived tag checks, scoped to the keys this changeset writes.
+ *
+ * An element we only resend — the outline of a sliced building, say — keeps its
+ * tags byte for byte, and reporting on those means lecturing the user about
+ * somebody else's tagging in a dialog about their own edit. The cross-tag
+ * consistency rules below still read the element's full effective state, because
+ * that state is what the upload produces, but they only run when we are writing
+ * its tags at all.
+ */
+function checkTags(element: BuildingElement, changedKeys: Set<string>): Issue[] {
+  if (changedKeys.size === 0) return [];
+  const issues: Issue[] = [];
+  const tags = (element.properties.tags ?? {}) as Record<string, string>;
+  const at = element.polygons[0] ? ringCenter(element.polygons[0].outer) : undefined;
+  const report = (level: Issue["level"], check: string, message: string) =>
+    issues.push(issue(level, check, `${element.id}: ${message}`, [element.id], at));
+
+  for (const key of changedKeys) {
+    const value = tags[key];
+    if (value === undefined) continue;
+    const replacement = DEPRECATED_KEYS[key];
+    if (replacement && replacement !== key) {
+      report("warning", "deprecated-key", `\`${key}\` is deprecated; use \`${replacement}\`.`);
+    }
+    // Uppercase alone is not suspicious: `ref:SE:raa` and `name:en` are ordinary
+    // OSM keys. Whitespace in a key never is.
+    if (/\s/.test(key)) {
+      report("warning", "suspicious-key", `\`${key}\` has whitespace in the key.`);
+    }
+    if (value !== value.trim()) {
+      report("warning", "value-whitespace", `\`${key}\` has leading or trailing whitespace.`);
+    }
+  }
+
+  const levels = changedKeys.has("building:levels") ? tags["building:levels"] : undefined;
+  if (levels !== undefined && !LEVELS_VALUE.test(levels)) {
+    report(
+      "error",
+      levels.startsWith("-") ? "negative-levels" : "levels-format",
+      levels.startsWith("-")
+        ? `negative \`building:levels\` value \`${levels}\`.`
+        : `\`building:levels=${levels}\` is not a level count (whole numbers, or .5).`,
+    );
+  }
+
+  for (const key of LENGTH_KEYS) {
+    const value = tags[key];
+    if (value === undefined || !changedKeys.has(key)) continue;
+    if (LENGTH_VALUE.test(value) || LENGTH_IMPERIAL.test(value)) continue;
+    if (value.includes(",")) {
+      report(
+        "warning",
+        "decimal-separator",
+        `\`${key}=${value}\`: use . instead of , for decimals.`,
+      );
+    } else if (LENGTH_LOOSE.test(value)) {
+      report(
+        "warning",
+        "unusual-length-format",
+        `\`${key}=${value}\`: use the abbreviation m with a space between value and unit.`,
+      );
+    } else {
+      report("error", "length-format", `\`${key}=${value}\` is not a length.`);
+    }
+  }
+
+  const height = element.properties.height;
+  const minHeight = element.properties.min_height;
+  const roofHeight = Number.parseFloat(tags["roof:height"] ?? "");
+  const minLevel = element.properties.min_floor;
+  const levelCount = element.properties.num_floors;
+
+  if (typeof height === "number" && height <= 0) {
+    report("error", "height-not-positive", `\`height=${tags.height}\` must be above zero.`);
+  }
+  if (typeof height === "number" && height > IMPLAUSIBLE_HEIGHT_M) {
+    report("warning", "implausible-height", `\`height=${tags.height}\` is unusually tall.`);
+  }
+  if (typeof height === "number" && typeof minHeight === "number" && minHeight >= height) {
+    report(
+      "error",
+      "min-height-above-height",
+      `\`min_height=${tags.min_height}\` is not below \`height=${tags.height}\`.`,
+    );
+  }
+  if (typeof height === "number" && Number.isFinite(roofHeight) && roofHeight > height) {
+    report(
+      "error",
+      "roof-height-above-height",
+      `\`roof:height=${tags["roof:height"]}\` is taller than the whole building.`,
+    );
+  }
+  if (typeof minLevel === "number" && typeof levelCount === "number" && minLevel >= levelCount) {
+    report(
+      "error",
+      "min-level-above-levels",
+      `\`building:min_level=${tags["building:min_level"]}\` skips every level of \`building:levels=${tags["building:levels"]}\`.`,
+    );
+  }
+
+  return issues;
+}
+
+function ringIssues(element: BuildingElement): Issue[] {
+  const issues: Issue[] = [];
+  for (const footprint of element.polygons) {
+    for (const ring of [footprint.outer, ...footprint.holes]) {
+      const open = openRing(ring);
+      if (open.length < 3) {
+        issues.push(
+          issue(
+            "error",
+            "degenerate-ring",
+            `${element.id} has a ring with fewer than three corners.`,
+            [element.id],
+            open[0],
+          ),
+        );
+        continue;
+      }
+      if (!ringIsSimple(open)) {
+        issues.push(
+          issue(
+            "error",
+            "self-intersecting-way",
+            `${element.id} has an outline that crosses or repeats itself.`,
+            [element.id],
+            ringCenter(open),
+          ),
+        );
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * The part of the outline no ground-level part covers. Parts are unioned rather
+ * than summed: overlapping parts are legal, so summing their areas hides gaps
+ * (which is why `partsCoverage` is a rendering threshold, not a check).
+ */
+function groundCoverageGap(
+  building: BuildingElement,
+  parts: BuildingElement[],
+): { gap: number; fraction: number; at?: LngLat } | null {
+  const footprint = safeArea(polygonal(building));
+  if (footprint <= 0) return null;
+  const metersPerLevel = levelHeight(building.properties);
+  const atGround = parts.filter(
+    (part) => verticalExtent(part.properties, metersPerLevel).base <= GROUND_BASE_M,
+  );
+  if (atGround.length === 0) {
+    return { gap: footprint, fraction: 1, at: ringCenter(building.polygons[0].outer) };
+  }
+
+  let merged: Polygonal | null = null;
+  for (const part of atGround) {
+    const next = polygonal(part);
+    if (!merged) {
+      merged = next;
+      continue;
+    }
+    try {
+      merged = (union(featureCollection([merged, next])) as Polygonal | null) ?? merged;
+    } catch {
+      // Touching walls can defeat the boolean op; keep what merged so far and
+      // let the gap read high rather than claiming full coverage.
+    }
+  }
+  if (!merged) return null;
+
+  let remainder: Polygonal | null = null;
+  try {
+    remainder = difference(featureCollection([polygonal(building), merged])) as Polygonal | null;
+  } catch {
+    return null;
+  }
+  const gap = safeArea(remainder);
+  if (gap <= 0 || !remainder) return null;
+  const first =
+    remainder.geometry.type === "Polygon"
+      ? remainder.geometry.coordinates[0]
+      : remainder.geometry.coordinates[0][0];
+  return {
+    gap,
+    fraction: gap / footprint,
+    at: first ? ringCenter(first.map((p): LngLat => [p[0], p[1]])) : undefined,
+  };
+}
+
+/** Simple 3D Buildings checks across one building and its parts. */
+function checkBuilding(
+  building: BuildingElement,
+  parts: BuildingElement[],
+  written: Set<string>,
+): Issue[] {
+  const issues: Issue[] = [];
+  const footprint = safeArea(polygonal(building));
+
+  if (footprint > MAX_BUILDING_AREA_M2) {
+    issues.push(
+      issue(
+        "warning",
+        "too-large-building",
+        `${building.id} covers ${Math.round(footprint / 1000)} 000 m², which is larger than any real building.`,
+        [building.id],
+      ),
+    );
+  }
+
+  const metersPerLevel = levelHeight(building.properties);
+  const buildingTop = verticalExtent(building.properties, metersPerLevel).top;
+  const hasBuildingHeight =
+    typeof building.properties.height === "number" ||
+    typeof building.properties.num_floors === "number";
+
+  for (const part of parts) {
+    const inside = overlapFraction(part, building);
+    if (inside < 0.999) {
+      issues.push(
+        issue(
+          // Only block on a part this changeset writes. The same defect on a part
+          // we merely happen to sit next to is somebody else's, and pre-existing.
+          written.has(part.id) ? "error" : "warning",
+          "part-outside-outline",
+          `${part.id} has ${Math.round((1 - inside) * 100)}% of its footprint outside ${building.id}; a part must stay within its outline.`,
+          [part.id, building.id],
+          ringCenter(part.polygons[0].outer),
+        ),
+      );
+    }
+    const partArea = safeArea(polygonal(part));
+    if (partArea > 0 && partArea < MIN_PART_AREA_M2) {
+      issues.push(
+        issue(
+          "warning",
+          "tiny-part",
+          `${part.id} is only ${partArea.toFixed(1)} m²; check whether it is a slice artefact.`,
+          [part.id],
+          ringCenter(part.polygons[0].outer),
+        ),
+      );
+    }
+    const top = verticalExtent(part.properties, metersPerLevel).top;
+    if (hasBuildingHeight && top > buildingTop + 0.5) {
+      issues.push(
+        issue(
+          "warning",
+          "part-above-building",
+          `${part.id} reaches ${top.toFixed(1)} m, above the ${buildingTop.toFixed(1)} m of ${building.id}; the outline should carry the overall height.`,
+          [part.id, building.id],
+        ),
+      );
+    }
+  }
+
+  // 2D overlap between parts is explicitly allowed; overlapping *volumes* are
+  // what Simple 3D Buildings tells us to avoid.
+  for (let i = 0; i < parts.length; i++) {
+    for (let j = i + 1; j < parts.length; j++) {
+      const a = verticalExtent(parts[i].properties, metersPerLevel);
+      const b = verticalExtent(parts[j].properties, metersPerLevel);
+      const overlapTop = Math.min(a.top, b.top);
+      const overlapBase = Math.max(a.base, b.base);
+      if (overlapTop - overlapBase <= 0.01) continue;
+      const shared = safeIntersect(polygonal(parts[i]), polygonal(parts[j]));
+      const sharedArea = safeArea(shared);
+      if (sharedArea < MIN_PART_AREA_M2) continue;
+      issues.push(
+        issue(
+          "warning",
+          "overlapping-volumes",
+          `${parts[i].id} and ${parts[j].id} share ${sharedArea.toFixed(1)} m² between ${overlapBase.toFixed(1)} m and ${overlapTop.toFixed(1)} m, so their 3D volumes overlap.`,
+          [parts[i].id, parts[j].id],
+        ),
+      );
+    }
+  }
+
+  if (parts.length > 0) {
+    const coverage = groundCoverageGap(building, parts);
+    if (coverage && coverage.fraction > COVERAGE_GAP_FRACTION && coverage.gap > COVERAGE_GAP_M2) {
+      issues.push(
+        issue(
+          "warning",
+          "outline-not-covered",
+          `${Math.round(coverage.fraction * 100)}% of ${building.id} (${Math.round(coverage.gap)} m²) is not covered by any ground-level part; the whole outline should be filled.`,
+          [building.id],
+          coverage.at,
+        ),
+      );
+    }
+  }
+
+  return issues;
+}
+
+/** Run every pre-upload check over the plan and the geometry it would produce. */
+export function validateChangeset(input: ValidationInput): ValidationResult {
+  const { displayed, plan, comment } = input;
+  const issues = checkPlan(plan, comment);
+
+  const buildings = new Map<string, { building: BuildingElement; parts: BuildingElement[] }>();
+  /** Elements this changeset writes: only their own defects are ours to block on. */
+  const written = new Set(plan.entries.map((entry) => entry.ref));
+
+  for (const entry of plan.entries) {
+    const selection = selectFromOsm(displayed, entry.ref);
+    if (!selection) {
+      issues.push(
+        issue(
+          "error",
+          "element-not-found",
+          `${entry.ref} is not in the loaded data, so it cannot be checked — pan back to it.`,
+          [entry.ref],
+        ),
+      );
+      continue;
+    }
+    buildings.set(selection.building.id, {
+      building: selection.building,
+      parts: selection.parts,
+    });
+    // The element the entry is about, and nothing else: a neighbouring part with
+    // a ring OSM has carried for years must not block this upload.
+    issues.push(...ringIssues(selection.selected));
+    issues.push(...checkTags(selection.selected, new Set(entry.tagChanges.map((c) => c.key))));
+  }
+
+  for (const { building, parts } of buildings.values()) {
+    issues.push(...checkBuilding(building, parts, written));
+  }
+
+  const sorted = sortIssues(issues);
+  return {
+    issues: sorted,
+    errors: sorted.filter((found) => found.level === "error").length,
+    warnings: sorted.filter((found) => found.level === "warning").length,
+    submittable: !hasErrors(sorted),
+  };
+}

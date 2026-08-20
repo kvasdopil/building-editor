@@ -2,6 +2,15 @@
 # yarn lockfile v1
 
 
+"3d-tiles-renderer@^0.5.1":
+  version "0.5.1"
+  resolved "https://registry.yarnpkg.com/3d-tiles-renderer/-/3d-tiles-renderer-0.5.1.tgz#847f6f6cdc8ddb85e4373332e44756cbd95e278a"
+  integrity sha512-pR1pfY4LM4L0EqmSbhlCyQ8DMbZeXao5W3q9V4AyZcL1dSFncWPk3nwliIdI5N4nH3sULoZEr43Rq4MzXflTLQ==
+  dependencies:
+    "@mapbox/vector-tile" "^2.0.3"
+    pbf "^4.0.1"
+    pmtiles "^4.3.2"
+
 "@alloc/quick-lru@^5.2.0":
   version "5.2.0"
   resolved "https://registry.yarnpkg.com/@alloc/quick-lru/-/quick-lru-5.2.0.tgz#7bf68b20c0a350f936915fcae06f58e32007ce30"
@@ -63,6 +72,20 @@
   integrity sha512-WI0DdZ8xFSbgMjR1sFsKABJ/C5OnRrjT06JXbZKexJGrDuPTzZdDYfFlsgcCXCyf+suG5QU2e/y1Wo2V/OapLQ==
   dependencies:
     tslib "^2.4.0"
+
+"@flatten-js/core@^1.6.14":
+  version "1.6.14"
+  resolved "https://registry.yarnpkg.com/@flatten-js/core/-/core-1.6.14.tgz#9953c5545864cfe8b265f72cb274fc88da93994a"
+  integrity sha512-9Aa7Y+tTDtTGjL2mH5dYAGeY43CISj0w1DxQ0MPxgWnwVuIJV6jzRlTNHGSeJEnleMngldwdZORarOMcszqpLg==
+  dependencies:
+    "@flatten-js/interval-tree" "^2.0.0"
+
+"@flatten-js/interval-tree@^2.0.0":
+  version "2.0.3"
+  resolved "https://registry.yarnpkg.com/@flatten-js/interval-tree/-/interval-tree-2.0.3.tgz#60304775c402a2fe875379919c9797347121d76e"
+  integrity sha512-Lv3eaITqU20WD+5W8L7JeJdjDXC9hfTUEzY0cRLx/sXj1+P3XdK6Fig4UdxvsekakTK8XeOwnpAKEpTI728U4g==
+  dependencies:
+    tslib "^2.8.1"
 
 "@img/colour@^1.0.0":
   version "1.0.0"
@@ -293,6 +316,15 @@
   version "1.0.0"
   resolved "https://registry.yarnpkg.com/@mapbox/unitbezier/-/unitbezier-1.0.0.tgz#54319aff6c467bb1b909e04895c08cdb966bfbff"
   integrity sha512-fqd515fjBmANKGGsQ286E2Wvj/XvDFpGzwJxq4CI6jMQue6Oy04uCKp+JWKF00xRTmk6cEu1jPJ9p3xqH8YWqQ==
+
+"@mapbox/vector-tile@^2.0.3":
+  version "2.0.5"
+  resolved "https://registry.yarnpkg.com/@mapbox/vector-tile/-/vector-tile-2.0.5.tgz#d00d894c9ad9350068a4e697e114c47d67072b54"
+  integrity sha512-pXj8m7KTsqZt+1jsE0xIpGvqTSbblfkuEJL/NJmNePMtEwxO8V3XMDo9WMSfDeqHvCtBI9Lmt4mGcGR10zecmw==
+  dependencies:
+    "@mapbox/point-geometry" "~1.1.0"
+    "@types/geojson" "^7946.0.16"
+    pbf "^4.0.2"
 
 "@mapbox/vector-tile@^3.0.0":
   version "3.0.0"
@@ -856,6 +888,17 @@
     "@types/geojson" "^7946.0.10"
     tslib "^2.8.1"
 
+"@turf/difference@^7.4.0":
+  version "7.4.0"
+  resolved "https://registry.yarnpkg.com/@turf/difference/-/difference-7.4.0.tgz#3ff3aaba60a68b41fa42e8cc790fbb1b4f86d7e5"
+  integrity sha512-4zV7Xi3CwUdyNsDzrPty08PiUeYYVBdbCnNVlSf8sk5Z7SL7seA42RabRG8ByTzcrbLATeDU4oTEthVhOGPlyw==
+  dependencies:
+    "@turf/helpers" "7.4.0"
+    "@turf/meta" "7.4.0"
+    "@types/geojson" "^7946.0.10"
+    polyclip-ts "^0.16.8"
+    tslib "^2.8.1"
+
 "@turf/helpers@7.4.0", "@turf/helpers@^7.4.0":
   version "7.4.0"
   resolved "https://registry.yarnpkg.com/@turf/helpers/-/helpers-7.4.0.tgz#5589f04812ac95f8985e9396db01d9e70f4a35d5"
@@ -882,6 +925,17 @@
   dependencies:
     "@turf/helpers" "7.4.0"
     "@types/geojson" "^7946.0.10"
+    tslib "^2.8.1"
+
+"@turf/union@^7.4.0":
+  version "7.4.0"
+  resolved "https://registry.yarnpkg.com/@turf/union/-/union-7.4.0.tgz#903a7ce68c90b71bf541235cc54e8551364b32e1"
+  integrity sha512-SYVtsCW9IznTyKlcGWxssRrf90p/hdpch1UeIcZc31pkSVdmeLOyuzPx0ef3UPmaF//fgXAphMph6JWA/FpKbA==
+  dependencies:
+    "@turf/helpers" "7.4.0"
+    "@turf/meta" "7.4.0"
+    "@types/geojson" "^7946.0.10"
+    polyclip-ts "^0.16.8"
     tslib "^2.8.1"
 
 "@tweenjs/tween.js@~23.1.3":
@@ -1774,6 +1828,13 @@ path-parse@^1.0.7:
   resolved "https://registry.yarnpkg.com/path-parse/-/path-parse-1.0.7.tgz#fbc114b60ca42b30d9daf5858e4bd68bbedb6735"
   integrity sha512-LDJzPVEEEPR+y48z93A0Ed0yXb8pAByGWo/k5YYdYgpY2/2EsOsksJrq7lOHxryrVOn1ejG6oAp8ahvOIQD8sw==
 
+pbf@^4.0.1, pbf@^4.0.2:
+  version "4.0.2"
+  resolved "https://registry.yarnpkg.com/pbf/-/pbf-4.0.2.tgz#70f71a5c4df774438c1db482630146decb03e2d9"
+  integrity sha512-J0ajxARhZfpUEebxYs1vhMGMuLSXtBe1e+fFPDrf2uA2hgo+UshKfNUWOz92HJNz6/NFEXseQPddnHkTreWRqg==
+  dependencies:
+    resolve-protobuf-schema "^2.1.0"
+
 pbf@^5.0.0, pbf@^5.1.0, pbf@^5.1.2:
   version "5.1.2"
   resolved "https://registry.yarnpkg.com/pbf/-/pbf-5.1.2.tgz#07c427819eda32f02f1ec9741558f61444f2e1c0"
@@ -1796,7 +1857,7 @@ picomatch@^4.0.1:
   resolved "https://registry.yarnpkg.com/picomatch/-/picomatch-4.0.3.tgz#796c76136d1eead715db1e7bad785dedd695a042"
   integrity sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q==
 
-pmtiles@^4.5.0:
+pmtiles@^4.3.2, pmtiles@^4.5.0:
   version "4.5.0"
   resolved "https://registry.yarnpkg.com/pmtiles/-/pmtiles-4.5.0.tgz#09172312c8691e4ce66677f77aeb6c125d33cf32"
   integrity sha512-CBeD4SoUluFziGdy/8k7FOjQxQy486n+929W/tWophauvMICpkZ26vGBWhDt/6b1FZQWNaf4jFdT/5+q0Wii5w==

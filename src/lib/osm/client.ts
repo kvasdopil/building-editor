@@ -2,7 +2,7 @@
 
 import type { Feature, FeatureCollection } from "geojson";
 import type { Bounds } from "../geometry";
-import { idbGet, idbPut, TILE_STORE } from "../idb";
+import { idbDelete, idbGet, idbPut, TILE_STORE } from "../idb";
 import { type TileId, tileKey, tilesInBounds } from "./tiles";
 
 /**
@@ -28,6 +28,11 @@ interface StoredTile {
 export interface TileLoader {
   /** Queue the tiles covering `bounds`; already-known tiles are skipped. */
   load(bounds: Bounds): void;
+  /**
+   * Refetch the tiles covering `bounds`, past every cache. Used once an upload
+   * lands: the cached tiles still describe the data it replaced.
+   */
+  refresh(bounds: Bounds): void;
   stop(): void;
 }
 
@@ -50,7 +55,8 @@ export function createTileLoader(
   const loaded = new Set<string>();
   /** Tiles already claimed, so a viewport change does not queue them twice. */
   const claimed = new Set<string>();
-  const queue: TileId[] = [];
+  /** Queued work; `fresh` tiles bypass every cache on the way out. */
+  const queue: { tile: TileId; fresh: boolean }[] = [];
   let active = 0;
   let failed = 0;
   let stopped = false;
@@ -71,9 +77,9 @@ export function createTileLoader(
 
   const pump = () => {
     while (!stopped && active < MAX_CONCURRENT_FETCHES && queue.length > 0) {
-      const tile = queue.shift() as TileId;
+      const { tile, fresh } = queue.shift() as { tile: TileId; fresh: boolean };
       active++;
-      void fetchTile(tile).finally(() => {
+      void fetchTile(tile, fresh).finally(() => {
         active--;
         // Emit after the count drops, or the last tile would leave the UI
         // reporting work that has already finished.
@@ -83,10 +89,12 @@ export function createTileLoader(
     }
   };
 
-  const fetchTile = async (tile: TileId) => {
+  const fetchTile = async (tile: TileId, fresh = false) => {
     const key = tileKey(tile);
     try {
-      const response = await fetch(`/api/osm/tile/${tile.z}/${tile.x}/${tile.y}`);
+      const response = await fetch(
+        `/api/osm/tile/${tile.z}/${tile.x}/${tile.y}${fresh ? "?fresh=1" : ""}`,
+      );
       if (!response.ok) {
         failed++;
         // Allow a later viewport change to retry this tile.
@@ -118,11 +126,26 @@ export function createTileLoader(
             emit();
             return;
           }
-          queue.push(tile);
+          queue.push({ tile, fresh: false });
           pump();
         });
       }
     },
+    refresh(bounds) {
+      if (stopped) return;
+      for (const tile of tilesInBounds(bounds, MAX_TILES_PER_VIEW)) {
+        const key = tileKey(tile);
+        if (queue.some((queued) => queued.fresh && tileKey(queued.tile) === key)) continue;
+        // Drop every trace of the old tile: the browser copy, and the record that
+        // says we already have it. The server copy is bypassed by `fresh`.
+        claimed.add(key);
+        loaded.delete(key);
+        void idbDelete(TILE_STORE, key);
+        queue.push({ tile, fresh: true });
+      }
+      pump();
+    },
+
     stop() {
       stopped = true;
       queue.length = 0;

@@ -48,10 +48,10 @@ function tileResponse(
   });
 }
 
-export const GET = tileRoute(async (tile) => {
+export const GET = tileRoute(async (tile, { fresh }) => {
   const key = [String(tile.z), String(tile.x), String(tile.y)];
   const cached = await readCachedTile<FeatureCollection>(key);
-  if (cached && isFresh(cached)) return tileResponse(cached, "hit");
+  if (!fresh && cached && isFresh(cached)) return tileResponse(cached, "hit");
 
   try {
     const entry = await singleFlight(key, () => loadTile(tile, key));

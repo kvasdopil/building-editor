@@ -15,72 +15,15 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { unzipSync } from "fflate";
+import { parseArgs } from "./lib/args.mjs";
+import { makeSweref99Inverse } from "./lib/sweref99.mjs";
+import { TILE_ZOOM, tileFor } from "./lib/tiles.mjs";
 
 const SOURCE_URL =
   "https://dataportalen.stockholm.se/dataportalen/Data/Stadsbyggnadskontoret/LOD1_stadsdelsnamnder_SHP.zip";
 
-const TILE_ZOOM = 16;
-
 /** Ignore blocks smaller than this footprint; they are sheds, not buildings. */
 const MIN_AREA_M2 = 10;
-
-// ---------------------------------------------------------------- projection
-
-/**
- * Inverse Gauss conformal projection (Transverse Mercator) for SWEREF99 18 00,
- * following Lantmäteriet's published Krüger series. GRS80 ellipsoid, central
- * meridian 18°, scale 1, false easting 150000.
- */
-function makeSweref99Inverse({ lon0 = 18, k0 = 1, falseEasting = 150000, falseNorthing = 0 } = {}) {
-  const axis = 6378137.0;
-  const flattening = 1 / 298.257222101;
-
-  const e2 = flattening * (2 - flattening);
-  const n = flattening / (2 - flattening);
-  const aRoof = (axis / (1 + n)) * (1 + n ** 2 / 4 + n ** 4 / 64);
-
-  const delta1 = n / 2 - (2 * n ** 2) / 3 + (37 * n ** 3) / 96 - n ** 4 / 360;
-  const delta2 = n ** 2 / 48 + n ** 3 / 15 - (437 * n ** 4) / 1440;
-  const delta3 = (17 * n ** 3) / 480 - (37 * n ** 4) / 840;
-  const delta4 = (4397 * n ** 4) / 161280;
-
-  const aStar = e2 + e2 ** 2 + e2 ** 3 + e2 ** 4;
-  const bStar = -(7 * e2 ** 2 + 17 * e2 ** 3 + 30 * e2 ** 4) / 6;
-  const cStar = (224 * e2 ** 3 + 889 * e2 ** 4) / 120;
-  const dStar = -(4279 * e2 ** 4) / 1260;
-
-  const degrees = (radians) => (radians * 180) / Math.PI;
-
-  return function toWgs84(easting, northing) {
-    const xi = (northing - falseNorthing) / (k0 * aRoof);
-    const eta = (easting - falseEasting) / (k0 * aRoof);
-
-    const xiPrim =
-      xi -
-      delta1 * Math.sin(2 * xi) * Math.cosh(2 * eta) -
-      delta2 * Math.sin(4 * xi) * Math.cosh(4 * eta) -
-      delta3 * Math.sin(6 * xi) * Math.cosh(6 * eta) -
-      delta4 * Math.sin(8 * xi) * Math.cosh(8 * eta);
-    const etaPrim =
-      eta -
-      delta1 * Math.cos(2 * xi) * Math.sinh(2 * eta) -
-      delta2 * Math.cos(4 * xi) * Math.sinh(4 * eta) -
-      delta3 * Math.cos(6 * xi) * Math.sinh(6 * eta) -
-      delta4 * Math.cos(8 * xi) * Math.sinh(8 * eta);
-
-    const phiStar = Math.asin(Math.sin(xiPrim) / Math.cosh(etaPrim));
-    const deltaLambda = Math.atan(Math.sinh(etaPrim) / Math.cos(xiPrim));
-
-    const sinPhi2 = Math.sin(phiStar) ** 2;
-    const latitude =
-      phiStar +
-      Math.sin(phiStar) *
-        Math.cos(phiStar) *
-        (aStar + bStar * sinPhi2 + cStar * sinPhi2 ** 2 + dStar * sinPhi2 ** 3);
-
-    return [lon0 + degrees(deltaLambda), degrees(latitude)];
-  };
-}
 
 // ------------------------------------------------------------------ shapefile
 
@@ -183,27 +126,12 @@ function ringArea(ring) {
   return Math.abs(sum) / 2;
 }
 
-function tileFor(lon, lat) {
-  const scale = 2 ** TILE_ZOOM;
-  const rad = (lat * Math.PI) / 180;
-  return {
-    x: Math.floor(((lon + 180) / 360) * scale),
-    y: Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * scale),
-  };
-}
-
 const round = (value, digits) => {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 };
 
 // --------------------------------------------------------------------- main
-
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 2; i < argv.length; i += 2) args[argv[i].replace(/^--/, "")] = argv[i + 1];
-  return args;
-}
 
 async function collectShapefiles({ zip, src }) {
   if (src) {

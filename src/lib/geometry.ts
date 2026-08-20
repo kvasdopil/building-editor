@@ -74,6 +74,74 @@ export function ringCenter(ring: LngLat[]): LngLat {
   return [lon / ring.length, lat / ring.length];
 }
 
+function cross(a: LngLat, b: LngLat, c: LngLat): number {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function onSegment(a: LngLat, b: LngLat, point: LngLat): boolean {
+  const epsilon = 1e-12;
+  return (
+    Math.abs(cross(a, b, point)) < epsilon &&
+    point[0] >= Math.min(a[0], b[0]) - epsilon &&
+    point[0] <= Math.max(a[0], b[0]) + epsilon &&
+    point[1] >= Math.min(a[1], b[1]) - epsilon &&
+    point[1] <= Math.max(a[1], b[1]) + epsilon
+  );
+}
+
+/** Whether segments a-b and c-d meet, touching at an endpoint included. */
+export function segmentsIntersect(a: LngLat, b: LngLat, c: LngLat, d: LngLat): boolean {
+  const abC = cross(a, b, c);
+  const abD = cross(a, b, d);
+  const cdA = cross(c, d, a);
+  const cdB = cross(c, d, b);
+  if (abC > 0 !== abD > 0 && cdA > 0 !== cdB > 0) return true;
+  return onSegment(a, b, c) || onSegment(a, b, d) || onSegment(c, d, a) || onSegment(c, d, b);
+}
+
+/**
+ * Signed area of a ring, in squared coordinate units: positive counter-clockwise,
+ * negative clockwise. Only the sign is meaningful — use `@turf/area` for meters.
+ *
+ * OSM itself has no winding convention for buildings ("the direction of the ways
+ * does not matter" per the multipolygon wiki, and JOSM only checks the direction
+ * of `natural=coastline` and `natural=land`), so this is never a reason to
+ * rewrite an existing way. It exists for our own geometry: GeoJSON RFC 7946
+ * wants outer rings counter-clockwise and holes clockwise, and turf, MapLibre
+ * and the 3D extrusion all read that.
+ */
+export function signedRingArea(ring: LngLat[]): number {
+  const open = openRing(ring);
+  let sum = 0;
+  for (let index = 0; index < open.length; index++) {
+    const current = open[index];
+    const next = open[(index + 1) % open.length];
+    sum += current[0] * next[1] - next[0] * current[1];
+  }
+  return sum / 2;
+}
+
+/** The ring without its repeated closing point. */
+export function openRing(ring: LngLat[]): LngLat[] {
+  const last = ring[ring.length - 1];
+  return ring.length > 1 && ring[0][0] === last[0] && ring[0][1] === last[1]
+    ? ring.slice(0, -1)
+    : ring;
+}
+
+/** The ring with its closing point repeated, as GeoJSON requires. */
+export function closeRing(ring: LngLat[]): LngLat[] {
+  const open = openRing(ring);
+  return open.length > 0 ? [...open, open[0]] : open;
+}
+
+/** The ring re-wound to the requested direction, without its closing point. */
+export function orientRing(ring: LngLat[], winding: "ccw" | "cw"): LngLat[] {
+  const open = openRing(ring);
+  const clockwise = signedRingArea(open) < 0;
+  return clockwise === (winding === "cw") ? open : [...open].reverse();
+}
+
 /** Convert GeoJSON polygonal geometry into footprints, dropping degenerate rings. */
 export function toFootprints(geometry: Polygon | MultiPolygon): Footprint[] {
   const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
@@ -95,4 +163,13 @@ export function elementFeature(element: BuildingElement): Feature<MultiPolygon> 
       coordinates: element.polygons.map((p) => [p.outer, ...p.holes]),
     },
   };
+}
+
+/** Half-diagonal of a lon/lat bounds, in meters. */
+export function boundsRadiusMeters([west, south, east, north]: Bounds): number {
+  const cosLat = Math.max(Math.cos((((south + north) / 2) * Math.PI) / 180), 0.01);
+  return (
+    Math.hypot((east - west) * cosLat * METERS_PER_DEG_LAT, (north - south) * METERS_PER_DEG_LAT) /
+    2
+  );
 }

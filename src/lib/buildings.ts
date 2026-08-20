@@ -23,6 +23,10 @@ export interface BuildingProperties {
   min_height?: number;
   min_floor?: number;
   has_parts?: boolean;
+  /** Pending local edits exist for this element; used by derived map styling. */
+  locally_modified?: boolean;
+  /** A local footprint override exists; the 3D outline must remain authoritative. */
+  geometry_modified?: boolean;
   "@name"?: string;
   [key: string]: unknown;
 }
@@ -42,8 +46,10 @@ export interface BuildingWithParts {
 
 /** The result of picking a building on the map. */
 export interface BuildingSelection extends BuildingWithParts {
+  /** The entity the user picked: either the building outline or one of its parts. */
+  selected: BuildingElement;
   /** Nearby buildings, drawn as context in the 3D view. */
   neighbors: BuildingWithParts[];
-  /** Outlines of the selected building and its parts, for map highlighting. */
+  /** Geometry to highlight for the active building or part. */
   outline: FeatureCollection;
 }

@@ -15,9 +15,13 @@
     "postinstall": "cp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs public/"
   },
   "dependencies": {
+    "3d-tiles-renderer": "^0.5.1",
+    "@flatten-js/core": "^1.6.14",
     "@turf/area": "^7.4.0",
+    "@turf/difference": "^7.4.0",
     "@turf/helpers": "^7.4.0",
     "@turf/intersect": "^7.4.0",
+    "@turf/union": "^7.4.0",
     "maplibre-gl": "^6.4.1",
     "next": "16.0.0",
     "pmtiles": "^4.5.0",

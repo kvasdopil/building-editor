@@ -6,7 +6,7 @@ import type {
   BuildingWithParts,
 } from "../buildings";
 import { toFootprints } from "../geometry";
-import { belongsToBuilding } from "../parts";
+import { belongsToBuilding, overlapFraction } from "../parts";
 import { assembleSelection } from "../selection";
 
 /**
@@ -30,12 +30,12 @@ function partsInside(building: BuildingElement, parts: BuildingElement[]): Build
 }
 
 /**
- * Assemble the clicked building, its parts and its neighbors out of the loaded
- * live-OSM feature collection.
+ * Assemble the clicked building or part, its parent building, sibling parts,
+ * and neighbors out of the loaded live-OSM feature collection.
  */
 export function selectFromOsm(
   collection: FeatureCollection,
-  buildingId: string,
+  elementId: string,
 ): BuildingSelection | null {
   const buildings: BuildingElement[] = [];
   const parts: BuildingElement[] = [];
@@ -46,15 +46,26 @@ export function selectFromOsm(
     else buildings.push(element);
   }
 
-  const target = buildings.find((building) => building.id === buildingId);
-  if (!target) return null;
-
   const withParts = (building: BuildingElement): BuildingWithParts => ({
     building,
     parts: partsInside(building, parts),
   });
+
+  const selectedBuilding = buildings.find((building) => building.id === elementId);
+  const selectedPart = parts.find((part) => part.id === elementId);
+  const selected = selectedBuilding ?? selectedPart;
+  if (!selected) return null;
+
+  const parent = selectedBuilding
+    ? selectedBuilding
+    : buildings
+        .filter((building) => belongsToBuilding(selected, building))
+        .sort((a, b) => overlapFraction(selected, b) - overlapFraction(selected, a))[0];
+  const target = parent ? withParts(parent) : { building: selected, parts: [] };
+
   return assembleSelection(
-    withParts(target),
-    buildings.filter((building) => building.id !== buildingId).map(withParts),
+    target,
+    buildings.filter((building) => building.id !== target.building.id).map(withParts),
+    selected,
   );
 }

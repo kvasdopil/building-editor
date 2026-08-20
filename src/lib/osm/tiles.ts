@@ -19,7 +19,7 @@ export function tileKey({ z, x, y }: TileId): string {
   return `${z}/${x}/${y}`;
 }
 
-export function tileForLngLat(lng: number, lat: number, z: number = OSM_TILE_ZOOM): TileId {
+function tileForLngLat(lng: number, lat: number, z: number = OSM_TILE_ZOOM): TileId {
   const n = 2 ** z;
   const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
   const rad = (clampedLat * Math.PI) / 180;
@@ -47,6 +47,23 @@ function isValidTile({ z, x, y }: TileId): boolean {
 }
 
 /**
+ * Every tile `bounds` touches. Used by the imported local datasets, which are
+ * addressed by the same grid but read whole rather than by viewport.
+ */
+export function tilesForBounds([west, south, east, north]: Bounds): TileId[] {
+  const min = tileForLngLat(west, north);
+  const max = tileForLngLat(east, south);
+  const tiles: TileId[] = [];
+  for (let x = min.x; x <= max.x; x++) {
+    for (let y = min.y; y <= max.y; y++) {
+      const tile = { z: OSM_TILE_ZOOM, x, y };
+      if (isValidTile(tile)) tiles.push(tile);
+    }
+  }
+  return tiles;
+}
+
+/**
  * Tiles covering `bounds`, nearest the center first and capped, so a zoomed-out
  * or fast-panning viewport can never queue an unbounded amount of work.
  */
@@ -56,15 +73,7 @@ export function tilesInBounds(bounds: Bounds, limit: number): TileId[] {
   const max = tileForLngLat(east, south);
   const centerX = (min.x + max.x) / 2;
   const centerY = (min.y + max.y) / 2;
-
-  const tiles: TileId[] = [];
-  for (let x = min.x; x <= max.x; x++) {
-    for (let y = min.y; y <= max.y; y++) {
-      const tile = { z: OSM_TILE_ZOOM, x, y };
-      if (isValidTile(tile)) tiles.push(tile);
-    }
-  }
-  return tiles
+  return tilesForBounds(bounds)
     .sort(
       (a, b) =>
         (a.x - centerX) ** 2 + (a.y - centerY) ** 2 - ((b.x - centerX) ** 2 + (b.y - centerY) ** 2),

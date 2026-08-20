@@ -168,8 +168,13 @@ function feature(
       osm_type: osmType,
       osm_id: element.id,
       version: element.version,
-      // Node ids are what a future changeset has to move; keep them.
+      // Node ids are what a changeset has to reuse or add; keep them. Index i
+      // is the node at outer-ring vertex i, because `ringOf` walks `way.nodes`
+      // in order.
       node_ids: element.type === "way" ? element.nodes : undefined,
+      // A relation modify must resend the full member list, so keep it. Ring
+      // geometry is assembled across members, so it carries no node identity.
+      members: element.type === "relation" ? element.members : undefined,
     },
   };
 }

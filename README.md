@@ -1,21 +1,24 @@
 # Building Explorer
 
-Browse a map, click a building, inspect it in 3D.
+Browse a map, click a building or one of its parts, inspect it in 3D.
 
-- **Map**: [MapLibre GL](https://maplibre.org/) with OpenStreetMap raster tiles. Pan, zoom and rotate — right-drag, the compass, or shift+arrows change bearing; pitch stays locked at 0 so footprints are always read from straight above.
-- **Find by id**: the search box takes `#way/1794585`, `way/1794585`, `w1794585`, or a pasted openstreetmap.org URL. It looks the element up through the cached proxy, centres the map on it at edit zoom, and selects it once its tile arrives.
+- **Map**: [MapLibre GL](https://maplibre.org/) with OpenStreetMap raster tiles. Pan, zoom and rotate — right-drag, the bottom-right camera controls, or shift+arrows change bearing; pitch stays locked at 0 so footprints are always read from straight above.
 - **Buildings**: [Overture Maps](https://overturemaps.org/) buildings theme, streamed straight from the official PMTiles release (`building` + `building_part` layers). Shown from zoom 10 and clickable, colored by the height data each feature carries:
+  - 🟪 **purple** — locally modified, with pending overrides
   - 🟩 **green** — a measured `height`
   - 🟦 **blue** — no height, but a `num_floors` count we multiply into one
   - 🟥 **red** — footprint only, so the height is a single-floor guess
 
   Coverage varies a lot by region: Amsterdam is ~88% green, Stockholm is ~69% blue with ~30% red.
 
-- **3D view**: selecting a building opens a side panel with a [Three.js](https://threejs.org/) extrusion of the building — independent zoom (scroll) and rotate (drag) via OrbitControls, flat ground disc. Adjacent buildings within 80 m are drawn in gray for context (capped at 60, nearest first); the camera frames the selected building only.
-- **Imagery**: a third panel section frames Bing aerial/road imagery of the selected building, with one-click links to Bing 3D, Google tilted satellite and Street View. Collapsing it stops the third-party request.
-- **Inspector**: below the 3D view the panel lists every OSM tag on the selected element, raw and alphabetized, with its id and version in the header.
+- **Cut hole**: at live-OSM zoom, activate the top toolbar tool and click inside a building to place square nodes. Click the first node or press Enter to close a valid loop; Escape or pressing **Cut hole** again cancels the entire draft. A completed hole updates the map footprint and 3D extrusion immediately, including visible vertical inner walls through the building's full height. It marks the building purple and appears in the changes sidebar.
+- **Slice**: at live-OSM zoom, use the crosshair to start on a building boundary and draw a straight or multi-node polyline to another boundary, or start inside and draw a closed loop. A purple **X** previews an edge snap; a hollow square previews exact reuse of an existing footprint node. The original `building=*` outline stays intact while the resulting regions become `building:part=*` areas; any existing parts crossed by the slice are split too. Escape or pressing **Slice** again cancels the draft.
+- **3D view**: selecting a building or `building:part` opens a side panel with a [Three.js](https://threejs.org/) extrusion. Clicking a part highlights and inspects that part, frames it in 3D, and retains its parent and sibling parts for context. Its initial bearing matches the map at the moment the entity is selected, then zoom (scroll) and rotation (drag) are independent via OrbitControls. Adjacent buildings within 80 m are drawn in gray for context (capped at 60, nearest first).
+- **External 3D**: links below the local 3D viewer open the selected building in Bing or Google Earth. Rotating, tilting or zooming the local camera updates both links, so the external view starts from the same angle. No third-party request is made until a link is opened.
+- **Linkable selection**: the selected element lives in the URL hash — `/#way/42764754` opens the app on that building, selecting one writes its id back, and deselecting clears it. Hash writes use `replaceState`, so the back button is not filled with buildings.
+- **Inspector**: below the 3D view the panel lists every OSM tag on the selected building or part, raw and alphabetized, with its own id and version in the header. Hovering `height`, `building:levels`, `min_height`, or `building:min_level` reveals a pencil; its modal saves with Enter and cancels with Escape, and accepted values update the map and 3D view immediately. A selected part exposes a **parent** link beside `building:part=yes`. Pending edits are stored against that exact OSM entity; LOD1 advice remains building-outline only.
 - **Selection is live OSM only** (z >= 16). Clicking the Overture overview below that zoom shows a hint rather than snapshot fields that are not OSM tags and cannot be edited.
-- **Photos**: toggle a satellite-imagery underlay (Esri World Imagery); with photos on, only building and part boundaries are drawn.
+- **Photos**: toggle a satellite-imagery underlay (Esri World Imagery); with photos on, only building and part boundaries are drawn. A four-way-arrow button then enables alignment mode: map panning is locked and dragging moves only the imagery. The geographic offset survives ordinary map pan, zoom, bearing changes, and toggling Photos during the current session.
 
 ## Data sources
 
@@ -57,15 +60,132 @@ Selecting a building matches it against the LOD1 block with the greatest overlap
 | `roof:height`     | ridge minus eaves, skipped when implausible                     |
 | `building:levels` | estimated from the facade height at the building's level height |
 
-Advice appears as a button on the row: green **+** when OSM has no value, amber **!** when OSM disagrees. Pressing it applies the value, which highlights, re-renders the 3D view immediately, and can be reverted per tag or per building. Pending edits live in IndexedDB, so a reload keeps them.
+Advice appears as a button on the row: green **+** when OSM has no value, amber **!** when OSM disagrees. Pressing it applies the value, which highlights, re-renders the 3D view immediately, and can be reverted per tag or per building. Pending changes live in IndexedDB — tag overrides, footprint overrides and drawn parts alike — so a reload keeps them. A purple **X changes** button in the top-left opens a sidebar grouped by affected building ID, with each property change shown on one line beneath its linked building header; selecting the header centers the map and opens that building. **Revert all** asks for confirmation, then discards every pending tag and geometry change.
 
 LOD1 footprints are generalized, so coverage is reported both ways. When one LOD1 block spans several OSM buildings its heights describe the whole block, not the selected building — those suggestions are drawn muted and the panel says so.
 
-## Why third-party 3D is a link, not an iframe
+## Laser point cloud
 
-Measured 2026-08-19: `bing.com/maps?style=3d` answers `X-Frame-Options: DENY`, and `google.com/maps` answers `SAMEORIGIN` — including the old `output=embed` and `output=svembed` tricks, which no longer frame. `bing.com/maps/embed` does allow framing and needs no API key, but supports only road and aerial styles; Birdseye and 3D are not available there (requesting them yields two tile requests instead of fourteen and no oblique imagery).
+Stockholm's **"SBK Punktmoln - flygburen laserskanning (2023)"** is the raw survey behind those LOD1 heights: >16 points/m², classified, and coloured from the 2023 orthophoto. Import it into z16 tiles:
 
-So the panel frames what can be framed and links out to the rest. Real photorealistic 3D in-app would mean Google's 3D Tiles with CesiumJS — an API key and a paid quota, not an iframe.
+```bash
+node scripts/import-lidar.mjs
+```
+
+With no arguments that downloads the one area the city publishes for direct download — 200 x 200 m over Stora Essingen (Kungsholmen), 1,010,569 points. Pass `--src <file|dir>` for LAS files ordered from the city (geodataservice@stockholm.se), and `--max-per-tile` to change the 500,000-point cap. The script reads the LAS header, VLR projection and point records itself, reprojects EPSG:3011 to WGS84, and writes `data/lidar/16/{x}/{y}.bin`: planar `uint16` arrays the browser views without parsing. Gitignored, like `data/lod1`.
+
+The 3D view then draws the cloud as dots around the selected building, in its true orthophoto colours, lowered onto the scene's ground plane by the median of nearby ground-class returns. A `height` that disagrees with the survey shows up directly: the extruded roof floats above the dots or sinks below them. Nothing is inferred from the points yet — see [ADR 0004](memory/adr/0004-laser-point-cloud-as-raw-evidence.md).
+
+## Signing in to OSM
+
+Sign-in is OAuth 2.0 with PKCE, from the submit dialog: **Log in with OpenStreetMap** when signed
+out, the account name and **Log out** when signed in. It runs against the **development** API
+(`api06.dev.openstreetmap.org`) — writes are proven there before production (EP-001 FT-07) — and the
+dialog names the host, so a dev account is never mistaken for a production one.
+
+The browser never holds an access token. It sends the user to OSM for consent, receives an
+authorization code back, and hands that code to this app's own route, which exchanges it and keeps
+the token in an httpOnly cookie (ADR 0002: no browser talks to an upstream API). Consent itself is
+the one upstream navigation that cannot be proxied. Signing out revokes the token upstream before
+dropping the cookie. Sign-in happens in a popup so the map, selection and pending changes survive it;
+if the popup is blocked it falls back to a redirect, which is safe because pending changes are stored.
+
+`OSM_OAUTH_BASE` chooses the server. The dev instance and production are separate installations with
+separate accounts _and_ separate application registries, so an application registered on one is an
+unknown client on the other. When the host is the real OSM the account row says so in amber — an
+account on the public map is not the same thing as one on a test server, and this app is being taught
+to write.
+
+To enable sign-in, register an OAuth 2 application — on the dev server
+(<https://api06.dev.openstreetmap.org/oauth2/applications>) or production
+(<https://www.openstreetmap.org/oauth2/applications>), matching whichever `OSM_OAUTH_BASE` points at —
+with:
+
+- **Redirect URI** `http://127.0.0.1:3000/oauth/callback` — match the port you actually run on, and
+  use the loopback **IP**: OSM forces https on redirect URIs and exempts only `127.0.0.1` and `::1`,
+  never the name `localhost`. The app derives its redirect URI from the origin you have open, so
+  browse to `http://127.0.0.1:<port>` too, or OSM will reject the mismatch. Note that IndexedDB and
+  cookies are per-origin, so pending changes made on `localhost` are not visible on `127.0.0.1`.
+- **Permissions** "Read user preferences" and "Modify the map" — and nothing else. There is no
+  per-element scope: `write_api` ("Modify the map") covers nodes, ways and relations. "Redact map
+  data" is a moderator scope for editing element history and must never be requested.
+- Confidential application: either. The code exchange happens on the server, so a secret can be held
+  properly; set `OSM_CLIENT_SECRET` when the application is confidential and leave it unset when it is
+  not. PKCE is sent either way — it proves the browser that finished the flow is the one that started
+  it, which a secret does not.
+
+Then set the client id (and secret, if any):
+
+```bash
+echo 'OSM_CLIENT_ID=your-client-id' >> .env
+```
+
+These are read on the server only — deliberately not `NEXT_PUBLIC_`, which would inline them at build time and make one
+build unable to serve both dev and production. The browser is told the client id, scope and authorize
+endpoint by `/api/osm/session`; a public PKCE client id is not a secret (it travels in the consent URL),
+so this is about runtime configuration, not concealment. Without a client id the dialog says what to
+register and offers no broken button.
+
+## Submitting to OSM
+
+A purple **X changes** button opens the pending-change sidebar; **Review & submit to OSM** at its
+foot builds the changeset and opens the review dialog, which is also where you sign in. **Upload**
+sends it: create changeset, upload, close, all through this app's own routes because the token is in an
+httpOnly cookie. It is enabled only with a signed-in account, zero errors and a comment; writing to the
+real OSM additionally needs `OSM_ALLOW_PRODUCTION_WRITES=true` and a confirmation, since an accidental
+upload can only be reverted, never erased. Once a changeset lands, the pending changes are dropped and
+the affected tiles are refetched past every cache, so the map shows what OSM now holds. The rules
+behind all of it live in [the submission spec](memory/spec/domain/osm-submission.md).
+
+Three things happen when the changeset is assembled (`src/lib/osm/changeset.ts`):
+
+- **Nodes are reused, not restacked.** Every vertex is resolved against the nodes already loaded
+  (`node_ids` from the OSM API): an exact position is always the same node, a near miss within 3 cm
+  reuses only within the edited building's own group, and two drawn vertices at one position collapse
+  into one node. Slicing a square therefore adds **2** nodes, both shared by the parts either side,
+  instead of 8 unconnected ones. New nodes that land on a wall are inserted into that wall's way, so
+  the parts share it rather than crossing it.
+- **A drawn part is `way/-1`, not an invented id.** OSM has no id for it until an upload assigns
+  one, so it carries the negative placeholder the changeset sends — the convention JOSM (`way -1`)
+  and iD (`w-1`) use — which means the review dialog and the `osmChange` name it identically, and a
+  negative id is what marks an element as not existing upstream.
+- **Versions travel with every modify**, so a stale edit comes back as a conflict instead of
+  overwriting somebody's newer work.
+- **A hole becomes a multipolygon.** A way holds one ring, so cutting a hole converts the way into
+  the untagged `outer` member of a new `type=multipolygon` relation and moves the tags onto it —
+  what the wiki prescribes and what JOSM's _create multipolygon_ does.
+
+Before that document can be sent it has to pass the checks. Errors block, warnings are for the
+reviewer, and every rule that exists upstream is taken from upstream rather than invented: numeric
+formats from JOSM's `numeric.mapcss`, geometry rules from its `geometry.mapcss` and validation
+tests, coverage from [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings).
+Highlights:
+
+| level   | check                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| error   | unclosed, self-intersecting or self-touching ways; duplicated consecutive nodes; a part reaching outside its outline; missing version, node list or member list; `building:levels` that is not a count; a `min_height` above `height`, a roof taller than the building, a `building:min_level` that skips every level; API limits (2 000 nodes per way, 10 000 elements per changeset); an empty changeset or comment |
+| warning | a part we merely inherit reaching outside its outline; ground-level parts leaving more than 2% of the outline uncovered; two parts whose **3D volumes** overlap (2D overlap alone is legal); a part above the building's own height; `,` as a decimal separator or a missing space before `m`; deprecated keys such as `min_levels`; a footprint over 920 000 m²; a height over 300 m; parts under 1 m²               |
+
+The checks only report on what the changeset writes: tag checks cover the keys it changes, ring checks
+the element the change is about. Real buildings carry other mappers' tagging, and an element we resend
+unchanged must not produce warnings about it — let alone block an upload.
+
+Notably **not** checked: ring winding. OSM has no direction convention for buildings — "the direction
+of the ways does not matter" — and JOSM only checks it for `natural=coastline` and `natural=land`, so
+reordering a way would bump its version for nothing. Winding is still normalized internally
+(RFC 7946: outer counter-clockwise, holes clockwise) because turf, MapLibre and the 3D extrusion read
+it. Likewise the only coordinate grid is OSM's own 1e-7 degrees (~1.1 cm); snapping to anything
+coarser would _move_ existing nodes, and neighbouring buildings share them.
+
+The review dialog lists each element with its action, version, tag diff, node reuse and the
+structural consequences in words, and offers the `osmChange` document for copy or download as `.osc`
+so the same edit can be validated in JOSM.
+
+## Why third-party 3D uses links
+
+Measured 2026-08-19: `bing.com/maps?style=3d` answers `X-Frame-Options: DENY`, and Google Maps answers `SAMEORIGIN`, so their photorealistic 3D views cannot be framed. The panel therefore links out and translates the current Three.js orbit into each provider's camera URL: target, heading, tilt and distance for Google Earth; direction, pitch, eye height and an approximate zoom for Bing.
+
+Real photorealistic 3D in-app would mean Google's 3D Tiles with CesiumJS — an API key and a paid quota, not an iframe.
 
 ## Height rules
 
@@ -78,6 +198,10 @@ Sources are normalized onto shared property names (`src/lib/buildings.ts`), so o
 The level height is derived per building, not per part: `height ÷ building:levels` when the building has both, else 3 m for residential buildings (apartments etc.) and 4 m for everything else. Every part of a building uses its building's value, so parts stack on each other instead of drifting apart. `building:min_level` is read as the OSM wiki defines it — the number of skipped levels below the part — so a part with `building:min_level=6` sits at the height of six levels.
 
 A part is attributed to a building when at least 50% of its area falls inside that building's outline — adjacent OSM buildings share walls and vertices, so touching proves nothing. Parts replace the outline in 3D only when they cover at least 85% of the footprint; otherwise the outline is drawn too, since partial part coverage would otherwise make most of the building vanish.
+
+### OSM notation created by Slice
+
+The [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings) model keeps one whole-building `building=*` outline and covers it with separate `building:part=*` areas. Slice follows that model: new generic regions get `building:part=yes` and inherit physical tags when present—`height`, `building:levels`, `min_height`, `building:min_level`, materials, colours, and roof geometry. Whole-building metadata such as `name` and addresses remains only on the outline. Existing parts keep their tags on every resulting fragment. The correct lower-level key is singular `building:min_level`, not `min_levels`; a `type=building` relation is unnecessary while every generated part remains inside its outline.
 
 ## Implementation notes
 
@@ -103,4 +227,12 @@ yarn format      # oxfmt --write
 yarn build       # production build
 ```
 
-Data attribution: © OpenStreetMap contributors, © Overture Maps Foundation, imagery © Esri & contributors.
+Data attribution: © OpenStreetMap contributors, © Overture Maps Foundation, imagery © Esri & contributors, LOD1 models and laser point cloud © Stockholms stad.
+
+## Photorealistic 3D (optional)
+
+Set `NEXT_PUBLIC_MAP_TILES_API_KEY` in `.env.local` (billing-enabled Google Cloud project, Map
+Tiles API enabled) to render Google's photorealistic mesh in the panel's third section. Billed per
+session: $6/1,000 beyond 1,000 free per month, one session covering three hours. The renderer is
+created once and only the camera moves, and the section is collapsed by default so no session starts
+until you look. Orientation aid only — Google imagery is not a permitted source for OSM edits.

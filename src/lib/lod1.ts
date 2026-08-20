@@ -3,7 +3,7 @@ import type { BuildingElement } from "./buildings";
 import { elementBounds, toFootprints } from "./geometry";
 import { levelHeight } from "./heights";
 import { overlapFraction } from "./parts";
-import { tileForLngLat, tileKey } from "./osm/tiles";
+import { type TileId, tilesForBounds } from "./osm/tiles";
 
 /**
  * Stockholm's LOD1 model as a source of advice for OSM tags.
@@ -64,21 +64,8 @@ export interface Suggestion {
 const BLOCK_SHARE_MIN = 0.5;
 
 /** z16 tiles the building's footprint touches. */
-export function lod1TilesFor(building: BuildingElement): { z: number; x: number; y: number }[] {
-  const [west, south, east, north] = elementBounds(building);
-  const corners = [
-    tileForLngLat(west, north),
-    tileForLngLat(east, north),
-    tileForLngLat(west, south),
-    tileForLngLat(east, south),
-  ];
-  const seen = new Set<string>();
-  return corners.filter((tile) => {
-    const key = tileKey(tile);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+export function lod1TilesFor(building: BuildingElement): TileId[] {
+  return tilesForBounds(elementBounds(building));
 }
 
 function toElement(feature: Feature): BuildingElement | null {
