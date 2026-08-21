@@ -98,15 +98,22 @@ function ringFromPoints(points: Flatten.Point[], projection: Projection): LngLat
 function polygonRegions(polygon: Flatten.Polygon, projection: Projection): Region[] {
   return polygon
     .splitToIslands()
-    .filter((island) => island.area() >= MIN_PART_AREA_M2)
-    .map((island) => {
-      const faces = [...island.faces].sort((a, b) => b.area() - a.area());
-      const coordinates = faces.map((face) => ringFromPoints(face.vertices, projection));
+    .map((island) => ({ island, area: island.area() }))
+    .filter(({ area }) => area >= MIN_PART_AREA_M2)
+    .map(({ island, area }) => {
+      const faces = [...island.faces]
+        .map((face) => ({ face, area: face.area() }))
+        .sort((a, b) => b.area - a.area);
+      const coordinates = faces.map(({ face }) => ringFromPoints(face.vertices, projection));
       return {
         geometry: { type: "Polygon", coordinates } satisfies Polygon,
-        area: island.area(),
+        area,
       };
     });
+}
+
+function meaningfulIslandCount(polygon: Flatten.Polygon): number {
+  return polygon.splitToIslands().filter((island) => island.area() >= MIN_PART_AREA_M2).length;
 }
 
 function segments(nodes: Flatten.Point[], closed: boolean): Flatten.Segment[] {
@@ -148,6 +155,12 @@ function partition(
   return [...polygonRegions(outside, projection), ...polygonRegions(inside, projection)];
 }
 
+/** Count an open cut's output without converting every island back to GeoJSON. */
+function partitionCount(polygon: Flatten.Polygon, cuttingSegments: Flatten.Segment[]): number {
+  if (polygon.isEmpty()) return 0;
+  return meaningfulIslandCount(polygon.cut(new Flatten.Multiline(cuttingSegments)));
+}
+
 /**
  * A slice end may rest on any outer or interior ring of the building outline
  * or an existing part: all are real boundaries of the region the polyline divides.
@@ -185,12 +198,9 @@ function tagsForNewPart(properties: BuildingProperties): Record<string, string> 
  * partitions what it crosses: uncovered regions become new generic parts, split
  * existing parts keep their tags, and the building outline is left alone.
  *
- * A **closed loop** only adds the region it encloses, and changes nothing else.
- * Partitioning by it would also produce the complement — a ring around the loop —
- * and a ring is a polygon with a hole, which OSM can express only as a
- * multipolygon relation. Drawing a tower on a roof must not turn what is beneath
- * it into one. The cost is that the rest of the outline then has no part, which
- * the `outline-not-covered` check reports.
+ * A **closed loop** creates a full-footprint base part plus the enclosed center
+ * part, and leaves the building outline unchanged. The two parts overlap in 2D
+ * by design; their height/min-height tags describe how they stack in 3D.
  */
 export function sliceBuilding(
   building: BuildingElement,
@@ -223,17 +233,21 @@ export function sliceBuilding(
     if (!loop.isValid() || loop.area() < MIN_PART_AREA_M2 || !buildingPolygon.contains(loop))
       return null;
 
-    // A loop adds the region it encloses and changes nothing else. Partitioning
-    // the building by it would also yield the complement — a ring around the loop
-    // — and a ring is a polygon with a hole, which OSM can only express as a
-    // multipolygon relation. Drawing a tower on a roof should not turn what is
-    // underneath it into one.
+    // A loop describes a center part sitting on a base, not a ring-shaped
+    // complement. Copy the complete building footprint for the base and add the
+    // loop as the second part; the building=* outline itself is never replaced.
     try {
-      const additions = polygonRegions(loop, projection).map((region) => ({
+      const centerParts = polygonRegions(loop, projection).map((region) => ({
         ...region,
         tags: tagsForNewPart(building.properties),
       }));
-      return additions.length > 0 ? { replacements: {}, additions } : null;
+      if (centerParts.length === 0) return null;
+      const basePart: SliceAddition = {
+        geometry: elementGeometry(building),
+        area: buildingPolygon.area(),
+        tags: tagsForNewPart(building.properties),
+      };
+      return { replacements: {}, additions: [basePart, ...centerParts] };
     } catch {
       return null;
     }
@@ -245,8 +259,7 @@ export function sliceBuilding(
     // part covers yet. A cut that ends on a part boundary leaves the outline
     // whole, so the outline alone cannot decide this.
     const originalIslands = buildingPolygon.splitToIslands().length;
-    let divided =
-      partition(buildingPolygon, cuttingSegments, closed, projection).length > originalIslands;
+    let divided = partitionCount(buildingPolygon, cuttingSegments) > originalIslands;
 
     const replacements: Record<string, EditableGeometry> = {};
     const additions: SliceAddition[] = [];
@@ -268,7 +281,7 @@ export function sliceBuilding(
     }
 
     const uncoveredRegions = partition(uncovered, cuttingSegments, closed, projection);
-    if (uncoveredRegions.length > polygonRegions(uncovered, projection).length) divided = true;
+    if (uncoveredRegions.length > meaningfulIslandCount(uncovered)) divided = true;
     if (!divided) return null;
 
     additions.push(

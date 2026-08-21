@@ -4,8 +4,14 @@ import type { EditMap } from "../edits";
 import type { CreatedPartMap, EditableGeometry, GeometryEditMap } from "../geometry-edits";
 import { closestPointOnSegment, openRing } from "../geometry";
 import { issue, type Issue } from "./issues";
-import { buildNodeIndex, findExistingNode, NODE_REUSE_METERS } from "./nodes";
-import { formatCoordinate, metersBetween, roundToOsmGrid } from "./precision";
+import {
+  buildNodeIndex,
+  type ExistingNode,
+  findExistingNode,
+  nodeAt,
+  NODE_REUSE_METERS,
+} from "./nodes";
+import { coordinateKey, formatCoordinate, metersBetween, roundToOsmGrid } from "./precision";
 import { drawnId } from "./ref";
 import { selectFromOsm } from "./select";
 
@@ -18,7 +24,9 @@ import { selectFromOsm } from "./select";
  *
  * - **Node identity.** Every vertex is resolved against the nodes already in the
  *   loaded data, so an unchanged wall keeps its nodes and a slice along a shared
- *   wall adds two nodes rather than forty (see ./nodes.ts).
+ *   wall adds two nodes rather than forty (see ./nodes.ts). A dragged corner
+ *   *moves* its node rather than replacing it, so everything else attached to
+ *   that node comes along.
  * - **Versions.** A modify must carry the version we read, so the API can reject
  *   it with a conflict instead of silently overwriting a newer edit.
  * - **Element shape.** A way holds exactly one ring. Cutting a hole therefore
@@ -38,9 +46,14 @@ interface ChangesetMember {
 }
 
 interface ChangesetNode {
-  /** Negative placeholder id; the API assigns the real one on upload. */
+  /** Negative placeholder on create — the API assigns the real one — else the node id. */
   id: number;
+  action: "create" | "modify";
   coordinates: LngLat;
+  /** Modify only: the version read, so the API can reject a conflict. */
+  version?: number;
+  /** Modify only: the node's own tags, which a modify has to resend or delete. */
+  tags?: Tags;
 }
 
 interface ChangesetWay {
@@ -77,13 +90,13 @@ export interface ChangesetEntry {
   target: string;
   version?: number;
   tagChanges: TagChange[];
-  geometry?: { reusedNodes: number; newNodes: number; sharedWith: string[] };
+  geometry?: { reusedNodes: number; newNodes: number; movedNodes: number; sharedWith: string[] };
   /** Structural consequences worth spelling out for a reviewer. */
   notes: string[];
 }
 
 export interface ChangesetPlan {
-  /** Created nodes only: existing nodes are reused in place, never moved. */
+  /** Nodes to write: the ones drawn here, plus the existing ones being moved. */
   nodes: ChangesetNode[];
   ways: ChangesetWay[];
   relations: ChangesetRelation[];
@@ -92,6 +105,8 @@ export interface ChangesetPlan {
   reusedNodes: number;
   /** Vertices that collapsed onto another new node at the same position. */
   mergedNodes: number;
+  /** Existing nodes being moved to a new position rather than replaced. */
+  movedNodes: number;
   /** Pending changes that would write nothing and were left out. */
   dropped: string[];
   /** Problems found while structuring the changeset. */
@@ -179,6 +194,83 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
   let reusedNodes = 0;
   let mergedNodes = 0;
 
+  /**
+   * The corners the mapper dragged, resolved back to the nodes they belong to.
+   *
+   * A moved vertex is indistinguishable from a new one by position alone, so
+   * without the recorded drag the upload would create a node at the new corner
+   * and abandon the old one: left in OSM untagged and unreferenced, stripped of
+   * whatever it carried, and still holding every way this editor never loaded —
+   * a fence, a path, a building outside the tiles — at the corner the mapper
+   * believed they had moved. Modifying the node moves all of them with it.
+   */
+  const movedNodes = new Map<number, { node: ExistingNode; to: LngLat }>();
+  const movedToKey = new Map<string, ExistingNode>();
+  for (const [ref, override] of Object.entries(geometryEdits)) {
+    for (const move of override.movedNodes ?? []) {
+      const from = roundToOsmGrid(move.from);
+      const to = roundToOsmGrid(move.to);
+      const node = nodeAt(index, from);
+      // Nothing upstream stands there, so the vertex was drawn in this session:
+      // there is no node to move and it resolves as a new one like any other.
+      if (!node) continue;
+      if (node.version <= 0) {
+        issues.push(
+          issue(
+            "error",
+            "node-version-unknown",
+            `A dragged corner of ${ref} belongs to a node whose version is not in the loaded data, so moving it could overwrite a newer edit. Reload the area and drag it again.`,
+            [ref],
+            to,
+          ),
+        );
+        continue;
+      }
+      const occupant = nodeAt(index, to);
+      if (occupant && occupant.id !== node.id) {
+        issues.push(
+          issue(
+            "error",
+            "node-merge-unsupported",
+            `A dragged corner of ${ref} landed exactly on node ${occupant.id}, which would leave two nodes stacked in one place. Merging nodes is not supported yet; drag it a little off.`,
+            [ref],
+            to,
+          ),
+        );
+        continue;
+      }
+      const already = movedNodes.get(node.id);
+      if (already && coordinateKey(already.to) !== coordinateKey(to)) {
+        issues.push(
+          issue(
+            "error",
+            "node-move-conflict",
+            `Node ${node.id} is dragged to two different places by the pending changes, so the upload cannot say which one is meant.`,
+            [ref],
+            to,
+          ),
+        );
+        continue;
+      }
+      movedNodes.set(node.id, { node, to });
+      movedToKey.set(coordinateKey(to), node);
+    }
+  }
+  for (const { node, to } of movedNodes.values()) {
+    nodes.push({
+      id: node.id,
+      action: "modify",
+      coordinates: to,
+      version: node.version,
+      // A modify replaces the element, so anything the node carried has to be
+      // resent or the upload deletes it.
+      tags: node.tags,
+    });
+    // Everything downstream, the wall-gluing pass included, has to measure
+    // against the position the upload leaves the node at.
+    existingPositions.set(node.id, to);
+  }
+
   const groups = new Map<string, Set<string>>();
   /** The building an edit is about, plus its parts: the scope for node reuse. */
   const groupOf = (elementId: string): Set<string> => {
@@ -207,10 +299,21 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     const sharedWith = new Set<string>();
     let reused = 0;
     let created = 0;
+    let moved = 0;
     for (const vertex of openRing(ring)) {
       const point = roundToOsmGrid(vertex);
+      const relocated = movedToKey.get(coordinateKey(point));
+      if (relocated) {
+        ids.push(relocated.id);
+        moved++;
+        for (const owner of relocated.ownerIds) if (owner !== ref) sharedWith.add(owner);
+        continue;
+      }
       const found = findExistingNode(index, point, scope);
-      if (found) {
+      // A node that has been dragged away is not here any more, whatever the
+      // index built from the pre-edit data still says. Reusing it would list the
+      // same node twice in one ring.
+      if (found && !movedNodes.has(found.node.id)) {
         ids.push(found.node.id);
         reused++;
         reusedNodes++;
@@ -228,12 +331,12 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       }
       const id = nextPlaceholder--;
       newNodeByKey.set(key, id);
-      nodes.push({ id, coordinates: point });
+      nodes.push({ id, action: "create", coordinates: point });
       createdNodes.push({ id, coordinates: point, ref });
       ids.push(id);
       created++;
     }
-    return { nodes: ids.length > 0 ? [...ids, ids[0]] : ids, reused, created, sharedWith };
+    return { nodes: ids.length > 0 ? [...ids, ids[0]] : ids, reused, created, moved, sharedWith };
   };
 
   /**
@@ -279,6 +382,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         entry.geometry = {
           reusedNodes: resolved.reused,
           newNodes: resolved.created,
+          movedNodes: resolved.moved,
           sharedWith: [...resolved.sharedWith],
         };
       }
@@ -393,7 +497,13 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     const tags = mergeTags(base, tagEdits[ref]?.changed);
     const entry = entryFor(ref, { ref, action: "modify", target: ref, version });
     entry.tagChanges = tagChanges(base, tags);
-    entry.notes.push(override.kind === "hole" ? "A hole was cut." : "The footprint was sliced.");
+    entry.notes.push(
+      override.kind === "hole"
+        ? "A hole was cut."
+        : override.kind === "slice"
+          ? "The footprint was sliced."
+          : "The footprint was reshaped.",
+    );
     planGeometry(ref, override.geometry, tags, { type: "way", id: osmId, version }, entry);
   }
 
@@ -467,6 +577,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       : existingPositions.get(nodeId);
 
   glueNewNodes({ createdNodes, ways, entries, rawById, positionOf, issues, groupOf });
+  dropUnchangedWays({ ways, entries, rawById, dropped });
 
   return {
     nodes,
@@ -475,9 +586,53 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     entries: [...entries.values()].sort((a, b) => a.ref.localeCompare(b.ref)),
     reusedNodes,
     mergedNodes,
+    movedNodes: movedNodes.size,
     dropped,
     issues,
   };
+}
+
+/**
+ * Leave out the ways an upload would rewrite exactly as they already are.
+ *
+ * Moving a node changes the node, not the ways listing it, so a drag that only
+ * moved corners ends with every affected way holding the node list it already
+ * had. Resending those would bump their versions for nothing and invite a
+ * conflict over elements we are not changing — the same reason a tag edit that
+ * already matches OSM is dropped. The review entry stays, because the building
+ * really is being reshaped; it is reshaped through its nodes.
+ */
+function dropUnchangedWays(context: {
+  ways: Map<string, ChangesetWay>;
+  entries: Map<string, ChangesetEntry>;
+  rawById: Map<string, Feature>;
+  dropped: string[];
+}) {
+  const { ways, entries, rawById, dropped } = context;
+  // Deleting the current entry mid-iteration is defined behaviour for a Map.
+  for (const [ref, way] of ways) {
+    if (way.action !== "modify") continue;
+    const properties = rawById.get(ref)?.properties as BuildingProperties | undefined;
+    const nodeIds = properties?.node_ids;
+    if (!properties || !Array.isArray(nodeIds)) continue;
+    if (nodeIds.length !== way.nodes.length) continue;
+    if (nodeIds.some((id, index) => id !== way.nodes[index])) continue;
+    const base = tagsOf(properties);
+    const keys = new Set([...Object.keys(base), ...Object.keys(way.tags)]);
+    if ([...keys].some((key) => base[key] !== way.tags[key])) continue;
+
+    ways.delete(ref);
+    dropped.push(ref);
+    const entry = entries.get(ref);
+    if (!entry) continue;
+    // The way is not written, so it has no version to show and nothing to
+    // conflict over. Say what the upload does touch instead.
+    entry.target = "its nodes only";
+    delete entry.version;
+    entry.notes.push(
+      "Its corners move with their nodes, so the way itself is unchanged and is not resent.",
+    );
+  }
 }
 
 /**
@@ -662,8 +817,14 @@ export function toOsmChangeXml(plan: ChangesetPlan, changesetId?: number): strin
   const attribute = changesetId === undefined ? "" : ` changeset="${changesetId}"`;
   const lines: string[] = [`<osmChange version="0.6" generator="${CREATED_BY}">`];
 
-  const nodeXml = (node: ChangesetNode) =>
-    `    <node id="${node.id}"${attribute} lon="${formatCoordinate(node.coordinates[0])}" lat="${formatCoordinate(node.coordinates[1])}"/>`;
+  const nodeXml = (node: ChangesetNode) => {
+    const version = node.version === undefined ? "" : ` version="${node.version}"`;
+    const position = ` lon="${formatCoordinate(node.coordinates[0])}" lat="${formatCoordinate(node.coordinates[1])}"`;
+    const open = `    <node id="${node.id}"${version}${attribute}${position}`;
+    const tags = node.tags && Object.keys(node.tags).length > 0 ? tagXml(node.tags, "      ") : "";
+    // A modify replaces the node, so an existing node's own tags go back with it.
+    return tags === "" ? `${open}/>` : [`${open}>`, tags, `    </node>`].join("\n");
+  };
 
   const wayXml = (way: ChangesetWay) => {
     const version = way.version === undefined ? "" : ` version="${way.version}"`;
@@ -693,11 +854,12 @@ export function toOsmChangeXml(plan: ChangesetPlan, changesetId?: number): strin
   for (const action of ["create", "modify"] as const) {
     const ways = plan.ways.filter((way) => way.action === action);
     const relations = plan.relations.filter((relation) => relation.action === action);
-    const nodes = action === "create" ? plan.nodes : [];
+    const nodes = plan.nodes.filter((node) => node.action === action);
     if (nodes.length === 0 && ways.length === 0 && relations.length === 0) continue;
     lines.push(`  <${action}>`);
     // Referenced elements come first, so placeholder ids are always defined
-    // before they are used.
+    // before they are used, and a moved node is in place before the ways that
+    // read it.
     lines.push(...nodes.map(nodeXml), ...ways.map(wayXml), ...relations.map(relationXml));
     lines.push(`  </${action}>`);
   }

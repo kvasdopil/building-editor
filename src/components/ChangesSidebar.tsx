@@ -39,14 +39,21 @@ function changeEntries(
       locked: null,
     })),
   );
-  const geometries = Object.entries(geometryEdits).map(([entity, override]) => ({
-    entity,
-    property: "geometry",
-    original: override.kind === "hole" ? "building outline" : "part outline",
-    pending: override.kind === "hole" ? "hole cut" : "part sliced",
-    editable: false,
-    locked: null,
-  }));
+  const geometries = Object.entries(geometryEdits).map(([entity, override]) => {
+    const labels =
+      override.kind === "hole"
+        ? { original: "building outline", pending: "hole cut" }
+        : override.kind === "slice"
+          ? { original: "part outline", pending: "part sliced" }
+          : { original: "footprint", pending: "footprint reshaped" };
+    return {
+      entity,
+      property: "geometry",
+      ...labels,
+      editable: false,
+      locked: null,
+    };
+  });
   const creations = Object.entries(createdParts).flatMap(([entity, feature]) => [
     {
       entity,
@@ -267,7 +274,11 @@ export function ChangesSidebar({
                             className="rounded bg-amber-100 px-1 font-semibold text-amber-900"
                             title={`Pending — OSM has ${change.original ?? "no value"}`}
                           >
-                            {change.pending}
+                            {change.pending === "" ? (
+                              <span className="italic">not set</span>
+                            ) : (
+                              change.pending
+                            )}
                           </span>
                           {change.editable && (
                             <button

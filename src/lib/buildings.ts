@@ -22,11 +22,15 @@ export interface BuildingProperties {
   num_floors?: number;
   min_height?: number;
   min_floor?: number;
+  roof_shape?: string;
+  roof_height?: number;
   has_parts?: boolean;
   /** Pending local edits exist for this element; used by derived map styling. */
   locally_modified?: boolean;
-  /** A local footprint override exists; the 3D outline must remain authoritative. */
+  /** A local footprint override exists. */
   geometry_modified?: boolean;
+  /** Why the local geometry differs, so 3D can distinguish holes from reshaping. */
+  geometry_edit_kind?: "hole" | "slice" | "reshape";
   "@name"?: string;
   [key: string]: unknown;
 }

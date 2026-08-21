@@ -168,6 +168,7 @@ function EntryRow({
           <p className="text-xs text-slate-600">
             Geometry: {pluralize(entry.geometry.newNodes, "new node")}, {entry.geometry.reusedNodes}{" "}
             existing reused
+            {entry.geometry.movedNodes > 0 && `, ${entry.geometry.movedNodes} moved`}
             {entry.geometry.sharedWith.length > 0 && (
               <>
                 {" "}
@@ -423,8 +424,9 @@ export function SubmitDialog({
               ) : (
                 <>
                   {pluralize(changesetSize(plan), "element")} ·{" "}
-                  {pluralize(plan.nodes.length, "new node")} · {plan.reusedNodes} existing nodes
-                  reused
+                  {pluralize(plan.nodes.length - plan.movedNodes, "new node")} · {plan.reusedNodes}{" "}
+                  existing nodes reused
+                  {plan.movedNodes > 0 && ` · ${pluralize(plan.movedNodes, "node")} moved`}
                   {plan.mergedNodes > 0 && ` · ${plan.mergedNodes} drawn vertices merged`}
                 </>
               )}

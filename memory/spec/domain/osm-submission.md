@@ -29,6 +29,49 @@ Every vertex of an edited or created footprint is resolved against the nodes alr
 
 The result: slicing a building in two adds two nodes, not eight, and an unchanged wall keeps every node id it had.
 
+### Moving a node
+
+**A dragged corner moves its node; it never replaces it.** Position alone cannot tell a moved vertex
+from a new one, so each drag is recorded on the geometry override as a `from`/`to` pair, and the
+upload turns that into a `modify` on the node itself.
+
+This is the only way a drag can keep the promise the shared-vertex expansion makes. Replacing the
+node creates one at the new corner and leaves the old one behind: orphaned in OSM, stripped of any
+tags it carried, and still holding every way this editor cannot see — a fence, a path, an outline
+outside the loaded tiles — at the corner the mapper believed they had moved. Moving the node carries
+all of them, loaded or not. It is also what JOSM does, and why OSM node history is worth anything.
+
+- **A `modify` replaces the element**, so it carries the node's version — or the API cannot reject a
+  conflict — and the node's own tags — or the upload deletes them. Both are parsed out of the tile
+  and indexed alongside the node (`osm/nodes.ts`). A node whose version is not in the loaded data is
+  never moved: that is a blocking `node-version-unknown`, not a guess.
+- **Dragging the same node twice is one move**, from where OSM has it, and dragging it back to where
+  it started is no move at all.
+- **A node dragged exactly onto another node** would stack two in one place. Merging nodes is not
+  supported, so that is a blocking `node-merge-unsupported`.
+- **A node that has been dragged away is no longer at its old position.** Another vertex landing on
+  the vacated spot resolves as a new node, not as the one that left.
+- **Ways an upload would rewrite identically are left out.** Moving a node changes the node, not the
+  ways listing it, so a drag that only moved corners sends the node and nothing else. Resending those
+  ways would bump their versions for nothing and invite a conflict over elements we are not
+  changing — the same rule tag-only edits already follow. Their review entries stay, because the
+  buildings really are being reshaped, through their nodes.
+
+Direct node dragging expands one exact-coordinate vertex into every loaded building and part that
+uses it. Each affected existing entity receives a geometry override at the same new coordinate, and
+each records the same move; a drawn part updates its own geometry and records nothing, having no
+upstream node to move. The scope is deliberately the loaded building/part collection—the editor
+cannot update an owner whose geometry it has not read—but moving the node rather than replacing it
+is what makes that scope a display limit rather than a data one. Reverting one affected building's
+override therefore leaves the corner moved for the others and for that building too, since it is one
+node; the map keeps showing the reverted building unmoved until its tile is reloaded.
+
+MapLibre's rendered point coordinate is only a hit-test result, not node identity: projection can
+round it away from the exact source coordinate. A draggable handle therefore carries polygon, ring
+and vertex indexes and resolves those back into the selected source geometry before finding shared
+owners. Comparing the rendered coordinate directly makes an apparently active drag a no-op because
+no exact vertex matches it.
+
 ### Node insertion into shared walls
 
 A slice ends on a wall, so its end vertices lie on a segment of the outline (or of a sibling part) without being nodes of it. Those vertices are inserted into the host way at the right position, ordered along the segment. Unjoined, the part boundary crosses the outline with nothing shared — what JOSM reports as crossing building ways, and what comes apart the first time somebody drags the wall.
@@ -188,6 +231,9 @@ not turn into a lecture about somebody else's work, still less block an upload:
 | `changeset-comment-missing`                                                         | A changeset needs a comment saying what changed.                                                                                                                               |
 | `changeset-too-large`                                                               | Over the API's 10 000 elements per changeset; it has to be split.                                                                                                              |
 | `way-too-many-nodes`                                                                | Over the API's 2 000 nodes per way.                                                                                                                                            |
+| `node-version-unknown`                                                              | A dragged corner's node has no version in the loaded data, so moving it could overwrite a newer edit.                                                                          |
+| `node-merge-unsupported`                                                            | A corner was dragged exactly onto another node, which would stack two in one place.                                                                                            |
+| `node-move-conflict`                                                                | The pending changes drag one node to two different places.                                                                                                                     |
 | `way-not-closed`                                                                    | An area way must be closed and have at least three corners (JOSM `UnclosedWays`).                                                                                              |
 | `duplicated-way-nodes`                                                              | The same node listed twice in a row (JOSM `DuplicatedWayNodes`).                                                                                                               |
 | `self-touching-way`                                                                 | The same node visited twice, so the outline touches itself.                                                                                                                    |

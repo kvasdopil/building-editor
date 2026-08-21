@@ -13,7 +13,10 @@ export const EDITABLE_DIMENSION_KEYS = [
   "building:min_level",
   "min_height",
   "roof:levels",
+  "roof:height",
 ] as const;
+
+export const OPTIONAL_ROOF_KEYS = ["roof:shape"] as const;
 
 const EDITABLE_LABELS: Record<(typeof EDITABLE_DIMENSION_KEYS)[number], string> = {
   "building:levels": "levels",
@@ -21,6 +24,7 @@ const EDITABLE_LABELS: Record<(typeof EDITABLE_DIMENSION_KEYS)[number], string> 
   "building:min_level": "min_levels",
   min_height: "min_height",
   "roof:levels": "roof_levels",
+  "roof:height": "roof_height",
 };
 
 function editableLabel(key: string): string | null {
@@ -97,12 +101,14 @@ function snapDraggedHeight(value: number): number {
 }
 
 function HeightDragButton({
+  tagKey,
   value,
   edited,
   minHeight,
   onChange,
   onReset,
 }: {
+  tagKey: "height" | "roof:height";
   value: string;
   edited: boolean;
   minHeight?: string;
@@ -183,8 +189,8 @@ function HeightDragButton({
       onPointerUp={finishDrag}
       onPointerCancel={finishDrag}
       onKeyDown={onKeyDown}
-      aria-label="Drag horizontally to change height"
-      title="Drag left or right to change height by 0.5 m"
+      aria-label={`Drag horizontally to change ${tagKey}`}
+      title={`Drag left or right to change ${tagKey} by 0.5 m`}
       className={`shrink-0 touch-none rounded p-0.5 transition-colors select-none ${
         dragging
           ? "cursor-ew-resize bg-violet-100 text-violet-700"
@@ -193,6 +199,39 @@ function HeightDragButton({
     >
       <TbArrowsHorizontal className="h-4 w-4" aria-hidden />
     </button>
+  );
+}
+
+function RoofShapeSelect({
+  value,
+  edited,
+  onChange,
+}: {
+  value: string;
+  edited: boolean;
+  onChange: (value: string) => void;
+}) {
+  const standardValues = new Set(["", "pyramidal", "hipped", "dome", "onion"]);
+  const currentIsCustom = value !== "" && !standardValues.has(value);
+  return (
+    <select
+      aria-label="Roof type"
+      title="Set roof:shape"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className={`max-w-full rounded border px-1.5 py-0.5 text-xs outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 ${
+        edited
+          ? "border-amber-300 bg-amber-100 font-semibold text-amber-900"
+          : "border-slate-300 bg-white text-slate-900"
+      }`}
+    >
+      <option value="">none</option>
+      <option value="pyramidal">pyramid</option>
+      <option value="hipped">hipped</option>
+      <option value="dome">dome</option>
+      <option value="onion">onion</option>
+      {currentIsCustom && <option value={value}>{value} (current value)</option>}
+    </select>
   );
 }
 
@@ -217,6 +256,9 @@ function editError(draft: EditDraft, rows: TagRow[]): string | null {
   const minHeight = valueFor("min_height");
   if (height !== undefined && minHeight !== undefined && height <= minHeight)
     return "height must be greater than min_height";
+  const roofHeight = valueFor("roof:height");
+  if (roofHeight !== undefined && height !== undefined && roofHeight > height)
+    return "roof_height must not be greater than height";
   return null;
 }
 
@@ -259,11 +301,16 @@ export function TagRows({
                   className="w-2/5 px-4 py-1.5 text-left font-medium break-words text-slate-500"
                 >
                   <span className="flex items-center gap-1">
-                    {row.key === "height" && (
+                    {(row.key === "height" || row.key === "roof:height") && (
                       <HeightDragButton
+                        tagKey={row.key}
                         value={row.value}
                         edited={row.edited}
-                        minHeight={rows.find((candidate) => candidate.key === "min_height")?.value}
+                        minHeight={
+                          row.key === "height"
+                            ? rows.find((candidate) => candidate.key === "min_height")?.value
+                            : undefined
+                        }
                         onChange={(value) => onEdit(row.key, value)}
                         onReset={() => onRevert(row.key)}
                       />
@@ -273,7 +320,15 @@ export function TagRows({
                 </th>
                 <td className="px-4 py-1.5 break-words text-slate-900">
                   <span className="flex flex-wrap items-center gap-1.5">
-                    {row.value === "" ? (
+                    {row.key === "roof:shape" ? (
+                      <RoofShapeSelect
+                        value={row.value}
+                        edited={row.edited}
+                        onChange={(value) => {
+                          if (value !== row.value) onEdit(row.key, value);
+                        }}
+                      />
+                    ) : row.value === "" ? (
                       <span className="text-slate-400 italic">not set</span>
                     ) : (
                       <span

@@ -3,7 +3,7 @@
 import type { Feature, FeatureCollection } from "geojson";
 import type { Bounds } from "../geometry";
 import { idbDelete, idbGet, idbPut, TILE_STORE } from "../idb";
-import { type TileId, tileKey, tilesInBounds } from "./tiles";
+import { OSM_TILE_SCHEMA, type TileId, tileKey, tilesInBounds } from "./tiles";
 
 /**
  * Browser-side half of the OSM read path. Tiles are cached in IndexedDB so
@@ -100,7 +100,7 @@ export function createTileLoader(
     const key = tileKey(tile);
     try {
       const response = await fetch(
-        `/api/osm/tile/${tile.z}/${tile.x}/${tile.y}${fresh ? "?fresh=1" : ""}`,
+        `/api/osm/tile/${tile.z}/${tile.x}/${tile.y}?schema=${OSM_TILE_SCHEMA}${fresh ? "&fresh=1" : ""}`,
       );
       if (!response.ok) {
         failed++;

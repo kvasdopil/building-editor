@@ -14,11 +14,25 @@ import { coordinateKey, metersBetween, roundToOsmGrid } from "./precision";
  * parts only. That bounds reuse to building geometry by construction: a vertex
  * can never be glued onto a highway or a fence node, because those were never
  * parsed.
+ *
+ * The same entries carry what it takes to *move* a node rather than replace it.
+ * That distinction matters most for the ways this index cannot see: a fence, a
+ * path, or a building outside the loaded tiles keeps referencing the node, so
+ * moving it in place carries them along, while creating a new node next to it
+ * would leave them behind on a corner the mapper thought they had dragged.
  */
 
-interface ExistingNode {
+export interface ExistingNode {
   id: number;
   coordinates: LngLat;
+  /**
+   * The version read from OSM. Moving this node is a `modify`, which needs it so
+   * the API can reject a conflict instead of overwriting a newer edit. Zero when
+   * the loaded data does not carry one, and then the node must not be moved.
+   */
+  version: number;
+  /** The node's own tags. A modify replaces the element, so they are resent. */
+  tags: Record<string, string>;
   /** Ids of the elements using this node, e.g. `["way/1", "way/2"]`. */
   ownerIds: string[];
 }
@@ -56,6 +70,11 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
     if (feature.geometry.type !== "Polygon") continue;
     const ring = feature.geometry.coordinates[0];
     if (!ring || ring.length !== nodeIds.length) continue;
+    // Both are written by the same parser, index for index with `node_ids`. A
+    // tile cached before they existed simply has no versions, which reads back
+    // as "unknown" and blocks a move rather than guessing one.
+    const versions = Array.isArray(properties.node_versions) ? properties.node_versions : [];
+    const nodeTags = (properties.node_tags ?? {}) as Record<string, Record<string, string>>;
 
     for (const [index, id] of nodeIds.entries()) {
       if (typeof id !== "number") continue;
@@ -68,9 +87,12 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
         }
         continue;
       }
+      const version = versions[index];
       const node: ExistingNode = {
         id,
         coordinates,
+        version: typeof version === "number" ? version : 0,
+        tags: nodeTags[id] ?? {},
         ownerIds: typeof properties.id === "string" ? [properties.id] : [],
       };
       byKey.set(key, node);
@@ -82,6 +104,15 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
   }
 
   return { byKey, buckets };
+}
+
+/**
+ * The node standing at exactly this position, if any. Exact is the only match
+ * that means "the same node" on its own, which is what resolving a drag's origin
+ * back to the node being moved requires.
+ */
+export function nodeAt(index: NodeIndex, point: LngLat): ExistingNode | null {
+  return index.byKey.get(coordinateKey(point)) ?? null;
 }
 
 function nearbyNodes(index: NodeIndex, [lon, lat]: LngLat): ExistingNode[] {

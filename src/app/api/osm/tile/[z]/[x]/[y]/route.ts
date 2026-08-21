@@ -11,7 +11,7 @@ import {
 } from "@/lib/osm/cache";
 import { fetchUpstream, UpstreamUnavailableError } from "@/lib/osm/limiter";
 import { type OsmMapResponse, osmToBuildings } from "@/lib/osm/parse";
-import { type TileId, tileBounds } from "@/lib/osm/tiles";
+import { OSM_TILE_SCHEMA, type TileId, tileBounds } from "@/lib/osm/tiles";
 import { tileRoute } from "@/lib/tile-route";
 
 /**
@@ -49,7 +49,7 @@ function tileResponse(
 }
 
 export const GET = tileRoute(async (tile, { fresh }) => {
-  const key = [String(tile.z), String(tile.x), String(tile.y)];
+  const key = [OSM_TILE_SCHEMA, String(tile.z), String(tile.x), String(tile.y)];
   const cached = await readCachedTile<FeatureCollection>(key);
   if (!fresh && cached && isFresh(cached)) return tileResponse(cached, "hit");
 

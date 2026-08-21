@@ -3,14 +3,36 @@ import intersect from "@turf/intersect";
 import { featureCollection, polygon } from "@turf/helpers";
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import type { BuildingProperties, LngLat } from "./buildings";
-import { closeRing, orientRing, pointInRing, segmentsIntersect, signedRingArea } from "./geometry";
+import {
+  closeRing,
+  openRing,
+  orientRing,
+  pointInRing,
+  segmentsIntersect,
+  signedRingArea,
+} from "./geometry";
 import { normalizeOsmTags } from "./osm/parse";
 import { drawnId } from "./osm/ref";
 
 export type EditableGeometry = Polygon | MultiPolygon;
+
+/** An existing OSM node dragged from one position to another. */
+export interface NodeMove {
+  /** Where the node sits in OSM, which is what identifies it. */
+  from: LngLat;
+  to: LngLat;
+}
+
 interface GeometryOverride {
   geometry: EditableGeometry;
-  kind: "hole" | "slice";
+  kind: "hole" | "slice" | "reshape";
+  /**
+   * Which vertices of this element were dragged. The edited geometry alone
+   * cannot say: a corner in a new place looks exactly like a new corner, and an
+   * upload that guessed wrong would abandon the node every unloaded fence, path
+   * and neighbouring outline still hangs on (see osm/nodes.ts).
+   */
+  movedNodes?: NodeMove[];
 }
 export type GeometryEditMap = Record<string, GeometryOverride>;
 export type CreatedPartMap = Record<string, Feature<EditableGeometry, BuildingProperties>>;
@@ -66,12 +88,88 @@ export function applyGeometryEdits(
             ...(feature.properties as BuildingProperties),
             locally_modified: true,
             geometry_modified: true,
+            geometry_edit_kind: override.kind,
           },
         };
       }),
       ...Object.values(createdParts),
     ],
   };
+}
+
+function sameCoordinate(a: readonly number[], b: LngLat): boolean {
+  return a[0] === b[0] && a[1] === b[1];
+}
+
+/**
+ * Fold one drag into the moves already recorded for an element. Dragging the
+ * same node a second time is still one move, from where OSM has it; dragging it
+ * back to where it started is no move at all.
+ */
+export function recordNodeMove(
+  moves: NodeMove[] | undefined,
+  from: LngLat,
+  to: LngLat,
+): NodeMove[] {
+  const earlier = moves?.find((move) => sameCoordinate(move.to, from));
+  const origin = earlier ? earlier.from : from;
+  const rest = (moves ?? []).filter((move) => move !== earlier);
+  return sameCoordinate(origin, to) ? rest : [...rest, { from: origin, to }];
+}
+
+/** Whether polygonal geometry contains a vertex at this exact OSM coordinate. */
+export function geometryHasVertex(geometry: EditableGeometry, coordinates: LngLat): boolean {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  return polygons.some((polygon) =>
+    polygon.some((ring) => ring.some((point) => sameCoordinate(point, coordinates))),
+  );
+}
+
+/** Move every occurrence of one shared coordinate, including ring closures. */
+export function moveSharedGeometryVertex(
+  geometry: EditableGeometry,
+  original: LngLat,
+  coordinates: LngLat,
+): EditableGeometry {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  const movedPolygons = polygons.map((polygon) =>
+    polygon.map((ring) =>
+      ring.map((point) => (sameCoordinate(point, original) ? coordinates : [...point])),
+    ),
+  );
+  return geometry.type === "Polygon"
+    ? { type: "Polygon", coordinates: movedPolygons[0] }
+    : { type: "MultiPolygon", coordinates: movedPolygons };
+}
+
+/** Insert a vertex after one ring segment and keep its GeoJSON ring closed. */
+export function insertGeometryVertex(
+  geometry: EditableGeometry,
+  polygonIndex: number,
+  ringIndex: number,
+  segmentIndex: number,
+  coordinates: LngLat,
+): EditableGeometry | null {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  const ring = polygons[polygonIndex]?.[ringIndex] as LngLat[] | undefined;
+  const nodes = ring ? openRing(ring).map((point) => [...point] as LngLat) : [];
+  if (!ring || nodes.length < 3 || segmentIndex < 0 || segmentIndex >= nodes.length) return null;
+  if (nodes.some((point) => point[0] === coordinates[0] && point[1] === coordinates[1]))
+    return null;
+
+  nodes.splice(segmentIndex + 1, 0, coordinates);
+  const insertedRing = closeRing(nodes);
+  const insertedPolygons = polygons.map((polygon, candidatePolygonIndex) =>
+    polygon.map((candidateRing, candidateRingIndex) =>
+      candidatePolygonIndex === polygonIndex && candidateRingIndex === ringIndex
+        ? insertedRing
+        : candidateRing.map((point) => [...point]),
+    ),
+  );
+
+  return geometry.type === "Polygon"
+    ? { type: "Polygon", coordinates: insertedPolygons[0] }
+    : { type: "MultiPolygon", coordinates: insertedPolygons };
 }
 
 /** A ring that neither repeats a corner nor crosses itself (JOSM: SelfIntersectingWay). */

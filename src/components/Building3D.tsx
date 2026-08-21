@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { buildPointCloud, buildScene } from "@/lib/extrude";
+import { levelHeight, verticalExtent } from "@/lib/heights";
 import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
 import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
 import { mountCanvas } from "@/lib/three-canvas";
@@ -56,12 +57,67 @@ export interface CameraView {
   eyeHeight: number;
 }
 
+interface SceneRuntime {
+  buildingId: string;
+  selectedId: string;
+  updateSelection(selection: BuildingSelection): void;
+}
+
+function disposeRoot(root: THREE.Object3D): void {
+  root.traverse((object) => {
+    if (
+      object instanceof THREE.Mesh ||
+      object instanceof THREE.LineSegments ||
+      object instanceof THREE.Points
+    ) {
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => material.dispose());
+    }
+  });
+}
+
+/**
+ * LiDAR positions and discrepancy colours only depend on footprint geometry,
+ * the selected element and each solid's total top. Changing roof:height keeps
+ * the apex fixed, so rebuilding a million-point buffer for that edit is wasted.
+ */
+function pointCloudProfileChanged(previous: BuildingSelection, next: BuildingSelection): boolean {
+  if (
+    previous.building.id !== next.building.id ||
+    previous.selected.id !== next.selected.id ||
+    previous.building.polygons !== next.building.polygons ||
+    previous.building.properties.geometry_edit_kind !==
+      next.building.properties.geometry_edit_kind ||
+    previous.parts.length !== next.parts.length
+  )
+    return true;
+
+  const previousLevelHeight = levelHeight(previous.building.properties);
+  const nextLevelHeight = levelHeight(next.building.properties);
+  const previousElements = new Map(
+    [previous.building, ...previous.parts].map((element) => [element.id, element] as const),
+  );
+  for (const element of [next.building, ...next.parts]) {
+    const old = previousElements.get(element.id);
+    if (
+      !old ||
+      old.polygons !== element.polygons ||
+      verticalExtent(old.properties, previousLevelHeight).top !==
+        verticalExtent(element.properties, nextLevelHeight).top
+    )
+      return true;
+  }
+  return false;
+}
+
 /** Interactive 3D view of the selected building (orbit to rotate, wheel to zoom). */
 export function Building3D({
   selection,
   initialHeading = 315,
   onCameraChange,
   onCloudStatus,
+  onCloudChange,
   onTerrainStatus,
 }: {
   selection: BuildingSelection;
@@ -69,9 +125,14 @@ export function Building3D({
   initialHeading?: number;
   onCameraChange?: (view: CameraView) => void;
   onCloudStatus?: (status: CloudStatus) => void;
+  /** Shares the decoded cloud with the map's XY-only LiDAR mode. */
+  onCloudChange?: (buildingId: string, cloud: LidarCloud | null) => void;
   onTerrainStatus?: (status: TerrainStatus) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const selectionRef = useRef(selection);
+  const runtimeRef = useRef<SceneRuntime | null>(null);
+  selectionRef.current = selection;
   // Decoded laser cloud for the building on screen. Kept in a ref, not state,
   // so it arriving never re-renders — the scene is built once and the dots are
   // added to it — and so a camera-only rebuild reuses it instead of refetching.
@@ -91,6 +152,8 @@ export function Building3D({
     const container = containerRef.current;
     if (!container) return;
 
+    let activeSelection = selectionRef.current;
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf3f6f9);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4ae, 1.1));
@@ -98,38 +161,48 @@ export function Building3D({
     sun.position.set(1, 2, 1.2);
     scene.add(sun);
 
-    const id = selection.building.id;
+    const id = activeSelection.building.id;
     let terrain = terrainRef.current?.id === id ? terrainRef.current.terrain : null;
     let cloud = cloudRef.current?.id === id ? cloudRef.current.cloud : null;
-    let built = buildScene(selection, terrain);
-    if (cloud) built.root.add(buildPointCloud(cloud, built.origin, terrain));
+    let built = buildScene(activeSelection, terrain);
     scene.add(built.root);
 
-    const disposeRoot = (root: THREE.Object3D) => {
-      root.traverse((object) => {
-        if (
-          object instanceof THREE.Mesh ||
-          object instanceof THREE.LineSegments ||
-          object instanceof THREE.Points
-        ) {
-          object.geometry.dispose();
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material) => material.dispose());
-        }
-      });
+    let cloudPoints = cloud ? buildPointCloud(cloud, activeSelection, built.origin, terrain) : null;
+    if (cloudPoints) scene.add(cloudPoints);
+
+    const replacePointCloud = () => {
+      if (cloudPoints) {
+        scene.remove(cloudPoints);
+        disposeRoot(cloudPoints);
+      }
+      cloudPoints = cloud ? buildPointCloud(cloud, activeSelection, built.origin, terrain) : null;
+      if (cloudPoints) scene.add(cloudPoints);
     };
 
     // Rebuilding changes terrain and neighbor base elevations, but never the
     // selected building's zero: its lowest Mapterhorn sample is the scene datum.
-    const rebuild = () => {
+    const rebuild = (nextSelection: BuildingSelection, forcePointCloud = false) => {
+      const rebuildPointCloud =
+        forcePointCloud || pointCloudProfileChanged(activeSelection, nextSelection);
       const previous = built.root;
-      const next = buildScene(selection, terrain);
-      if (cloud) next.root.add(buildPointCloud(cloud, next.origin, terrain));
+      activeSelection = nextSelection;
+      const next = buildScene(activeSelection, terrain);
       scene.remove(previous);
       built = next;
       scene.add(next.root);
       disposeRoot(previous);
+      if (cloud && rebuildPointCloud) replacePointCloud();
     };
+
+    let pendingSelection: BuildingSelection | null = null;
+    const runtime: SceneRuntime = {
+      buildingId: activeSelection.building.id,
+      selectedId: activeSelection.selected.id,
+      updateSelection(nextSelection) {
+        if (nextSelection !== activeSelection) pendingSelection = nextSelection;
+      },
+    };
+    runtimeRef.current = runtime;
 
     const { focus } = built;
 
@@ -140,7 +213,7 @@ export function Building3D({
     const controller = new AbortController();
     const addTerrain = async () => {
       if (!terrain) onTerrainStatus?.({ buildingId: id, state: "loading" });
-      const loaded = terrain ?? (await fetchTerrain(selection, controller.signal));
+      const loaded = terrain ?? (await fetchTerrain(activeSelection, controller.signal));
       if (!loaded) {
         if (!disposed) onTerrainStatus?.({ buildingId: id, state: "empty" });
         return;
@@ -151,32 +224,40 @@ export function Building3D({
       onTerrainStatus?.({ buildingId: id, state: "loaded", groundZ: loaded.referenceZ });
       // A cached model was already part of the initial scene.
       if (built.root.children.some((child) => child.userData.terrain === true)) return;
-      rebuild();
+      rebuild(activeSelection, true);
     };
     void addTerrain();
 
     const addLidar = async () => {
-      if (!cloud) onCloudStatus?.({ buildingId: id, state: "loading" });
-      const loaded = cloud ?? (await fetchLidarCloud(selection.building, controller.signal));
+      if (!cloud) {
+        onCloudStatus?.({ buildingId: id, state: "loading" });
+        onCloudChange?.(id, null);
+      }
+      const loaded = cloud ?? (await fetchLidarCloud(activeSelection.building, controller.signal));
       if (!loaded) {
-        if (!disposed) onCloudStatus?.({ buildingId: id, state: "empty" });
+        if (!disposed) {
+          onCloudStatus?.({ buildingId: id, state: "empty" });
+          onCloudChange?.(id, null);
+        }
         return;
       }
-      if (!disposed)
+      if (!disposed) {
         onCloudStatus?.({
           buildingId: id,
           state: "loaded",
           points: loaded.count,
           source: loaded.source,
         });
+        onCloudChange?.(id, loaded);
+      }
       // Cache before bailing out: a torn-down run still decoded a valid cloud,
       // and the remount that replaced it should not fetch the tiles again.
       cloudRef.current = { id, cloud: loaded };
       cloud = loaded;
       if (disposed) return;
       // Cached points were already added to the initial scene.
-      if (built.root.children.some((child) => child instanceof THREE.Points)) return;
-      built.root.add(buildPointCloud(loaded, built.origin, terrain));
+      if (cloudPoints) return;
+      replacePointCloud();
     };
     void addLidar();
 
@@ -259,6 +340,13 @@ export function Building3D({
     reportCamera();
 
     canvas.start(() => {
+      // Pointer drags may publish several tag states before the browser paints.
+      // Render only the newest state, while still providing a live preview.
+      if (pendingSelection) {
+        const nextSelection = pendingSelection;
+        pendingSelection = null;
+        rebuild(nextSelection);
+      }
       controls.update();
       canvas.renderer.render(scene, camera);
     });
@@ -266,12 +354,33 @@ export function Building3D({
     return () => {
       disposed = true;
       controller.abort();
+      if (runtimeRef.current === runtime) runtimeRef.current = null;
       controls.removeEventListener("change", reportCamera);
       controls.dispose();
       canvas.dispose();
       disposeRoot(built.root);
+      if (cloudPoints) disposeRoot(cloudPoints);
     };
-  }, [initialHeading, onCameraChange, onCloudStatus, onTerrainStatus, selection]);
+  }, [
+    initialHeading,
+    onCameraChange,
+    onCloudChange,
+    onCloudStatus,
+    onTerrainStatus,
+    selection.building.id,
+    selection.selected.id,
+  ]);
+
+  // Tag edits replace the effective selection object. Keep the standing
+  // renderer, camera, controls and async data; only swap its scene geometry.
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (
+      runtime?.buildingId === selection.building.id &&
+      runtime.selectedId === selection.selected.id
+    )
+      runtime.updateSelection(selection);
+  }, [selection]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

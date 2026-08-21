@@ -39,20 +39,35 @@ import {
   createPartFeature,
   cutHole,
   type CreatedPartMap,
+  type EditableGeometry,
+  geometryHasVertex,
   type GeometryEditMap,
+  insertGeometryVertex,
+  moveSharedGeometryVertex,
+  type NodeMove,
+  recordNodeMove,
 } from "@/lib/geometry-edits";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
 import { drawnId, drawnRef, parseOsmRef } from "@/lib/osm/ref";
+import { roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
 import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
 import { BUILDINGS_PMTILES_URL } from "@/lib/overture";
 import { sliceBuilding } from "@/lib/slice";
+import type { LidarCloud } from "@/lib/lidar";
+import { LidarMapLayer } from "@/lib/lidar-map-layer";
 
 const MIN_BUILDING_ZOOM = 10;
+const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 
 interface PhotoOffset {
   x: number;
   y: number;
+}
+
+interface BasemapLayerState {
+  id: string;
+  visibility: "visible" | "none";
 }
 
 /**
@@ -195,6 +210,203 @@ function draftFeatures(
   return { type: "FeatureCollection", features };
 }
 
+/** One point per footprint vertex, without GeoJSON's repeated closing coordinate. */
+function selectionNodeFeatures(selection: BuildingSelection | null): FeatureCollection {
+  if (!selection) return EMPTY;
+  const features: Feature<Point>[] = selection.selected.polygons.flatMap(
+    (footprint, polygonIndex) =>
+      [footprint.outer, ...footprint.holes].flatMap((ring, ringIndex) =>
+        openRing(ring).map((coordinates, vertexIndex) => ({
+          type: "Feature",
+          properties: { polygonIndex, ringIndex, vertexIndex },
+          geometry: { type: "Point", coordinates },
+        })),
+      ),
+  );
+  return { type: "FeatureCollection", features };
+}
+
+interface SelectionNodeHandle {
+  polygonIndex: number;
+  ringIndex: number;
+  vertexIndex: number;
+  coordinates: LngLat;
+}
+
+/** Nearest selected node within the same nine-pixel area used to start a drag. */
+function nearestSelectionNode(
+  map: MaplibreMap,
+  selection: BuildingSelection,
+  click: { x: number; y: number },
+  tolerance = 9,
+): SelectionNodeHandle | null {
+  const handles = map.queryRenderedFeatures(
+    [
+      [click.x - tolerance, click.y - tolerance],
+      [click.x + tolerance, click.y + tolerance],
+    ],
+    { layers: ["selection-nodes"] },
+  );
+  const handle = handles
+    .filter((feature) => feature.geometry.type === "Point")
+    .map((feature) => {
+      const point = map.project((feature.geometry as Point).coordinates as LngLat);
+      return {
+        feature,
+        distance: Math.hypot(click.x - point.x, click.y - point.y),
+      };
+    })
+    .filter(({ distance }) => distance <= tolerance)
+    .sort((a, b) => a.distance - b.distance)[0]?.feature;
+  if (!handle || handle.geometry.type !== "Point") return null;
+
+  const polygonIndex = Number(handle.properties.polygonIndex);
+  const ringIndex = Number(handle.properties.ringIndex);
+  const vertexIndex = Number(handle.properties.vertexIndex);
+  if (![polygonIndex, ringIndex, vertexIndex].every(Number.isInteger)) return null;
+  const footprint = selection.selected.polygons[polygonIndex];
+  const ring = footprint ? [footprint.outer, ...footprint.holes][ringIndex] : undefined;
+  const coordinates = ring ? openRing(ring)[vertexIndex] : undefined;
+  if (!coordinates) return null;
+  return {
+    polygonIndex,
+    ringIndex,
+    vertexIndex,
+    // Rendered-feature coordinates can be projection-rounded. Resolve the
+    // handle back to the exact source vertex used for shared-node identity.
+    coordinates,
+  };
+}
+
+function geometryOf(element: BuildingElement): EditableGeometry {
+  return {
+    type: "MultiPolygon",
+    coordinates: element.polygons.map((footprint) => [footprint.outer, ...footprint.holes]),
+  };
+}
+
+type GeometryByEntity = Record<string, EditableGeometry>;
+
+function geometriesSharingVertex(
+  collection: FeatureCollection,
+  coordinates: LngLat,
+): GeometryByEntity {
+  const geometries: GeometryByEntity = {};
+  for (const feature of collection.features) {
+    const id = feature.properties?.id;
+    if (
+      typeof id !== "string" ||
+      (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon") ||
+      !geometryHasVertex(feature.geometry, coordinates)
+    )
+      continue;
+    geometries[id] = feature.geometry;
+  }
+  return geometries;
+}
+
+function selectionWithGeometries(
+  selection: BuildingSelection,
+  geometries: GeometryByEntity,
+): BuildingSelection {
+  const withGeometry = (element: BuildingElement): BuildingElement => {
+    const geometry = geometries[element.id];
+    return geometry ? { ...element, polygons: toFootprints(geometry) } : element;
+  };
+  const building = withGeometry(selection.building);
+  const parts = selection.parts.map(withGeometry);
+  const selected =
+    selection.selected.id === building.id
+      ? building
+      : (parts.find((part) => part.id === selection.selected.id) ??
+        withGeometry(selection.selected));
+  return {
+    ...selection,
+    building,
+    parts,
+    selected,
+    outline: {
+      ...selection.outline,
+      features: selection.outline.features.map((feature) => {
+        const id = feature.properties?.id;
+        return typeof id === "string" && geometries[id]
+          ? { ...feature, geometry: geometries[id] }
+          : feature;
+      }),
+    },
+  };
+}
+
+interface NodeDrag {
+  polygonIndex: number;
+  ringIndex: number;
+  vertexIndex: number;
+  originalCoordinates: LngLat;
+  /** Where the vertex sits right now; absent until the pointer has moved. */
+  coordinates: LngLat | null;
+  originalGeometries: GeometryByEntity;
+  geometries: GeometryByEntity;
+}
+
+interface SelectionSegment {
+  polygonIndex: number;
+  ringIndex: number;
+  segmentIndex: number;
+  coordinates: LngLat;
+}
+
+/** Nearest empty segment of the selected footprint, measured in screen pixels. */
+function nearestSelectionSegment(
+  map: MaplibreMap,
+  selection: BuildingSelection,
+  click: { x: number; y: number },
+  tolerance = 8,
+): SelectionSegment | null {
+  const nodeTolerance = 9;
+  for (const footprint of selection.selected.polygons) {
+    for (const ring of [footprint.outer, ...footprint.holes]) {
+      for (const node of openRing(ring)) {
+        const point = map.project(node);
+        if (Math.hypot(click.x - point.x, click.y - point.y) <= nodeTolerance) return null;
+      }
+    }
+  }
+
+  let nearest: (SelectionSegment & { distance: number }) | null = null;
+  for (const [polygonIndex, footprint] of selection.selected.polygons.entries()) {
+    for (const [ringIndex, ring] of [footprint.outer, ...footprint.holes].entries()) {
+      const nodes = openRing(ring);
+      for (let segmentIndex = 0; segmentIndex < nodes.length; segmentIndex++) {
+        const start = map.project(nodes[segmentIndex]);
+        const end = map.project(nodes[(segmentIndex + 1) % nodes.length]);
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        const lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared === 0) continue;
+        const amount = Math.max(
+          0,
+          Math.min(1, ((click.x - start.x) * dx + (click.y - start.y) * dy) / lengthSquared),
+        );
+        const x = start.x + amount * dx;
+        const y = start.y + amount * dy;
+        const distance = Math.hypot(click.x - x, click.y - y);
+        if (distance > tolerance || (nearest && distance >= nearest.distance)) continue;
+        const coordinate = map.unproject([x, y]);
+        nearest = {
+          polygonIndex,
+          ringIndex,
+          segmentIndex,
+          coordinates: roundToOsmGrid([coordinate.lng, coordinate.lat]),
+          distance,
+        };
+      }
+    }
+  }
+  if (!nearest) return null;
+  const { distance: _distance, ...segment } = nearest;
+  return segment;
+}
+
 interface BoundarySnap {
   targetId: string;
   coordinates: LngLat;
@@ -202,77 +414,143 @@ interface BoundarySnap {
   kind: "edge" | "node";
 }
 
+interface ProjectedBoundaryNode {
+  coordinates: LngLat;
+  x: number;
+  y: number;
+}
+
+interface SliceBoundaryCache {
+  targetId: string;
+  selection: BuildingSelection;
+  rings: LngLat[][];
+  projected: ProjectedBoundaryNode[][] | null;
+}
+
+const boundaryRingIndexes = new WeakMap<FeatureCollection, Map<string, LngLat[][]>>();
+
+/** Lightweight per-collection ring lookup: no part association or 3D neighbors. */
+function boundaryRingIndex(collection: FeatureCollection): Map<string, LngLat[][]> {
+  const cached = boundaryRingIndexes.get(collection);
+  if (cached) return cached;
+  const index = new Map<string, LngLat[][]>();
+  for (const feature of collection.features) {
+    const id = feature.properties?.id;
+    if (typeof id !== "string") continue;
+    const polygons =
+      feature.geometry.type === "Polygon"
+        ? [feature.geometry.coordinates]
+        : feature.geometry.type === "MultiPolygon"
+          ? feature.geometry.coordinates
+          : [];
+    index.set(
+      id,
+      polygons.flatMap((polygon) => polygon.map((ring) => ring as LngLat[])),
+    );
+  }
+  boundaryRingIndexes.set(collection, index);
+  return index;
+}
+
+function selectionBoundaryRings(selection: BuildingSelection): LngLat[][] {
+  return [selection.building, ...selection.parts].flatMap((element) =>
+    element.polygons.flatMap((footprint) => [footprint.outer, ...footprint.holes]),
+  );
+}
+
+function projectBoundaryRings(map: MaplibreMap, rings: LngLat[][]): ProjectedBoundaryNode[][] {
+  return rings.map((ring) =>
+    openRing(ring).map((coordinates) => {
+      const point = map.project(coordinates);
+      return { coordinates, x: point.x, y: point.y };
+    }),
+  );
+}
+
+function nearestProjectedBoundary(
+  projectedRings: ProjectedBoundaryNode[][],
+  click: { x: number; y: number },
+  targetId: string,
+  tolerance: number,
+): BoundarySnap | null {
+  let nearestNode: BoundarySnap | null = null;
+  let nearestEdge: BoundarySnap | null = null;
+  const nodeTolerance = Math.min(tolerance, 9);
+  for (const ring of projectedRings) {
+    for (const node of ring) {
+      const distance = Math.hypot(click.x - node.x, click.y - node.y);
+      if (distance > nodeTolerance || (nearestNode && distance >= nearestNode.distance)) continue;
+      nearestNode = { targetId, coordinates: node.coordinates, distance, kind: "node" };
+    }
+    for (let index = 0; index < ring.length; index++) {
+      const start = ring[index];
+      const end = ring[(index + 1) % ring.length];
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      const amount =
+        lengthSquared === 0
+          ? 0
+          : Math.max(
+              0,
+              Math.min(1, ((click.x - start.x) * dx + (click.y - start.y) * dy) / lengthSquared),
+            );
+      const x = start.x + amount * dx;
+      const y = start.y + amount * dy;
+      const distance = Math.hypot(click.x - x, click.y - y);
+      if (distance > tolerance || (nearestEdge && distance >= nearestEdge.distance)) continue;
+      nearestEdge = {
+        targetId,
+        coordinates: [
+          start.coordinates[0] + amount * (end.coordinates[0] - start.coordinates[0]),
+          start.coordinates[1] + amount * (end.coordinates[1] - start.coordinates[1]),
+        ],
+        distance,
+        kind: "edge",
+      };
+    }
+  }
+  return nearestNode ?? nearestEdge;
+}
+
 function nearestBuildingBoundary(
   map: MaplibreMap,
   collection: FeatureCollection,
   click: { x: number; y: number },
   tolerance = 12,
-  targetId?: string,
+  target?: SliceBoundaryCache | null,
 ): BoundarySnap | null {
-  const candidateIds = targetId
-    ? [targetId]
-    : map
-        .queryRenderedFeatures(
-          [
-            [click.x - tolerance, click.y - tolerance],
-            [click.x + tolerance, click.y + tolerance],
-          ],
-          { layers: ["live-building-fill"] },
-        )
-        .map((feature) => feature.properties.id)
-        .filter((id): id is string => typeof id === "string");
+  if (target) {
+    target.projected ??= projectBoundaryRings(map, target.rings);
+    return nearestProjectedBoundary(target.projected, click, target.targetId, tolerance);
+  }
+
+  const candidateIds = map
+    .queryRenderedFeatures(
+      [
+        [click.x - tolerance, click.y - tolerance],
+        [click.x + tolerance, click.y + tolerance],
+      ],
+      { layers: ["live-building-fill", "live-part-fill"] },
+    )
+    .map((feature) => feature.properties.id)
+    .filter((id): id is string => typeof id === "string");
+  const ringsById = boundaryRingIndex(collection);
   let nearestNode: BoundarySnap | null = null;
   let nearestEdge: BoundarySnap | null = null;
-  const nodeTolerance = Math.min(tolerance, 9);
   for (const id of new Set(candidateIds)) {
-    const selection = selectFromOsm(collection, id);
-    if (!selection) continue;
-    // Every ring is a real boundary of the solid it encloses: slices may end on
-    // an internal hole or an existing part just as they do on the outer outline.
-    const rings = [selection.building, ...selection.parts].flatMap((element) =>
-      element.polygons.flatMap((footprint) => [footprint.outer, ...footprint.holes]),
+    const rings = ringsById.get(id);
+    if (!rings) continue;
+    const nearest = nearestProjectedBoundary(
+      projectBoundaryRings(map, rings),
+      click,
+      id,
+      tolerance,
     );
-    for (const ring of rings) {
-      for (const coordinates of openRing(ring)) {
-        const projected = map.project(coordinates);
-        const distance = Math.hypot(click.x - projected.x, click.y - projected.y);
-        if (distance > nodeTolerance || (nearestNode && distance >= nearestNode.distance)) continue;
-        nearestNode = { targetId: id, coordinates, distance, kind: "node" };
-      }
-      for (let index = 1; index < ring.length; index++) {
-        const start = ring[index - 1];
-        const end = ring[index];
-        const projectedStart = map.project(start);
-        const projectedEnd = map.project(end);
-        const dx = projectedEnd.x - projectedStart.x;
-        const dy = projectedEnd.y - projectedStart.y;
-        const lengthSquared = dx * dx + dy * dy;
-        const amount =
-          lengthSquared === 0
-            ? 0
-            : Math.max(
-                0,
-                Math.min(
-                  1,
-                  ((click.x - projectedStart.x) * dx + (click.y - projectedStart.y) * dy) /
-                    lengthSquared,
-                ),
-              );
-        const x = projectedStart.x + amount * dx;
-        const y = projectedStart.y + amount * dy;
-        const distance = Math.hypot(click.x - x, click.y - y);
-        if (distance > tolerance || (nearestEdge && distance >= nearestEdge.distance)) continue;
-        nearestEdge = {
-          targetId: id,
-          coordinates: [
-            start[0] + amount * (end[0] - start[0]),
-            start[1] + amount * (end[1] - start[1]),
-          ],
-          distance,
-          kind: "edge",
-        };
-      }
-    }
+    if (!nearest) continue;
+    if (nearest.kind === "node") {
+      if (!nearestNode || nearest.distance < nearestNode.distance) nearestNode = nearest;
+    } else if (!nearestEdge || nearest.distance < nearestEdge.distance) nearestEdge = nearest;
   }
   return nearestNode ?? nearestEdge;
 }
@@ -348,17 +626,11 @@ function footprintLayers({
   ];
 }
 
-function mapStyle(): StyleSpecification {
+/** Sources and layers owned by the editor, installed above the remote vector basemap. */
+function editorStyle(): StyleSpecification {
   return {
     version: 8,
     sources: {
-      osm: {
-        type: "raster",
-        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution: "© OpenStreetMap contributors",
-      },
       overture: {
         type: "vector",
         url: `pmtiles://${BUILDINGS_PMTILES_URL}`,
@@ -366,9 +638,16 @@ function mapStyle(): StyleSpecification {
       },
       live: { type: "geojson", data: EMPTY, attribution: "© OpenStreetMap contributors" },
       selection: { type: "geojson", data: EMPTY },
+      "selection-nodes": { type: "geojson", data: EMPTY },
+      "selection-node-hover": { type: "geojson", data: EMPTY },
     },
     layers: [
-      { id: "osm", type: "raster", source: "osm" },
+      {
+        id: "lidar-background",
+        type: "background",
+        layout: { visibility: "none" },
+        paint: { "background-color": "#0b1020" },
+      },
       ...footprintLayers({ id: "building", source: "overture", sourceLayer: "building" }),
       ...footprintLayers({
         id: "part",
@@ -389,6 +668,23 @@ function mapStyle(): StyleSpecification {
         type: "line",
         source: "selection",
         paint: { "line-color": "#101828", "line-width": 2 },
+      },
+      {
+        id: "selection-nodes",
+        type: "circle",
+        source: "selection-nodes",
+        paint: { "circle-color": "#000000", "circle-radius": 3 },
+      },
+      {
+        id: "selection-node-hover",
+        type: "circle",
+        source: "selection-node-hover",
+        paint: {
+          "circle-color": "#7c3aed",
+          "circle-radius": 5,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
       },
     ],
   };
@@ -443,7 +739,9 @@ export function MapView() {
   // a sibling effect re-running after a remount can never touch a removed map
   // (MapLibre drops its style on remove(), and every paint call then throws).
   const mapRef = useRef<MaplibreMap | null>(null);
+  const basemapLayersRef = useRef<BasemapLayerState[]>([]);
   const photoMapRef = useRef<MaplibreMap | null>(null);
+  const lidarLayerRef = useRef<LidarMapLayer | null>(null);
   const photoOffsetRef = useRef<PhotoOffset>({ x: 0, y: 0 });
   const [mapReady, setMapReady] = useState(false);
   const [live, setLive] = useState(false);
@@ -453,6 +751,7 @@ export function MapView() {
     failed: 0,
   });
   const [photos, setPhotos] = useState(false);
+  const [lidar, setLidar] = useState(false);
   const [photoAdjustActive, setPhotoAdjustActive] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
@@ -462,6 +761,8 @@ export function MapView() {
   const [createdParts, setCreatedParts] = useState<CreatedPartMap>({});
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
+  const selectionBuildingId = selection?.building.id ?? null;
+  const selectionRef = useRef<BuildingSelection | null>(selection);
   const [selectionBearing, setSelectionBearing] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   /** Pending-changes entity to select as soon as its tile is loaded. */
@@ -469,8 +770,10 @@ export function MapView() {
   const cutHoleActiveRef = useRef(cutHoleActive);
   const sliceActiveRef = useRef(sliceActive);
   const photoAdjustActiveRef = useRef(photoAdjustActive);
+  const suppressSelectionClickRef = useRef(false);
   const holeDraftRef = useRef<HoleDraft>(EMPTY_HOLE_DRAFT);
   const sliceDraftRef = useRef<SliceDraft>(EMPTY_SLICE_DRAFT);
+  const sliceBoundaryCacheRef = useRef<SliceBoundaryCache | null>(null);
   const nextPartIdRef = useRef(1);
   const geometryEditsRef = useRef(geometryEdits);
   const createdPartsRef = useRef(createdParts);
@@ -479,6 +782,7 @@ export function MapView() {
   cutHoleActiveRef.current = cutHoleActive;
   sliceActiveRef.current = sliceActive;
   photoAdjustActiveRef.current = photoAdjustActive;
+  selectionRef.current = selection;
   geometryEditsRef.current = geometryEdits;
   createdPartsRef.current = createdParts;
   editsRef.current = edits.edits;
@@ -519,7 +823,7 @@ export function MapView() {
 
     const instance = new MaplibreMap({
       container,
-      style: mapStyle(),
+      style: BASEMAP_STYLE_URL,
       center: [18.0686, 59.3293],
       zoom: 14,
       minZoom: 3,
@@ -589,12 +893,11 @@ export function MapView() {
       if (!cutHoleActiveRef.current && !sliceActiveRef.current && !photoAdjustActiveRef.current)
         instance.getCanvas().style.cursor = cursor;
     };
-    for (const layer of ["building-fill", "live-building-fill", "live-part-fill"]) {
-      instance.on("mouseenter", layer, setCursor("pointer"));
-      instance.on("mouseleave", layer, setCursor(""));
-    }
-
     instance.on("click", (event: MapMouseEvent) => {
+      if (suppressSelectionClickRef.current) {
+        suppressSelectionClickRef.current = false;
+        return;
+      }
       if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
         return;
       // Selection is live-OSM only: the Overture overview is a snapshot we
@@ -620,6 +923,42 @@ export function MapView() {
     instance.on("error", (e) => console.error("map error:", e.error?.message ?? e));
     mapRef.current = instance;
     instance.on("load", () => {
+      // Liberty includes a low-zoom raster relief and a 3D building layer by
+      // default. This editor deliberately keeps the basemap vector-only and
+      // flat; its own color-coded building footprints are installed afterward.
+      const providerStyle = instance.getStyle();
+      for (const layer of providerStyle.layers) {
+        if (layer.type === "raster" || layer.type === "fill-extrusion") {
+          instance.removeLayer(layer.id);
+        }
+      }
+      for (const [id, source] of Object.entries(providerStyle.sources)) {
+        if (source.type === "raster") instance.removeSource(id);
+      }
+
+      // Keep the provider's remaining vector style together, then place all
+      // editor-owned data above it. Remember its layers so Photos can reveal
+      // the separate imagery map without hiding editing overlays.
+      basemapLayersRef.current = instance.getStyle().layers.map((layer) => ({
+        id: layer.id,
+        visibility: layer.layout?.visibility === "none" ? "none" : "visible",
+      }));
+      const overlay = editorStyle();
+      for (const [id, source] of Object.entries(overlay.sources)) instance.addSource(id, source);
+      const lidarBackground = overlay.layers.find((layer) => layer.id === "lidar-background");
+      if (lidarBackground) instance.addLayer(lidarBackground);
+      const lidarLayer = new LidarMapLayer();
+      lidarLayerRef.current = lidarLayer;
+      instance.addLayer(lidarLayer);
+      for (const layer of overlay.layers) {
+        if (layer.id !== "lidar-background") instance.addLayer(layer);
+      }
+
+      for (const layer of ["building-fill", "live-building-fill", "live-part-fill"]) {
+        instance.on("mouseenter", layer, setCursor("pointer"));
+        instance.on("mouseleave", layer, setCursor(""));
+      }
+
       instance.addImage("hole-node", squareImage(9, [124, 58, 237, 255], [255, 255, 255, 255]));
       instance.addImage(
         "hole-first-node",
@@ -665,6 +1004,8 @@ export function MapView() {
       loader.stop();
       loaderRef.current = null;
       mapRef.current = null;
+      lidarLayerRef.current = null;
+      basemapLayersRef.current = [];
       setMapReady(false);
       instance.remove();
       removeProtocol("pmtiles");
@@ -890,7 +1231,36 @@ export function MapView() {
     void source?.setData(draftFeatures(draft.nodes, draft.mode === "loop", draft.snap));
   }, []);
 
+  const prepareSliceBoundaryCache = useCallback((targetId: string): SliceBoundaryCache | null => {
+    const current = sliceBoundaryCacheRef.current;
+    if (
+      current &&
+      (current.targetId === targetId ||
+        current.selection.parts.some((part) => part.id === targetId))
+    )
+      return current;
+    const visibleSelection = selectionRef.current;
+    const selection =
+      visibleSelection &&
+      (visibleSelection.building.id === targetId ||
+        visibleSelection.parts.some((part) => part.id === targetId))
+        ? visibleSelection
+        : selectFromOsm(displayedFeaturesRef.current, targetId);
+    if (!selection) return null;
+    const cache: SliceBoundaryCache = {
+      // A part edge may be the first hit, but every slice belongs to the
+      // enclosing building and newly created parts must reference that outline.
+      targetId: selection.building.id,
+      selection,
+      rings: selectionBoundaryRings(selection),
+      projected: null,
+    };
+    sliceBoundaryCacheRef.current = cache;
+    return cache;
+  }, []);
+
   const cancelSliceDrawing = useCallback(() => {
+    sliceBoundaryCacheRef.current = null;
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(false);
   }, [updateSliceDraft]);
@@ -1160,7 +1530,10 @@ export function MapView() {
       return;
     }
 
-    const target = selectFromOsm(displayedFeaturesRef.current, targetId);
+    const target =
+      sliceBoundaryCacheRef.current?.targetId === targetId
+        ? sliceBoundaryCacheRef.current.selection
+        : selectFromOsm(displayedFeaturesRef.current, targetId);
     if (!target) {
       setNotice("Could not find the target building");
       return;
@@ -1197,6 +1570,7 @@ export function MapView() {
       setSelectionBearing(map.getBearing());
       setSelection(nextSelection);
     }
+    sliceBoundaryCacheRef.current = null;
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(false);
     setNotice(
@@ -1225,6 +1599,7 @@ export function MapView() {
     cancelHoleDrawing();
     setPhotoAdjustActive(false);
     setChangesOpen(false);
+    sliceBoundaryCacheRef.current = null;
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(true);
     setNotice("Start on an outline or part edge for an open slice, or inside for a loop");
@@ -1297,19 +1672,21 @@ export function MapView() {
     if (!map) return;
     const canvas = map.getCanvas();
     canvas.style.cursor = "crosshair";
+    let pendingPoint: { x: number; y: number } | null = null;
+    let mouseMoveFrame = 0;
 
-    const onMouseMove = (event: MapMouseEvent) => {
+    const updateSnapAt = (point: { x: number; y: number }) => {
       const draft = sliceDraftRef.current;
+      const boundaryCache =
+        sliceBoundaryCacheRef.current?.targetId === draft.targetId
+          ? sliceBoundaryCacheRef.current
+          : null;
       const snap =
         draft.mode === "loop"
           ? null
-          : nearestBuildingBoundary(
-              map,
-              displayedFeaturesRef.current,
-              event.point,
-              12,
-              draft.targetId ?? undefined,
-            );
+          : draft.targetId && !boundaryCache
+            ? null
+            : nearestBuildingBoundary(map, displayedFeaturesRef.current, point, 12, boundaryCache);
       if (!draft.snap && !snap) return;
       if (
         draft.snap &&
@@ -1323,20 +1700,50 @@ export function MapView() {
       updateSliceDraft({ ...draft, snap });
     };
 
+    const onMouseMove = (event: MapMouseEvent) => {
+      pendingPoint = { x: event.point.x, y: event.point.y };
+      if (mouseMoveFrame) return;
+      mouseMoveFrame = window.requestAnimationFrame(() => {
+        mouseMoveFrame = 0;
+        const point = pendingPoint;
+        pendingPoint = null;
+        if (point) updateSnapAt(point);
+      });
+    };
+
+    const invalidateProjectedBoundaries = () => {
+      if (sliceBoundaryCacheRef.current) sliceBoundaryCacheRef.current.projected = null;
+    };
+
+    const cancelPendingMouseMove = () => {
+      pendingPoint = null;
+      if (mouseMoveFrame) {
+        window.cancelAnimationFrame(mouseMoveFrame);
+        mouseMoveFrame = 0;
+      }
+    };
+
     const clearSnap = () => {
+      cancelPendingMouseMove();
       const draft = sliceDraftRef.current;
       if (draft.snap) updateSliceDraft({ ...draft, snap: null });
     };
 
     const onClick = (event: MapMouseEvent) => {
+      cancelPendingMouseMove();
       const point: LngLat = [event.lngLat.lng, event.lngLat.lat];
       const draft = sliceDraftRef.current;
 
       if (!draft.targetId) {
         const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
         if (snap) {
+          const boundaryCache = prepareSliceBoundaryCache(snap.targetId);
+          if (!boundaryCache) {
+            setNotice("Could not find the target building");
+            return;
+          }
           updateSliceDraft({
-            targetId: snap.targetId,
+            targetId: boundaryCache.targetId,
             mode: "open",
             nodes: [snap.coordinates],
             snap: null,
@@ -1350,12 +1757,20 @@ export function MapView() {
           setNotice("Start on or inside a live OSM building");
           return;
         }
+        if (!prepareSliceBoundaryCache(id)) {
+          setNotice("Could not find the target building");
+          return;
+        }
         updateSliceDraft({ targetId: id, mode: "loop", nodes: [point], snap: null });
         setNotice("Draw a loop, then click its first node or press Enter");
         return;
       }
 
-      const target = selectFromOsm(displayedFeaturesRef.current, draft.targetId)?.building;
+      const target = (
+        sliceBoundaryCacheRef.current?.targetId === draft.targetId
+          ? sliceBoundaryCacheRef.current.selection
+          : prepareSliceBoundaryCache(draft.targetId)?.selection
+      )?.building;
       if (!target) {
         setNotice("Could not find the target building");
         return;
@@ -1378,12 +1793,20 @@ export function MapView() {
         return;
       }
 
+      const boundaryCache =
+        sliceBoundaryCacheRef.current?.targetId === draft.targetId
+          ? sliceBoundaryCacheRef.current
+          : null;
+      if (!boundaryCache) {
+        setNotice("Could not find the target building");
+        return;
+      }
       const snap = nearestBuildingBoundary(
         map,
         displayedFeaturesRef.current,
         event.point,
         12,
-        draft.targetId,
+        boundaryCache,
       );
       if (snap) {
         updateSliceDraft({ ...draft, nodes: [...draft.nodes, snap.coordinates], snap: null });
@@ -1409,21 +1832,271 @@ export function MapView() {
     };
 
     map.on("mousemove", onMouseMove);
+    map.on("move", invalidateProjectedBoundaries);
     map.on("click", onClick);
     canvas.addEventListener("mouseleave", clearSnap);
     window.addEventListener("keydown", onKeyDown);
     return () => {
       map.off("mousemove", onMouseMove);
+      map.off("move", invalidateProjectedBoundaries);
       map.off("click", onClick);
       canvas.removeEventListener("mouseleave", clearSnap);
       window.removeEventListener("keydown", onKeyDown);
+      if (mouseMoveFrame) window.cancelAnimationFrame(mouseMoveFrame);
       canvas.style.cursor = "";
     };
-  }, [cancelSliceDrawing, finishSliceDrawing, mapReady, sliceActive, updateSliceDraft]);
+  }, [
+    cancelSliceDrawing,
+    finishSliceDrawing,
+    mapReady,
+    prepareSliceBoundaryCache,
+    sliceActive,
+    updateSliceDraft,
+  ]);
 
   useEffect(() => {
     if (sliceActive && !live) cancelSliceDrawing();
   }, [cancelSliceDrawing, live, sliceActive]);
+
+  // Selected footprint dots are direct handles. The draft follows the pointer;
+  // releasing it records one persistent geometry override and refreshes 3D.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !selection) return;
+    const canvas = map.getCanvas();
+    let drag: NodeDrag | null = null;
+    let nodeHovered = false;
+
+    const setNodeHover = (handle: SelectionNodeHandle | null) => {
+      nodeHovered = handle !== null;
+      if (mapRef.current !== map) return;
+      const source = map.getSource<GeoJSONSource>("selection-node-hover");
+      void source?.setData(
+        handle
+          ? {
+              type: "FeatureCollection",
+              features: [
+                {
+                  type: "Feature",
+                  properties: {},
+                  geometry: { type: "Point", coordinates: handle.coordinates },
+                },
+              ],
+            }
+          : EMPTY,
+      );
+    };
+
+    const preview = (geometries: GeometryByEntity) => {
+      const draftSelection = selectionWithGeometries(selection, geometries);
+      const outlineSource = map.getSource<GeoJSONSource>("selection");
+      const nodeSource = map.getSource<GeoJSONSource>("selection-nodes");
+      void outlineSource?.setData(draftSelection.outline);
+      void nodeSource?.setData(selectionNodeFeatures(draftSelection));
+
+      const displayed: FeatureCollection = {
+        ...displayedFeaturesRef.current,
+        features: displayedFeaturesRef.current.features.map((feature) => {
+          const id = feature.properties?.id;
+          return typeof id === "string" && geometries[id]
+            ? { ...feature, geometry: geometries[id] }
+            : feature;
+        }),
+      };
+      const liveSource = map.getSource<GeoJSONSource>("live");
+      void liveSource?.setData(displayed);
+    };
+
+    const currentGeometry = (): EditableGeometry => {
+      const feature = displayedFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === selection.selected.id,
+      );
+      return feature?.geometry.type === "Polygon" || feature?.geometry.type === "MultiPolygon"
+        ? feature.geometry
+        : geometryOf(selection.selected);
+    };
+
+    const commitGeometries = (
+      geometries: GeometryByEntity,
+      notice: string,
+      /** The drag behind this commit, so the upload moves the node rather than
+       * creating one beside it and orphaning the original. */
+      move?: NodeMove,
+    ) => {
+      const targetId = selection.selected.id;
+      const nextGeometryEdits: GeometryEditMap = { ...geometryEditsRef.current };
+      const nextCreatedParts = { ...createdPartsRef.current };
+      for (const [entity, geometry] of Object.entries(geometries)) {
+        const drawn = nextCreatedParts[entity];
+        // A drawn part has no upstream nodes, so nothing about it can be moved.
+        if (drawn) nextCreatedParts[entity] = { ...drawn, geometry };
+        else {
+          const previous = nextGeometryEdits[entity];
+          nextGeometryEdits[entity] = {
+            geometry,
+            kind: previous?.kind ?? "reshape",
+            movedNodes: move
+              ? recordNodeMove(previous?.movedNodes, move.from, move.to)
+              : previous?.movedNodes,
+          };
+        }
+      }
+
+      geometryEditsRef.current = nextGeometryEdits;
+      createdPartsRef.current = nextCreatedParts;
+      setGeometryEdits(nextGeometryEdits);
+      setCreatedParts(nextCreatedParts);
+      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      setSelection(selectFromOsm(displayed, targetId));
+      setNotice(notice);
+    };
+
+    const onDragMove = (event: MapMouseEvent) => {
+      if (!drag) return;
+      const activeDrag = drag;
+      const coordinates = roundToOsmGrid([event.lngLat.lng, event.lngLat.lat]);
+      const geometries = Object.fromEntries(
+        Object.entries(activeDrag.originalGeometries).map(([entity, geometry]) => [
+          entity,
+          moveSharedGeometryVertex(geometry, activeDrag.originalCoordinates, coordinates),
+        ]),
+      );
+      drag = { ...activeDrag, geometries, coordinates };
+      preview(geometries);
+      setNodeHover({
+        polygonIndex: activeDrag.polygonIndex,
+        ringIndex: activeDrag.ringIndex,
+        vertexIndex: activeDrag.vertexIndex,
+        coordinates,
+      });
+    };
+
+    const finishDrag = () => {
+      if (!drag) return;
+      const finished = drag;
+      drag = null;
+      map.off("mousemove", onDragMove);
+      map.dragPan.enable();
+      canvas.style.cursor = "pointer";
+      const coordinates = finished.coordinates;
+      if (!coordinates) return;
+
+      // A drag generates a click after mouseup in some browsers. Let the node
+      // edit land without that click selecting whatever is under its new point.
+      suppressSelectionClickRef.current = true;
+      setTimeout(() => {
+        suppressSelectionClickRef.current = false;
+      }, 0);
+
+      const affected = Object.keys(finished.geometries).length;
+      commitGeometries(
+        finished.geometries,
+        affected === 1 ? "Node moved" : `Shared node moved in ${affected} footprints`,
+        { from: finished.originalCoordinates, to: coordinates },
+      );
+    };
+
+    const onMouseDown = (event: MapMouseEvent) => {
+      if (event.originalEvent.button !== 0) return;
+      if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
+        return;
+      const handle = nearestSelectionNode(map, selection, event.point);
+      if (!handle) return;
+
+      event.preventDefault();
+      const selectedGeometry = currentGeometry();
+      const originalGeometries = geometriesSharingVertex(
+        displayedFeaturesRef.current,
+        handle.coordinates,
+      );
+      if (!originalGeometries[selection.selected.id]) {
+        originalGeometries[selection.selected.id] = selectedGeometry;
+      }
+      drag = {
+        polygonIndex: handle.polygonIndex,
+        ringIndex: handle.ringIndex,
+        vertexIndex: handle.vertexIndex,
+        originalCoordinates: handle.coordinates,
+        coordinates: null,
+        originalGeometries,
+        geometries: originalGeometries,
+      };
+      setNodeHover(handle);
+      map.dragPan.disable();
+      canvas.style.cursor = "grabbing";
+      map.on("mousemove", onDragMove);
+      window.addEventListener("mouseup", finishDrag, { once: true });
+    };
+
+    const onDoubleClick = (event: MapMouseEvent) => {
+      if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
+        return;
+      const segment = nearestSelectionSegment(map, selection, event.point);
+      if (!segment) return;
+      const geometry = insertGeometryVertex(
+        currentGeometry(),
+        segment.polygonIndex,
+        segment.ringIndex,
+        segment.segmentIndex,
+        segment.coordinates,
+      );
+      if (!geometry) return;
+      event.preventDefault();
+      commitGeometries({ [selection.selected.id]: geometry }, "Node added");
+    };
+
+    const onHover = (event: MapMouseEvent) => {
+      if (
+        drag ||
+        cutHoleActiveRef.current ||
+        sliceActiveRef.current ||
+        photoAdjustActiveRef.current
+      )
+        return;
+      const wasHovered = nodeHovered;
+      const handle = nearestSelectionNode(map, selection, event.point);
+      setNodeHover(handle);
+      if (handle) canvas.style.cursor = "pointer";
+      else if (wasHovered) canvas.style.cursor = "";
+    };
+
+    const clearNodeHover = () => {
+      if (drag) return;
+      setNodeHover(null);
+      canvas.style.cursor = "";
+    };
+
+    map.on("mousedown", onMouseDown);
+    map.on("dblclick", onDoubleClick);
+    map.on("mousemove", onHover);
+    canvas.addEventListener("mouseleave", clearNodeHover);
+    return () => {
+      map.off("mousedown", onMouseDown);
+      map.off("dblclick", onDoubleClick);
+      map.off("mousemove", onHover);
+      map.off("mousemove", onDragMove);
+      canvas.removeEventListener("mouseleave", clearNodeHover);
+      window.removeEventListener("mouseup", finishDrag);
+      setNodeHover(null);
+      if (drag) {
+        map.dragPan.enable();
+        const liveSource = map.getSource<GeoJSONSource>("live");
+        const outlineSource = map.getSource<GeoJSONSource>("selection");
+        const nodeSource = map.getSource<GeoJSONSource>("selection-nodes");
+        void liveSource?.setData(displayedFeaturesRef.current);
+        void outlineSource?.setData(selection.outline);
+        void nodeSource?.setData(selectionNodeFeatures(selection));
+      }
+      canvas.style.cursor = "";
+    };
+  }, [
+    cutHoleActive,
+    mapReady,
+    photoAdjustActive,
+    refreshDisplayedFeatures,
+    selection,
+    sliceActive,
+  ]);
 
   // Clear the transient hint on its own, so it never sticks around.
   useEffect(() => {
@@ -1432,28 +2105,56 @@ export function MapView() {
     return () => clearTimeout(timer);
   }, [notice]);
 
-  // Photo underlay: swap basemaps and keep only boundaries over imagery.
+  const onLidarCloudChange = useCallback((buildingId: string, cloud: LidarCloud | null) => {
+    if (selectionRef.current?.building.id !== buildingId) return;
+    lidarLayerRef.current?.setCloud(cloud);
+  }, []);
+
+  // A cloud belongs to the building that requested it. Clear it immediately
+  // on selection changes so an asynchronous 3D lookup cannot leave the
+  // previous building's points under the new footprint.
+  useEffect(() => {
+    lidarLayerRef.current?.setCloud(null);
+    if (!selectionBuildingId) setLidar(false);
+  }, [selectionBuildingId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = lidarLayerRef.current;
+    if (!map || !layer || !mapReady) return;
+    map.setLayoutProperty("lidar-background", "visibility", lidar ? "visible" : "none");
+    layer.setVisible(lidar);
+  }, [lidar, mapReady]);
+
+  // Photo and LiDAR modes hide every vector-basemap layer and keep only editor
+  // boundaries over their visual evidence. The provider style has many layers
+  // rather than the single raster layer the photo map replaced.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    map.setLayoutProperty("osm", "visibility", photos ? "none" : "visible");
-    const color = buildingColor(photos ? "photo" : "map");
+    const evidenceMode = photos || lidar;
+    for (const layer of basemapLayersRef.current) {
+      map.setLayoutProperty(layer.id, "visibility", evidenceMode ? "none" : layer.visibility);
+    }
+    const color = buildingColor(evidenceMode ? "photo" : "map");
     for (const prefix of ["", "live-"]) {
-      map.setPaintProperty(`${prefix}building-fill`, "fill-opacity", photos ? 0 : 0.35);
-      map.setPaintProperty(`${prefix}part-fill`, "fill-opacity", photos ? 0 : 0.25);
+      map.setPaintProperty(`${prefix}building-fill`, "fill-opacity", evidenceMode ? 0 : 0.35);
+      map.setPaintProperty(`${prefix}part-fill`, "fill-opacity", evidenceMode ? 0 : 0.25);
       map.setPaintProperty(`${prefix}building-line`, "line-color", color);
       map.setPaintProperty(`${prefix}part-line`, "line-color", color);
-      map.setPaintProperty(`${prefix}building-line`, "line-width", photos ? 1.6 : 1.2);
-      map.setPaintProperty(`${prefix}part-line`, "line-width", photos ? 1.1 : 0.8);
+      map.setPaintProperty(`${prefix}building-line`, "line-width", evidenceMode ? 1.6 : 1.2);
+      map.setPaintProperty(`${prefix}part-line`, "line-width", evidenceMode ? 1.1 : 0.8);
     }
-  }, [mapReady, photos]);
+  }, [lidar, mapReady, photos]);
 
-  // Keep the selection highlight in sync with the selected building.
+  // Keep the selection highlight and footprint nodes in sync with the selected element.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    const source = map.getSource<GeoJSONSource>("selection");
-    void source?.setData(selection ? selection.outline : EMPTY);
+    const outlineSource = map.getSource<GeoJSONSource>("selection");
+    const nodeSource = map.getSource<GeoJSONSource>("selection-nodes");
+    void outlineSource?.setData(selection ? selection.outline : EMPTY);
+    void nodeSource?.setData(selectionNodeFeatures(selection));
   }, [mapReady, selection]);
 
   // Pending tag and geometry overrides are projected over raw OSM together.
@@ -1495,11 +2196,32 @@ export function MapView() {
             checked={photos}
             onChange={(event) => {
               setPhotos(event.target.checked);
+              if (event.target.checked) setLidar(false);
               if (!event.target.checked) setPhotoAdjustActive(false);
             }}
             className="h-4 w-4 accent-sky-600"
           />
           Photos
+        </label>
+        <label
+          className={`flex items-center gap-2 px-2 py-1 text-sm font-medium select-none ${
+            selection ? "cursor-pointer text-slate-800" : "cursor-not-allowed text-slate-400"
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={lidar}
+            disabled={!selection}
+            onChange={(event) => {
+              setLidar(event.target.checked);
+              if (event.target.checked) {
+                setPhotos(false);
+                setPhotoAdjustActive(false);
+              }
+            }}
+            className="h-4 w-4 accent-sky-600"
+          />
+          LiDAR
         </label>
         {photos && (
           <button
@@ -1538,7 +2260,7 @@ export function MapView() {
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-sm"
                   style={{
-                    backgroundColor: BUILDING_COLORS[category][photos ? "photo" : "map"],
+                    backgroundColor: BUILDING_COLORS[category][photos || lidar ? "photo" : "map"],
                   }}
                 />
                 {label}
@@ -1665,6 +2387,7 @@ export function MapView() {
         selection={selection}
         initialHeading={selectionBearing}
         edits={edits}
+        onLidarCloudChange={onLidarCloudChange}
         onSelectEntity={selectLoadedEntity}
         onClose={() => setSelection(null)}
       />

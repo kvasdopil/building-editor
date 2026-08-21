@@ -5,11 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Building3D, type CameraView, type CloudStatus, type TerrainStatus } from "./Building3D";
 import { External3DLinks } from "./External3DLinks";
 import { Photoreal3D } from "./Photoreal3D";
-import { EDITABLE_DIMENSION_KEYS, type TagRow, TagRows } from "./TagRows";
+import { EDITABLE_DIMENSION_KEYS, OPTIONAL_ROOF_KEYS, type TagRow, TagRows } from "./TagRows";
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
 import { applyEditsToSelection, type EditsApi } from "@/lib/edits";
 import { boundsCenter, boundsRadiusMeters, elementBounds } from "@/lib/geometry";
 import { type Lod1Match, lod1TilesFor, matchLod1, suggestionsFor } from "@/lib/lod1";
+import type { LidarCloud } from "@/lib/lidar";
 
 function buildingTitle(selection: BuildingSelection): string {
   const props = selection.selected.properties;
@@ -28,7 +29,11 @@ function tagValue(value: unknown): string {
 /** Raw source tags for the element: OSM features carry them under `tags`. */
 function sourceTags(properties: BuildingProperties): Record<string, string> {
   const raw = properties.tags;
-  if (raw && typeof raw === "object") return raw as Record<string, string>;
+  if (raw && typeof raw === "object") {
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, string>).filter(([, value]) => value !== ""),
+    );
+  }
   return Object.fromEntries(
     Object.entries(properties)
       .filter(([, value]) => value !== null && value !== undefined && value !== "")
@@ -70,12 +75,14 @@ export function BuildingPanel({
   selection,
   initialHeading,
   edits,
+  onLidarCloudChange,
   onSelectEntity,
   onClose,
 }: {
   selection: BuildingSelection | null;
   initialHeading: number;
   edits: EditsApi;
+  onLidarCloudChange?: (buildingId: string, cloud: LidarCloud | null) => void;
   onSelectEntity: (entityId: string) => void;
   onClose: () => void;
 }) {
@@ -141,9 +148,16 @@ export function BuildingPanel({
     const extraKeys = new Set([
       ...suggestions.filter((s) => !(s.key in tags)).map((s) => s.key),
       ...EDITABLE_DIMENSION_KEYS.filter((key) => !(key in tags)),
+      ...OPTIONAL_ROOF_KEYS.filter((key) => !(key in tags)),
     ]);
     const extra = [...extraKeys].map(
-      (key): TagRow => ({ key, value: "", edited: false, suggestion: byKey.get(key) }),
+      (key): TagRow => ({
+        key,
+        value: "",
+        edited: edit ? key in edit.changed : false,
+        originalValue: osmTags[key],
+        suggestion: byKey.get(key),
+      }),
     );
 
     return [...extra, ...known].sort((a, b) => a.key.localeCompare(b.key));
@@ -206,6 +220,7 @@ export function BuildingPanel({
           initialHeading={initialHeading}
           onCameraChange={setCamera}
           onCloudStatus={setCloudStatus}
+          onCloudChange={onLidarCloudChange}
           onTerrainStatus={setTerrainStatus}
         />
       </div>

@@ -59,6 +59,15 @@ function applyEditToProperties(
 
   return {
     ...properties,
+    // A pending empty value deletes a tag. Clear every normalized field first
+    // so deleting one changes the effective geometry immediately instead of
+    // leaving its old derived value behind until the next tile load.
+    height: undefined,
+    num_floors: undefined,
+    min_height: undefined,
+    min_floor: undefined,
+    roof_shape: undefined,
+    roof_height: undefined,
     ...normalizeOsmTags(tags, role),
     // Identity is not editable, so keep what the source gave us.
     id: properties.id,

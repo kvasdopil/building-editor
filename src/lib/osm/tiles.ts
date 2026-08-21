@@ -7,6 +7,17 @@
 /** The only zoom the proxy accepts. z16 is ~600 m across at the equator. */
 export const OSM_TILE_ZOOM = 16;
 
+/**
+ * Generation of the parsed tile shape, carried in the request URL and in every
+ * cache key. A cached tile is a parsed FeatureCollection, so a tile stored by an
+ * older parser is missing whatever the new one adds and has to be re-read rather
+ * than served — v2 added the node versions and tags a node move needs, and a v1
+ * tile would silently turn moving back into replacing. Bumping this misses every
+ * cache at once: the browser's HTTP cache, the server memory LRU and its disk
+ * store.
+ */
+export const OSM_TILE_SCHEMA = "v2";
+
 import type { Bounds } from "../geometry";
 
 export interface TileId {

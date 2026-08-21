@@ -48,6 +48,11 @@ export function mountCanvas(
       cancelAnimationFrame(frame);
       observer.disconnect();
       renderer.dispose();
+      // Removing a canvas does not guarantee that browsers release its WebGL
+      // context before the next renderer is created. Explicitly release it on
+      // real viewer teardown so MapLibre and the persistent Google renderer
+      // cannot be evicted by a burst of stale local contexts.
+      renderer.forceContextLoss();
       container.removeChild(renderer.domElement);
     },
   };

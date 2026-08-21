@@ -15,7 +15,7 @@ Related documents:
 
 - The dataset is "SBK Punktmoln - flygburen laserskanning (2023)" from Stockholm's data portal: LAS, SWEREF 99 18 00 (EPSG:3011), heights in RH2000, >16 points/m², coloured from the 2023 orthophoto, classified into ground, building, water, bridge, noise and unclassified.
 - `scripts/import-lidar.mjs` reprojects it and writes one **binary** tile per z16 grid cell under `data/lidar`, thinned to at most 500,000 points per tile. `src/lib/lidar.ts` reads those tiles directly into typed arrays.
-- The 3D view draws the cloud as coloured dots around the selected building, in the same local frame as the extruded solids. Mapterhorn supplies the ground and scene datum; class-2 returns only measure the per-survey translation that visually aligns this overlay. Nothing is inferred from it: no suggested tags, no per-part heights.
+- The 3D view draws the cloud as coloured dots around the selected building, in the same local frame as the extruded solids. Source colour is preserved except for above-roof points inside the selected footprint, where a green-to-red distance gradient makes disagreement with the rendered roof legible. Mapterhorn supplies the ground and scene datum; class-2 returns only measure the per-survey translation that visually aligns this overlay. Nothing is inferred into editable data: no suggested tags, no per-part heights.
 
 ## Why
 

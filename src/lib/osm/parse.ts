@@ -7,7 +7,9 @@ import { pointInRing, ringCenter } from "../geometry";
  * polygons. OSM tags are normalized onto the shared property names used by the
  * height rules and map colors (see src/lib/buildings.ts), while the raw tags
  * ride along under `tags` for the inspector. OSM identity — element type, id,
- * version and node ids — is preserved because editing will need it.
+ * version and node ids — is preserved because editing will need it, and so are
+ * the version and tags of every node a way uses: dragging a corner modifies that
+ * node in place, and a modify has to carry both (see ./nodes.ts).
  */
 
 type OsmTags = Record<string, string>;
@@ -15,6 +17,7 @@ type OsmTags = Record<string, string>;
 interface OsmNode {
   type: "node";
   id: number;
+  version: number;
   lat: number;
   lon: number;
   tags?: OsmTags;
@@ -96,6 +99,11 @@ export function normalizeOsmTags(tags: OsmTags, role: "building" | "part"): Buil
   const minLevel = parseCount(tags["building:min_level"]);
   if (minLevel !== undefined) properties.min_floor = minLevel;
 
+  if (tags["roof:shape"]) properties.roof_shape = tags["roof:shape"];
+
+  const roofHeight = parseMeters(tags["roof:height"]);
+  if (roofHeight !== undefined) properties.roof_height = roofHeight;
+
   return properties;
 }
 
@@ -151,11 +159,25 @@ function roleOf(tags: OsmTags): "building" | "part" | null {
   return null;
 }
 
+/** The tags of the few way nodes that have any, keyed by node id. */
+function taggedNodes(
+  way: OsmWay,
+  nodes: Map<number, OsmNode>,
+): Record<string, OsmTags> | undefined {
+  const tagged: Record<string, OsmTags> = {};
+  for (const id of way.nodes) {
+    const nodeTags = nodes.get(id)?.tags;
+    if (nodeTags && Object.keys(nodeTags).length > 0) tagged[id] = nodeTags;
+  }
+  return Object.keys(tagged).length > 0 ? tagged : undefined;
+}
+
 function feature(
   osmType: "way" | "relation",
   element: OsmWay | OsmRelation,
   role: "building" | "part",
   geometry: Polygon | MultiPolygon,
+  nodes: Map<number, OsmNode>,
 ): Feature<Polygon | MultiPolygon> {
   const tags = element.tags ?? {};
   return {
@@ -172,6 +194,13 @@ function feature(
       // is the node at outer-ring vertex i, because `ringOf` walks `way.nodes`
       // in order.
       node_ids: element.type === "way" ? element.nodes : undefined,
+      // Moving a node is a modify, and a modify replaces the whole element: it
+      // needs the version we read, or the API cannot reject a conflict, and the
+      // node's own tags, or the upload would silently delete them. A zero
+      // version means the node was not in the response and must not be moved.
+      node_versions:
+        element.type === "way" ? element.nodes.map((id) => nodes.get(id)?.version ?? 0) : undefined,
+      node_tags: element.type === "way" ? taggedNodes(element, nodes) : undefined,
       // A relation modify must resend the full member list, so keep it. Ring
       // geometry is assembled across members, so it carries no node identity.
       members: element.type === "relation" ? element.members : undefined,
@@ -232,7 +261,7 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
       host.push(inner);
     }
     features.push(
-      feature("relation", relation, role, { type: "MultiPolygon", coordinates: polygons }),
+      feature("relation", relation, role, { type: "MultiPolygon", coordinates: polygons }, nodes),
     );
   }
 
@@ -241,7 +270,7 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
     if (!role || consumedByRelation.has(way.id)) continue;
     const ring = ringOf(way, nodes);
     if (!ring) continue;
-    features.push(feature("way", way, role, { type: "Polygon", coordinates: [ring] }));
+    features.push(feature("way", way, role, { type: "Polygon", coordinates: [ring] }, nodes));
   }
 
   return { type: "FeatureCollection", features };

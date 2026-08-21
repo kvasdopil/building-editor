@@ -26,6 +26,10 @@ const TILESET_URL = "https://tile.googleapis.com/v1/3dtiles/root.json";
 
 const API_KEY = process.env.NEXT_PUBLIC_MAP_TILES_API_KEY;
 
+const OPEN_STORAGE_KEY = "building-explorer:google-3d-open";
+/** Keeps remounts during selection changes from flashing the panel closed. */
+let rememberedOpen: boolean | null = null;
+
 const DEG = Math.PI / 180;
 
 /**
@@ -147,13 +151,13 @@ function MissingKey() {
 
 export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => rememberedOpen ?? false);
   /**
    * Set on the first open and never cleared: collapsing hides the canvas but
    * keeps the renderer, its downloaded tiles and its session alive, so
    * re-opening costs neither a new session nor a re-download.
    */
-  const [mounted, setMounted] = useState(false);
+  const [mounted, setMounted] = useState(() => rememberedOpen ?? false);
   const [attribution, setAttribution] = useState("");
   const [error, setError] = useState<string | null>(null);
   /** Latest viewpoint, read by the render loop rather than re-creating it. */
@@ -164,6 +168,20 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
 
   viewpointRef.current = { center, camera: view, radius };
   visibleRef.current = open;
+
+  useEffect(() => {
+    if (rememberedOpen !== null) return;
+    let restored = false;
+    try {
+      restored = window.localStorage.getItem(OPEN_STORAGE_KEY) === "true";
+    } catch {
+      // Storage may be unavailable in a restricted browsing context. The
+      // module-level value still preserves the preference while the app lives.
+    }
+    rememberedOpen = restored;
+    setOpen(restored);
+    if (restored) setMounted(true);
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -250,8 +268,15 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
       <button
         type="button"
         onClick={() => {
-          setOpen((previous) => !previous);
+          const next = !open;
+          rememberedOpen = next;
+          setOpen(next);
           setMounted(true);
+          try {
+            window.localStorage.setItem(OPEN_STORAGE_KEY, String(next));
+          } catch {
+            // Keep the in-memory preference when storage is unavailable.
+          }
         }}
         aria-expanded={open}
         aria-label={open ? "Hide photorealistic view" : "Show photorealistic view"}

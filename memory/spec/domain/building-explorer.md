@@ -2,8 +2,10 @@
 
 ## WHAT
 
-A single-page map app: OpenStreetMap basemap (MapLibre; pan, zoom and bearing, pitch locked at 0),
-Overture buildings + parts rendered in contrast colors from zoom > 10, clickable.
+A single-page map app: OpenStreetMap vector basemap (OpenFreeMap Liberty rendered by MapLibre;
+pan, zoom and bearing, pitch locked at 0), Overture buildings + parts rendered in contrast colors
+from zoom > 10, clickable. The basemap is flat and vector-only: provider raster relief and
+fill-extrusion building layers are removed before the editor overlays are installed.
 Zoom and bearing controls sit in the visible map's bottom-right corner, shifting left when the
 building panel is open so they remain accessible.
 Selecting a building or building part opens a right-side panel with an interactive 3D extrusion
@@ -17,6 +19,11 @@ dragging changes only the imagery's geographic offset. The chosen offset remains
 map pan, zoom and bearing changes and survives toggling Photos for the current session. MapLibre
 raster layers have no per-layer translation, so imagery renders in a separate non-interactive map
 beneath the editing map; its camera follows the editing camera plus the stored Mercator offset.
+With a building selected, a mutually exclusive "LiDAR" toggle replaces the basemap with the same
+merged point cloud used by the 3D view while retaining the building and part boundaries. The map
+layer is strictly top-down: it projects longitude and latitude into Web Mercator XY, discards survey
+height for positioning, and remains under the editor overlays. Closing the selection exits LiDAR
+mode because its point set is defined by the selected parent building.
 
 ## Height rules (authoritative)
 
@@ -86,6 +93,11 @@ closer would have hidden it for one frame and let it return on the first scroll.
 Creating the links makes no third-party request; coordinates and the user's IP leave the app only
 when a link is opened.
 
+The embedded Google photorealistic section remembers its expanded state in local storage. Once the
+mapper opens it, it stays expanded while switching buildings and after reloads until the mapper
+explicitly hides it. An in-memory copy supplies the same state immediately when selection changes
+temporarily unmount and remount the section, avoiding a closed-panel flash.
+
 Pending-change links for existing OSM ways and relations resolve the entity through the cached
 element route, fit its geometry without landing below z16, and select it once its live tile data
 arrives. There is no general-purpose ID search control on the map.
@@ -127,14 +139,20 @@ The two modes differ in what they change:
 - An **open polyline** partitions what it crosses, and must divide something — the outline, an
   existing part, or the area no part covers yet — otherwise it is rejected. A cut that ends on a part
   edge leaves the outline itself whole.
-- A **closed loop** only adds the region it encloses; nothing else is touched, and no existing part is
-  replaced. Partitioning by the loop would also yield the complement, a ring around it, and a ring is
-  a polygon with a hole — which OSM can express only as a multipolygon relation. Drawing a tower on a
-  roof must not convert what is beneath it into one. The consequence is that the rest of the outline
-  has no part, which `outline-not-covered` reports; completing the model means either a second part
-  over the remaining area, or `min_height` on the loop part so it sits above a part that covers
-  everything. Escape, pressing **Slice** again, opening
-  pending changes, or leaving live-OSM zoom cancels the draft.
+- A **closed loop** creates two new parts without changing the `building=*` outline: one base part
+  copies the complete building footprint and one center part uses the enclosed loop. They overlap in
+  2D deliberately, avoiding a ring-shaped complement while covering the whole outline. Both inherit
+  the outline's known physical tags; the mapper must adjust `height` plus `min_height` or
+  `building:levels` plus `building:min_level` when the center is stacked above the base, so their 3D
+  volumes do not overlap. Escape, pressing **Slice** again, opening pending changes, or leaving
+  live-OSM zoom cancels the draft.
+
+Boundary snapping stays out of full selection assembly. Before the first node it reads candidate
+rings from a lightweight index over the displayed collection; after the target is known it caches
+that building's outline, holes, and part rings in screen coordinates, invalidating them only when the
+map camera moves. Pointer events are coalesced to one snap calculation and draft-source update per
+animation frame. Completing a slice may run polygon boolean operations, but cursor movement must
+never associate every loaded part, assemble 3D neighbors, or run Turf intersections.
 
 The operation follows [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings):
 
@@ -207,10 +225,13 @@ Every row can also be changed or dropped on its own, without leaving the panel:
   the map and 3D view, and reselects the affected entity when it still exists. Nothing is uploaded
   yet.
 
-For both buildings and parts, `height`, `building:levels`, `min_height`, `building:min_level`, and
-`roof:levels` always have inspector rows, including a **not set** row when absent. Hovering
+For both buildings and parts, `height`, `building:levels`, `min_height`, `building:min_level`,
+`roof:levels`, and `roof:height` always have inspector rows, including a **not set** row when absent.
+Building outlines and parts additionally always expose `roof:shape` as a select: **none** removes the tag,
+**pyramid** writes the standard `pyramidal` value, **hipped** writes `hipped`, **dome** writes `dome`,
+and **onion** writes `onion`. A non-standard existing value remains available as its current value so opening the select never rewrites it. Hovering
 their value reveals an edit icon. It opens a numeric modal using the user-facing labels `height`,
-`levels`, `min_height`, `min_levels`, and `roof_levels`; Escape dismisses it and Enter saves a valid
+`levels`, `min_height`, `min_levels`, `roof_levels`, and `roof_height`; Escape dismisses it and Enter saves a valid
 changed value. Heights must be positive metres, levels positive counts, and total height/levels must
 exceed their corresponding minimum. `building:min_level`, `min_height` and `roof:levels` may be zero
 — a part can start at ground level and a flat roof has no roof levels — while the others must be
@@ -218,12 +239,22 @@ above it. Saving uses the standard singular OSM key `building:min_level` and imm
 the effective map and 3D geometry. `roof:levels` is metadata only: the 3D height comes from `height`
 or `building:levels`, so editing it changes no geometry.
 
-The `height` row also has a horizontal-arrow handle immediately before its property name. Dragging
-the handle left or right changes the effective height live in 0.5 m steps; the left and right arrow
+The `height` and `roof:height` rows also have a horizontal-arrow handle immediately before their
+property names. Dragging the handle left or right changes the effective value live in 0.5 m steps; the left and right arrow
 keys provide the same control when the handle is focused. It accepts unit-bearing source values by
 converting them to metres. A source value outside the 0.5 m grid is first rounded to the nearest step
 before the drag delta is applied. The control never steps to zero, below zero, or to/below
-`min_height`.
+`min_height`; roof height never steps to zero or below.
+
+When a building or part has a supported shape and a positive `roof:height`, its total `height` still
+marks the apex. The facade is a separate extrusion ending at `height - roof:height`. A pyramidal roof
+connects that top outline directly to one center point; a dome uses eight progressively lifted and
+shrunk rings whose sine/cosine profile approaches the center apex like a sphere. An onion samples
+twelve height rings along a related profile whose slope changes from 90 degrees at the facade to 45
+degrees at the apex, instead of the dome's 90-to-0-degree change. Its radius correction spans the
+upper half of the roof so the pointed silhouette stays visibly distinct from a dome at normal viewing
+distance. Roof planning and surface geometry live in `src/lib/roofs.ts`, separate from scene assembly
+so additional roof types can be added without changing the facade height rules.
 
 ## Laser point cloud
 
@@ -246,10 +277,22 @@ ADR 0004), from two sources that share one tile format and are tried in order pe
   points split by return count, one return reading as hard surface and several as vegetation. That
   split is a hint, not a classification, and it is what makes a roof legible among trees.
 
+The map can show the decoded cloud in a LiDAR evidence mode. It uses a 2D GPU point layer so dense
+municipal tiles do not become hundreds of thousands of GeoJSON features. Each point carries only
+its Web Mercator X/Y and source colour into the map shader; Z is deliberately absent, producing no
+camera perspective, terrain alignment, roof-distance recolouring, or vertical displacement. The
+ordinary map pitch remains locked to zero, and footprint boundaries stay above the dots.
+
 Both sources are read where available. Occupied one-meter municipal coverage cells and their
 immediate neighbors suppress national returns, so dense data wins over its actual coverage while
 Skog fills a municipal scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
 carries the LAS class in its low bits and a single-return flag in `0x80`.
+
+Within the selected element's footprint, returns above its rendered roof are recoloured by their
+vertical distance from that roof: green below 1 m, orange from 1-5 m, yellow from 5-10 m, and red
+above 10 m, with soft gradients between bands. A selected building follows the visible roof of any
+part beneath the point; a selected part uses that part's own roof. Returns at or below the roof,
+inside footprint holes, or outside the selected footprint retain their source colour.
 
 LiDAR stays an overlay and never defines ground. For each survey, class-2 returns are compared with
 Mapterhorn at their coordinates; the median residual vertically translates that survey onto the
@@ -286,7 +329,22 @@ Selection and the inspector are **live OSM only**, at z >= 16. Both building out
 `building:part` elements can be selected, including through ID search. The Overture overview is a
 snapshot that cannot be edited and whose fields are not OSM tags (`is_underground`,
 `has_parts`, `@geometry_source`), so clicking it below that zoom shows a hint instead of
-opening the panel.
+opening the panel. Every vertex on the selected element's outer and inner footprint rings is shown
+as a small black dot; the repeated closing coordinate in GeoJSON produces only one dot. Inside its
+nine-pixel interaction target, a node becomes a larger purple dot with a white halo and the pointer
+cursor, and that highlight follows the node while it is dragged. Dragging previews the new footprint
+continuously and stores one pending geometry change on release, updating the map and 3D view.
+At drag start, every loaded building or part with a vertex at that exact coordinate joins the drag;
+all copies preview and commit the same new coordinate, with a pending geometry change on every
+affected existing entity. This preserves shared corners and walls instead of pulling only the selected
+footprint away from its neighbors. The drag is recorded as a move of the OSM node, not as a new
+corner, so on upload the node itself moves and everything attached to it follows — including the ways
+this editor never loaded, which the on-screen expansion cannot reach (see
+[osm-submission](osm-submission.md)). Releasing without moving changes nothing. Double-clicking an empty
+position on a selected outer or inner ring inserts a node at the nearest point on that segment;
+double-clicking near an existing node does not add a duplicate. A node reshape remains compatible
+with parts in 3D: once parts cover the edited outline, they replace it normally. Only a **Cut hole**
+override makes the outline authoritative, because older parts could otherwise fill that opening.
 
 ## 3D context
 
@@ -297,6 +355,14 @@ and part handling as the selection. The camera frames the _selected_ building
 alone (`buildScene` returns a separate `focus` box), otherwise context would push
 the subject into the distance. Ground is sized from the half-diagonal of every
 solid drawn, so no building overhangs it.
+
+Live tag edits replace only the local scene geometry. The Three.js renderer,
+WebGL context, camera, orbit controls, terrain and decoded LiDAR stay mounted
+while the selected entity is unchanged, and multiple edits before one paint
+collapse to the newest geometry. `roof:height` changes the facade/roof join but
+not the apex, so it also reuses the existing LiDAR point buffer. A genuine
+viewer teardown explicitly releases its WebGL context so it cannot evict the
+MapLibre or persistent Google 3D context.
 
 Neighbors are read from the same tile features as the selection, so context stops
 at the edge of the loaded tiles — acceptable, since the click always happens

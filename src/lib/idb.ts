@@ -7,7 +7,7 @@
  */
 
 const DB_NAME = "building-editor";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export const TILE_STORE = "osm-tiles";
 export const EDIT_STORE = "edits";
@@ -23,7 +23,14 @@ function open(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
     if (typeof indexedDB === "undefined") return resolve(null);
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
+      // Cached tiles are parsed features, so a tile stored by an older parser is
+      // missing whatever the new one adds — v4 added the node versions a node
+      // move needs. Pending edits are the user's own work and are never dropped.
+      if (event.oldVersion > 0 && event.oldVersion < 4) {
+        if (request.result.objectStoreNames.contains(TILE_STORE))
+          request.result.deleteObjectStore(TILE_STORE);
+      }
       for (const store of [TILE_STORE, EDIT_STORE, GEOMETRY_STORE]) {
         if (!request.result.objectStoreNames.contains(store))
           request.result.createObjectStore(store);

@@ -177,6 +177,22 @@ function checkPlan(plan: ChangesetPlan): Issue[] {
       ),
     );
   }
+  for (const node of plan.nodes) {
+    // A node modify without a version cannot be sent: the API has no way to
+    // detect a conflict, so it would overwrite whatever is there now.
+    if (node.action === "modify" && (node.version === undefined || node.version <= 0)) {
+      issues.push(
+        issue(
+          "error",
+          "missing-version",
+          "A node being moved has no version, so moving it would risk overwriting a newer edit.",
+          [],
+          node.coordinates,
+        ),
+      );
+    }
+  }
+
   for (const way of plan.ways) {
     if (way.nodes.length > MAX_WAY_NODES) {
       issues.push(

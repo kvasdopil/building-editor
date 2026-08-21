@@ -20,7 +20,7 @@ function footprintFeature(
   element: BuildingElement,
   role: "building" | "part",
 ): Feature<MultiPolygon> {
-  return { ...elementFeature(element), properties: { role } };
+  return { ...elementFeature(element), properties: { id: element.id, role } };
 }
 
 /**
