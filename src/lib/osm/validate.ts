@@ -14,7 +14,7 @@ import {
   padBounds,
   ringCenter,
 } from "../geometry";
-import { ringIsSimple } from "../geometry-edits";
+import { localBacktrackRepair, ringIntersections, ringIsSimple } from "../geometry-edits";
 import { levelHeight, verticalExtent } from "../heights";
 import { overlapFraction } from "../parts";
 import {
@@ -25,7 +25,7 @@ import {
 } from "./changeset";
 import { hasErrors, issue, type Issue, sortIssues } from "./issues";
 import { metersBetween } from "./precision";
-import { selectFromOsm } from "./select";
+import { OsmBuildingLookup } from "./building-lookup";
 
 /**
  * The checks that run before an upload. Errors block it, warnings are for a
@@ -204,6 +204,14 @@ function checkPlan(plan: ChangesetPlan): Issue[] {
         ),
       );
     }
+    if (!way.area) {
+      if (way.nodes.length < 2) {
+        issues.push(
+          issue("error", "degenerate-way", `${way.ref} has fewer than two nodes.`, [way.ref]),
+        );
+      }
+      continue;
+    }
     if (way.nodes.length < 4 || way.nodes[0] !== way.nodes[way.nodes.length - 1]) {
       issues.push(issue("error", "way-not-closed", `${way.ref} is not a closed area.`, [way.ref]));
       continue;
@@ -361,8 +369,8 @@ function checkTags(element: BuildingElement, changedKeys: Set<string>): Issue[] 
 
 function ringIssues(element: BuildingElement): Issue[] {
   const issues: Issue[] = [];
-  for (const footprint of element.polygons) {
-    for (const ring of [footprint.outer, ...footprint.holes]) {
+  for (const [polygonIndex, footprint] of element.polygons.entries()) {
+    for (const [ringIndex, ring] of [footprint.outer, ...footprint.holes].entries()) {
       const open = openRing(ring);
       if (open.length < 3) {
         issues.push(
@@ -376,15 +384,44 @@ function ringIssues(element: BuildingElement): Issue[] {
         );
         continue;
       }
-      if (!ringIsSimple(open)) {
+      if (ringIsSimple(open)) continue;
+
+      const intersections = ringIntersections(open);
+      const repair = localBacktrackRepair(open);
+      if (intersections.length === 0) {
         issues.push(
           issue(
             "error",
             "self-intersecting-way",
-            `${element.id} has an outline that crosses or repeats itself.`,
+            `${element.id} repeats a corner in its outline.`,
             [element.id],
             ringCenter(open),
           ),
+        );
+        continue;
+      }
+      for (const crossing of intersections) {
+        const found = issue(
+          "error",
+          "self-intersecting-way",
+          `${element.id} has outline edges ${crossing.segments[0] + 1} and ${crossing.segments[1] + 1} crossing or touching.`,
+          [element.id],
+          crossing.at,
+        );
+        issues.push(
+          repair && repair.at[0] === crossing.at[0] && repair.at[1] === crossing.at[1]
+            ? {
+                ...found,
+                fix: {
+                  kind: "remove-ring-node",
+                  entity: element.id,
+                  polygonIndex,
+                  ringIndex,
+                  nodeIndex: repair.nodeIndex,
+                  coordinate: repair.coordinate,
+                },
+              }
+            : found,
         );
       }
     }
@@ -405,7 +442,8 @@ function groundCoverageGap(
   if (footprint <= 0) return null;
   const metersPerLevel = levelHeight(building.properties);
   const atGround = parts.filter(
-    (part) => verticalExtent(part.properties, metersPerLevel).base <= GROUND_BASE_M,
+    (part) =>
+      verticalExtent(part.properties, metersPerLevel, building.properties).base <= GROUND_BASE_M,
   );
   if (atGround.length === 0) {
     return { gap: footprint, fraction: 1, at: ringCenter(building.polygons[0].outer) };
@@ -539,6 +577,18 @@ function checkBuilding(
   const hasBuildingHeight =
     typeof building.properties.height === "number" ||
     typeof building.properties.num_floors === "number";
+  const partTops = new Map(
+    parts.map((part) => [
+      part.id,
+      verticalExtent(part.properties, metersPerLevel, building.properties).top,
+    ]),
+  );
+  const maximumPartTop = parts.reduce(
+    (maximum, part) => Math.max(maximum, partTops.get(part.id) ?? 0),
+    0,
+  );
+  // Avoid exposing floating-point multiplication noise in an OSM length tag.
+  const maximumPartHeight = String(Number(maximumPartTop.toFixed(6)));
 
   for (const part of parts) {
     const inside = overlapFraction(part, building);
@@ -567,16 +617,22 @@ function checkBuilding(
         ),
       );
     }
-    const top = verticalExtent(part.properties, metersPerLevel).top;
+    const top = partTops.get(part.id) ?? 0;
     if (hasBuildingHeight && top > buildingTop + 0.5) {
-      issues.push(
-        issue(
+      issues.push({
+        ...issue(
           "warning",
           "part-above-building",
           `${part.id} reaches ${top.toFixed(1)} m, above the ${buildingTop.toFixed(1)} m of ${building.id}; the outline should carry the overall height.`,
           [part.id, building.id],
         ),
-      );
+        fix: {
+          kind: "set-tag",
+          entity: building.id,
+          key: "height",
+          value: maximumPartHeight,
+        },
+      });
     }
   }
 
@@ -584,22 +640,35 @@ function checkBuilding(
   // what Simple 3D Buildings tells us to avoid.
   for (let i = 0; i < parts.length; i++) {
     for (let j = i + 1; j < parts.length; j++) {
-      const a = verticalExtent(parts[i].properties, metersPerLevel);
-      const b = verticalExtent(parts[j].properties, metersPerLevel);
+      const a = verticalExtent(parts[i].properties, metersPerLevel, building.properties);
+      const b = verticalExtent(parts[j].properties, metersPerLevel, building.properties);
       const overlapTop = Math.min(a.top, b.top);
       const overlapBase = Math.max(a.base, b.base);
       if (overlapTop - overlapBase <= 0.01) continue;
       const shared = safeIntersect(polygonal(parts[i]), polygonal(parts[j]));
       const sharedArea = safeArea(shared);
       if (sharedArea < MIN_PART_AREA_M2) continue;
-      issues.push(
-        issue(
-          "warning",
-          "overlapping-volumes",
-          `${parts[i].id} and ${parts[j].id} share ${sharedArea.toFixed(1)} m² between ${overlapBase.toFixed(1)} m and ${overlapTop.toFixed(1)} m, so their 3D volumes overlap.`,
-          [parts[i].id, parts[j].id],
-        ),
+      const lower = a.top < b.top ? { part: parts[i], extent: a } : { part: parts[j], extent: b };
+      const higher = a.top < b.top ? { part: parts[j], extent: b } : { part: parts[i], extent: a };
+      const canStack =
+        Math.abs(lower.extent.base) <= 0.01 &&
+        higher.extent.top - lower.extent.top > 0.01 &&
+        higher.extent.base < lower.extent.top - 0.01;
+      const finding = issue(
+        "warning",
+        "overlapping-volumes",
+        `${parts[i].id} and ${parts[j].id} share ${sharedArea.toFixed(1)} m² between ${overlapBase.toFixed(1)} m and ${overlapTop.toFixed(1)} m, so their 3D volumes overlap.`,
+        [parts[i].id, parts[j].id],
       );
+      if (canStack) {
+        finding.fix = {
+          kind: "set-tag",
+          entity: higher.part.id,
+          key: "min_height",
+          value: String(Number(lower.extent.top.toFixed(6))),
+        };
+      }
+      issues.push(finding);
     }
   }
 
@@ -640,13 +709,14 @@ function checkBuilding(
 export function validateChangeset(input: ValidationInput): ValidationResult {
   const { displayed, plan } = input;
   const issues = checkPlan(plan);
+  const buildingLookup = new OsmBuildingLookup(displayed);
 
   const buildings = new Map<string, { building: BuildingElement; parts: BuildingElement[] }>();
   /** Elements this changeset writes: only their own defects are ours to block on. */
   const written = new Set(plan.entries.map((entry) => entry.ref));
 
   for (const entry of plan.entries) {
-    const selection = selectFromOsm(displayed, entry.ref);
+    const selection = buildingLookup.select(entry.ref);
     if (!selection) {
       issues.push(
         issue(

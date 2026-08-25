@@ -20,6 +20,9 @@ const MAX_TILES_PER_VIEW = 12;
 
 const MAX_CONCURRENT_FETCHES = 2;
 
+/** Parsed tile generations must not share an IndexedDB entry. */
+const storedTileKey = (tile: TileId) => `${OSM_TILE_SCHEMA}/${tileKey(tile)}`;
+
 /**
  * Tiles a single refresh may refetch. Higher than the per-viewport cap because a
  * refresh is asked for by element, not by viewport: dropping one of those tiles
@@ -97,7 +100,7 @@ export function createTileLoader(
   };
 
   const fetchTile = async (tile: TileId, fresh = false) => {
-    const key = tileKey(tile);
+    const key = storedTileKey(tile);
     try {
       const response = await fetch(
         `/api/osm/tile/${tile.z}/${tile.x}/${tile.y}?schema=${OSM_TILE_SCHEMA}${fresh ? "&fresh=1" : ""}`,
@@ -122,7 +125,7 @@ export function createTileLoader(
     load(bounds) {
       if (stopped) return;
       for (const tile of tilesInBounds(bounds, MAX_TILES_PER_VIEW)) {
-        const key = tileKey(tile);
+        const key = storedTileKey(tile);
         if (claimed.has(key)) continue;
         claimed.add(key);
         void idbGet<StoredTile>(TILE_STORE, key).then((stored) => {
@@ -141,8 +144,8 @@ export function createTileLoader(
     refresh(bounds) {
       if (stopped) return;
       for (const tile of tilesInBounds(bounds, MAX_REFRESH_TILES)) {
-        const key = tileKey(tile);
-        if (queue.some((queued) => queued.fresh && tileKey(queued.tile) === key)) continue;
+        const key = storedTileKey(tile);
+        if (queue.some((queued) => queued.fresh && storedTileKey(queued.tile) === key)) continue;
         // Drop every trace of the old tile: the browser copy, and the record that
         // says we already have it. The server copy is bypassed by `fresh`.
         claimed.add(key);

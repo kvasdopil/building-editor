@@ -31,18 +31,33 @@ export function levelHeight(building: BuildingProperties): number {
  *   per-level height.
  *
  * `metersPerLevel` should come from the parent building via `levelHeight`, so
- * every part of a building measures its levels the same way.
+ * every part of a building measures its levels the same way. Sparse part tags
+ * may omit values identical to the outline: when `parent` is supplied, an
+ * explicit part value wins, followed by the corresponding parent value, then
+ * the normal default.
  */
 export function verticalExtent(
   properties: BuildingProperties,
   metersPerLevel: number = levelHeight(properties),
+  parent?: BuildingProperties,
 ): VerticalExtent {
   const minFloor = num(properties.min_floor);
+  const parentMinFloor = num(parent?.min_floor);
   const base =
-    num(properties.min_height) ?? (minFloor !== undefined ? minFloor * metersPerLevel : 0);
+    num(properties.min_height) ??
+    (minFloor !== undefined
+      ? minFloor * metersPerLevel
+      : (num(parent?.min_height) ??
+        (parentMinFloor !== undefined ? parentMinFloor * metersPerLevel : 0)));
 
   const floors = num(properties.num_floors);
-  let top = num(properties.height) ?? (floors !== undefined ? floors * metersPerLevel : undefined);
+  const parentFloors = num(parent?.num_floors);
+  let top =
+    num(properties.height) ??
+    (floors !== undefined
+      ? floors * metersPerLevel
+      : (num(parent?.height) ??
+        (parentFloors !== undefined ? parentFloors * metersPerLevel : undefined)));
   if (top === undefined) top = base + metersPerLevel;
 
   if (top <= base) top = base + 0.5;

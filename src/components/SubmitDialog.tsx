@@ -8,28 +8,24 @@ import {
   FiDownload,
   FiLogIn,
   FiLogOut,
+  FiMapPin,
   FiUser,
   FiX,
   FiXCircle,
 } from "react-icons/fi";
 import {
-  buildChangeset,
   type ChangesetEntry,
   type ChangesetInput,
   type ChangesetPlan,
   changesetSize,
   changesetTags,
   toChangesetXml,
-  toOsmChangeXml,
 } from "@/lib/osm/changeset";
-import type { Issue } from "@/lib/osm/issues";
+import type { Issue, IssueFix } from "@/lib/osm/issues";
 import { sortIssues } from "@/lib/osm/issues";
-import {
-  COMMENT_MIN_LENGTH,
-  commentIssues,
-  isUsableComment,
-  validateChangeset,
-} from "@/lib/osm/validate";
+import { COMMENT_MIN_LENGTH, commentIssues, isUsableComment } from "@/lib/osm/validate";
+import { buildSubmissionReview } from "@/lib/osm/submission-review";
+import { OsmBuildingLookup } from "@/lib/osm/building-lookup";
 import type { UploadResult } from "@/lib/osm/upload";
 import { type OsmAuth, useOsmAuth } from "@/lib/osm/use-osm-auth";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -56,8 +52,52 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-/** A default comment that already says what changed, in OSM's usual phrasing. */
-function suggestComment(plan: ChangesetPlan): string {
+type AddressTags = Record<string, string>;
+
+/** Street-address lines for the parent buildings touched by modify entries. */
+function modifiedBuildingAddresses(plan: ChangesetPlan, displayed: FeatureCollection): string[] {
+  const lookup = new OsmBuildingLookup(displayed);
+  const buildings = new Map(
+    plan.entries
+      .filter((entry) => entry.action === "modify")
+      .flatMap((entry) => {
+        const selection = lookup.select(entry.ref.split("#")[0]);
+        return selection ? [[selection.building.id, selection.building] as const] : [];
+      }),
+  );
+  const byStreet = new Map<string, Set<string>>();
+  for (const building of buildings.values()) {
+    const properties = building.properties;
+    const ownTags = (properties.tags ?? {}) as AddressTags;
+    const nodeTags = (properties.node_tags ?? {}) as Record<string, AddressTags>;
+    const memberNodeTags = (
+      Array.isArray(properties.member_ways) ? properties.member_ways : []
+    ).flatMap((member) => {
+      if (!member || typeof member !== "object") return [];
+      const tagged = (member as { node_tags?: Record<string, AddressTags> }).node_tags;
+      return tagged ? Object.values(tagged) : [];
+    });
+    for (const tags of [ownTags, ...Object.values(nodeTags), ...memberNodeTags]) {
+      const street = tags["addr:street"]?.trim();
+      if (!street) continue;
+      const numbers = byStreet.get(street) ?? new Set<string>();
+      const houseNumber = tags["addr:housenumber"]?.trim();
+      if (houseNumber) numbers.add(houseNumber);
+      byStreet.set(street, numbers);
+    }
+  }
+  return [...byStreet]
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([street, numbers]) => {
+      const ordered = [...numbers].sort((first, second) =>
+        first.localeCompare(second, undefined, { numeric: true }),
+      );
+      return ordered.length > 0 ? `${street} ${ordered.join(", ")}` : street;
+    });
+}
+
+/** A default multiline comment that says where and what changed. */
+function suggestComment(plan: ChangesetPlan, displayed: FeatureCollection): string {
   const created = plan.entries.filter((entry) => entry.action === "create").length;
   const modified = plan.entries.filter((entry) => entry.action === "modify").length;
   const keys = [
@@ -68,22 +108,32 @@ function suggestComment(plan: ChangesetPlan): string {
     ),
   ].sort();
   const parts: string[] = [];
-  if (created > 0) parts.push(`add ${pluralize(created, "building part")}`);
+  if (created > 0) parts.push(`Add ${pluralize(created, "building part")}`);
   if (modified > 0) {
     const tags = keys.slice(0, 3).join(", ");
     parts.push(
       keys.length > 0
-        ? `update ${tags} on ${pluralize(modified, "building")}`
-        : `update ${pluralize(modified, "building")}`,
+        ? `Update ${tags} on ${pluralize(modified, "building")}`
+        : `Update ${pluralize(modified, "building")}`,
     );
   }
   if (parts.length === 0) return "";
-  const sentence = parts.join("; ");
-  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+  return [...modifiedBuildingAddresses(plan, displayed), ...parts].join("\n");
 }
 
-function IssueRow({ found, onNavigate }: { found: Issue; onNavigate: (entity: string) => void }) {
+function IssueRow({
+  found,
+  onNavigate,
+  onLocate,
+  onFix,
+}: {
+  found: Issue;
+  onNavigate: (entity: string) => void;
+  onLocate: (at: [number, number], entity?: string) => void;
+  onFix: (fix: IssueFix) => void;
+}) {
   const error = found.level === "error";
+  const fix = found.fix;
   return (
     <li
       className={`flex gap-2 rounded-md border px-2.5 py-2 text-xs ${
@@ -111,6 +161,25 @@ function IssueRow({ found, onNavigate }: { found: Issue; onNavigate: (entity: st
               {entity}
             </button>
           ))}
+          {found.at && (
+            <button
+              type="button"
+              onClick={() => onLocate(found.at!, found.entities[0])}
+              className="flex items-center gap-1 rounded bg-white/70 px-1 py-0.5 text-[10px] font-semibold text-rose-700 underline-offset-2 hover:underline"
+            >
+              <FiMapPin className="h-3 w-3" aria-hidden />
+              Show
+            </button>
+          )}
+          {fix && (
+            <button
+              type="button"
+              onClick={() => onFix(fix)}
+              className="rounded bg-amber-700 px-2 py-0.5 font-semibold text-white hover:bg-amber-800"
+            >
+              Fix
+            </button>
+          )}
         </p>
       </div>
     </li>
@@ -272,6 +341,8 @@ export function SubmitDialog({
   displayed,
   onClose,
   onNavigate,
+  onLocate,
+  onFix,
   onUploaded,
 }: {
   open: boolean;
@@ -280,6 +351,10 @@ export function SubmitDialog({
   displayed: FeatureCollection;
   onClose: () => void;
   onNavigate: (entity: string) => void;
+  /** Closes review and marks the exact map location of a geometry finding. */
+  onLocate: (at: [number, number], entity?: string) => void;
+  /** Applies a deterministic validator suggestion to the pending edits. */
+  onFix: (fix: IssueFix) => void;
   /** Called once a changeset has landed, so the pending changes can be dropped. */
   onUploaded: (result: UploadResult) => void;
 }) {
@@ -293,22 +368,23 @@ export function SubmitDialog({
   const [uploaded, setUploaded] = useState<UploadResult | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const plan = useMemo(() => (open ? buildChangeset(input) : null), [input, open]);
-  // Deliberately independent of the comment: this walks every part of every
-  // touched building through boolean geometry, and running it on each keystroke
-  // made the comment field crawl.
-  const validation = useMemo(
-    () => (plan ? validateChangeset({ displayed, plan }) : null),
-    [displayed, plan],
+  const review = useMemo(
+    () => (open ? buildSubmissionReview({ input, displayed }) : null),
+    [displayed, input, open],
   );
+  const plan = review?.plan ?? null;
+  const validation = review?.validation ?? null;
+  const xml = review?.xml ?? "";
   const issues = useMemo(
     () => sortIssues([...commentIssues(comment), ...(validation?.issues ?? [])]),
     [comment, validation],
   );
-  const xml = useMemo(() => (plan ? toOsmChangeXml(plan) : ""), [plan]);
   // Stable, so the memoised element rows below are not rebuilt on every keystroke.
   const navigate = useCallback((entity: string) => onNavigate(entity.split("#")[0]), [onNavigate]);
-  const suggestion = useMemo(() => (plan ? suggestComment(plan) : ""), [plan]);
+  const suggestion = useMemo(
+    () => (plan ? suggestComment(plan, displayed) : ""),
+    [displayed, plan],
+  );
   const entryRows = useMemo(
     () =>
       plan?.entries.map((entry) => (
@@ -380,6 +456,10 @@ export function SubmitDialog({
       const body = (await response.json()) as UploadResult & { error?: string };
       if (!response.ok) throw new Error(body.error ?? "Upload failed");
       setUploaded(body);
+      // A comment describes exactly one changeset. Leave the successful result
+      // visible, but make the next review regenerate its own description from
+      // the new plan instead of carrying this text across submissions.
+      setComment("");
       onUploaded(body);
     } catch (failure) {
       setUploadError(failure instanceof Error ? failure.message : "Upload failed");
@@ -427,7 +507,7 @@ export function SubmitDialog({
                   {pluralize(plan.nodes.length - plan.movedNodes, "new node")} · {plan.reusedNodes}{" "}
                   existing nodes reused
                   {plan.movedNodes > 0 && ` · ${pluralize(plan.movedNodes, "node")} moved`}
-                  {plan.mergedNodes > 0 && ` · ${plan.mergedNodes} drawn vertices merged`}
+                  {plan.mergedNodes > 0 && ` · ${plan.mergedNodes} vertices merged`}
                 </>
               )}
             </p>
@@ -508,16 +588,17 @@ export function SubmitDialog({
               >
                 Changeset comment <span className="text-rose-600">*</span>
               </label>
-              <input
+              <textarea
                 id="changeset-comment"
                 value={comment}
                 onChange={(event) => setComment(event.target.value)}
+                rows={4}
                 required
                 aria-required="true"
                 aria-invalid={!commentOk}
                 aria-describedby="changeset-comment-hint"
                 placeholder="What changed, and where the data came from"
-                className={`w-full rounded-lg border px-3 py-2 text-sm text-slate-900 focus:outline-none ${
+                className={`w-full resize-y rounded-lg border px-3 py-2 text-sm text-slate-900 focus:outline-none ${
                   commentOk
                     ? "border-slate-300 focus:border-violet-500"
                     : "border-rose-400 bg-rose-50 focus:border-rose-500"
@@ -562,6 +643,8 @@ export function SubmitDialog({
                       key={`${found.check}-${found.entities.join()}-${position}`}
                       found={found}
                       onNavigate={navigate}
+                      onLocate={onLocate}
+                      onFix={onFix}
                     />
                   ))}
                 </ul>

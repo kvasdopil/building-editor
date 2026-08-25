@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { buildPointCloud, buildScene } from "@/lib/extrude";
+import { buildPointCloud, buildScene, updatePointCloudSelection } from "@/lib/extrude";
 import { levelHeight, verticalExtent } from "@/lib/heights";
 import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
 import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
@@ -59,7 +59,6 @@ export interface CameraView {
 
 interface SceneRuntime {
   buildingId: string;
-  selectedId: string;
   updateSelection(selection: BuildingSelection): void;
 }
 
@@ -100,11 +99,14 @@ function pointCloudProfileChanged(previous: BuildingSelection, next: BuildingSel
   );
   for (const element of [next.building, ...next.parts]) {
     const old = previousElements.get(element.id);
+    const previousParent =
+      old?.id === previous.building.id ? undefined : previous.building.properties;
+    const nextParent = element.id === next.building.id ? undefined : next.building.properties;
     if (
       !old ||
       old.polygons !== element.polygons ||
-      verticalExtent(old.properties, previousLevelHeight).top !==
-        verticalExtent(element.properties, nextLevelHeight).top
+      verticalExtent(old.properties, previousLevelHeight, previousParent).top !==
+        verticalExtent(element.properties, nextLevelHeight, nextParent).top
     )
       return true;
   }
@@ -169,6 +171,7 @@ export function Building3D({
 
     let cloudPoints = cloud ? buildPointCloud(cloud, activeSelection, built.origin, terrain) : null;
     if (cloudPoints) scene.add(cloudPoints);
+    let refocus: ((focus: THREE.Box3) => void) | null = null;
 
     const replacePointCloud = () => {
       if (cloudPoints) {
@@ -182,6 +185,22 @@ export function Building3D({
     // Rebuilding changes terrain and neighbor base elevations, but never the
     // selected building's zero: its lowest Mapterhorn sample is the scene datum.
     const rebuild = (nextSelection: BuildingSelection, forcePointCloud = false) => {
+      if (
+        nextSelection.building.id === activeSelection.building.id &&
+        nextSelection.selected.id !== activeSelection.selected.id
+      ) {
+        // A sibling selection changes camera focus and discrepancy colours, not
+        // the parent's solids, neighbors, terrain, or point positions.
+        activeSelection = nextSelection;
+        const focusTarget =
+          built.focusTargets.get(nextSelection.selected.id) ??
+          built.focusTargets.get(nextSelection.building.id);
+        if (focusTarget) built.focus.setFromObject(focusTarget);
+        if (cloud && cloudPoints)
+          updatePointCloudSelection(cloudPoints, cloud, activeSelection, terrain);
+        refocus?.(built.focus);
+        return;
+      }
       const rebuildPointCloud =
         forcePointCloud || pointCloudProfileChanged(activeSelection, nextSelection);
       const previous = built.root;
@@ -197,7 +216,6 @@ export function Building3D({
     let pendingSelection: BuildingSelection | null = null;
     const runtime: SceneRuntime = {
       buildingId: activeSelection.building.id,
-      selectedId: activeSelection.selected.id,
       updateSelection(nextSelection) {
         if (nextSelection !== activeSelection) pendingSelection = nextSelection;
       },
@@ -317,6 +335,36 @@ export function Building3D({
     controls.maxDistance = maxDistance;
     controls.maxPolarAngle = Math.PI / 2 - 0.03;
 
+    refocus = (nextFocus) => {
+      const nextCenter = nextFocus.getCenter(new THREE.Vector3());
+      const nextSize = nextFocus.getSize(new THREE.Vector3());
+      const nextTarget = new THREE.Vector3(nextCenter.x, nextFocus.min.y, nextCenter.z);
+      const nextRadius = Math.max(nextSize.length() / 2, 18);
+      const nextMinDistance = nextRadius * 0.3;
+      const nextMaxDistance = nextRadius * 12;
+      const view = orbitRef.current;
+      const nextDistance = view
+        ? Math.min(Math.max(view.range, nextMinDistance), nextMaxDistance)
+        : Math.hypot(nextRadius * 1.8 * Math.SQRT2, nextRadius * 2.0);
+      const nextTilt = view
+        ? Math.min(view.tilt, maxTilt) * (Math.PI / 180)
+        : Math.atan2(nextRadius * 1.8 * Math.SQRT2, nextRadius * 2.0);
+      const nextHeading = ((view?.heading ?? initialHeading) * Math.PI) / 180;
+      const nextHorizontal = nextDistance * Math.sin(nextTilt);
+
+      controls.target.copy(nextTarget);
+      controls.minDistance = nextMinDistance;
+      controls.maxDistance = nextMaxDistance;
+      camera.far = nextRadius * 40;
+      camera.position.set(
+        nextTarget.x - Math.sin(nextHeading) * nextHorizontal,
+        nextTarget.y + nextDistance * Math.cos(nextTilt),
+        nextTarget.z + Math.cos(nextHeading) * nextHorizontal,
+      );
+      camera.updateProjectionMatrix();
+      controls.update();
+    };
+
     // Three's local axes are east (+X), up (+Y), and south (+Z). Translate
     // that orbit into the north-based camera convention used by map links.
     let lastReported = "";
@@ -368,18 +416,13 @@ export function Building3D({
     onCloudStatus,
     onTerrainStatus,
     selection.building.id,
-    selection.selected.id,
   ]);
 
   // Tag edits replace the effective selection object. Keep the standing
   // renderer, camera, controls and async data; only swap its scene geometry.
   useEffect(() => {
     const runtime = runtimeRef.current;
-    if (
-      runtime?.buildingId === selection.building.id &&
-      runtime.selectedId === selection.selected.id
-    )
-      runtime.updateSelection(selection);
+    if (runtime?.buildingId === selection.building.id) runtime.updateSelection(selection);
   }, [selection]);
 
   return <div ref={containerRef} className="h-full w-full" />;

@@ -1,28 +1,18 @@
 import Flatten from "@flatten-js/core";
 import type { MultiPolygon, Polygon } from "geojson";
-import type { BuildingElement, BuildingProperties, LngLat } from "./buildings";
+import type { BuildingElement, LngLat } from "./buildings";
 import { orientRing, segmentsIntersect } from "./geometry";
 import type { EditableGeometry } from "./geometry-edits";
+import {
+  copiedPartTags,
+  firstPartTags,
+  firstTowerPartTags,
+  inheritedPartTags,
+  inheritedTowerPartTags,
+} from "./part-tags";
 
 const METERS_PER_DEGREE = 111320;
 const MIN_PART_AREA_M2 = 0.1;
-
-const INHERITED_PART_TAGS = [
-  "height",
-  "min_height",
-  "building:levels",
-  "building:min_level",
-  "building:material",
-  "building:colour",
-  "roof:shape",
-  "roof:height",
-  "roof:levels",
-  "roof:direction",
-  "roof:orientation",
-  "roof:angle",
-  "roof:material",
-  "roof:colour",
-] as const;
 
 interface Projection {
   point(coordinates: LngLat): Flatten.Point;
@@ -169,38 +159,17 @@ function onAnyBoundary(point: Flatten.Point, polygons: Flatten.Polygon[]): boole
   return polygons.some((polygon) => polygon.findEdgeByPoint(point) !== undefined);
 }
 
-function rawTags(properties: BuildingProperties): Record<string, string> {
-  return properties.tags && typeof properties.tags === "object"
-    ? { ...(properties.tags as Record<string, string>) }
-    : {};
-}
-
-function tagsForExistingPart(properties: BuildingProperties): Record<string, string> {
-  const tags = rawTags(properties);
-  delete tags.building;
-  tags["building:part"] ??= "yes";
-  return tags;
-}
-
-function tagsForNewPart(properties: BuildingProperties): Record<string, string> {
-  const source = rawTags(properties);
-  const tags: Record<string, string> = { "building:part": "yes" };
-  for (const key of INHERITED_PART_TAGS) {
-    if (source[key] !== undefined) tags[key] = source[key];
-  }
-  return tags;
-}
-
 /**
  * Divide a building with one path, in one of two modes.
  *
  * An **open polyline**, whose ends rest on the outline or on an existing part,
  * partitions what it crosses: uncovered regions become new generic parts, split
- * existing parts keep their tags, and the building outline is left alone.
+ * existing parts keep explicit height plus tags that differ from the outline,
+ * and the building outline is left alone.
  *
- * A **closed loop** creates a full-footprint base part plus the enclosed center
- * part, and leaves the building outline unchanged. The two parts overlap in 2D
- * by design; their height/min-height tags describe how they stack in 3D.
+ * A **closed loop** creates the enclosed center part and leaves the building
+ * outline unchanged. It also creates a full-footprint base part when this is
+ * the building's first part; existing parts already provide its base geometry.
  */
 export function sliceBuilding(
   building: BuildingElement,
@@ -233,19 +202,25 @@ export function sliceBuilding(
     if (!loop.isValid() || loop.area() < MIN_PART_AREA_M2 || !buildingPolygon.contains(loop))
       return null;
 
-    // A loop describes a center part sitting on a base, not a ring-shaped
-    // complement. Copy the complete building footprint for the base and add the
-    // loop as the second part; the building=* outline itself is never replaced.
+    // A loop describes a tower sitting on the building's parts, not a
+    // ring-shaped complement. When no parts exist yet, copy the complete
+    // footprint once to establish that base. Otherwise preserve the existing
+    // parts and add only the tower; the building=* outline is never replaced.
     try {
+      const towerTags =
+        parts.length === 0
+          ? firstTowerPartTags(building.properties)
+          : inheritedTowerPartTags(building.properties);
       const centerParts = polygonRegions(loop, projection).map((region) => ({
         ...region,
-        tags: tagsForNewPart(building.properties),
+        tags: towerTags,
       }));
       if (centerParts.length === 0) return null;
+      if (parts.length > 0) return { replacements: {}, additions: centerParts };
       const basePart: SliceAddition = {
         geometry: elementGeometry(building),
         area: buildingPolygon.area(),
-        tags: tagsForNewPart(building.properties),
+        tags: firstPartTags(building.properties),
       };
       return { replacements: {}, additions: [basePart, ...centerParts] };
     } catch {
@@ -274,9 +249,10 @@ export function sliceBuilding(
       divided = true;
       replacements[element.id] = regions[0].geometry;
       additions.push(
-        ...regions
-          .slice(1)
-          .map((region) => ({ ...region, tags: tagsForExistingPart(element.properties) })),
+        ...regions.slice(1).map((region) => ({
+          ...region,
+          tags: copiedPartTags(element.properties, building.properties),
+        })),
       );
     }
 
@@ -287,7 +263,10 @@ export function sliceBuilding(
     additions.push(
       ...uncoveredRegions.map((region) => ({
         ...region,
-        tags: tagsForNewPart(building.properties),
+        tags:
+          parts.length === 0
+            ? firstPartTags(building.properties)
+            : inheritedPartTags(building.properties),
       })),
     );
     return additions.length > 0 || Object.keys(replacements).length > 0

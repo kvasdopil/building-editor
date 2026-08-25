@@ -45,7 +45,11 @@ function changeEntries(
         ? { original: "building outline", pending: "hole cut" }
         : override.kind === "slice"
           ? { original: "part outline", pending: "part sliced" }
-          : { original: "footprint", pending: "footprint reshaped" };
+          : override.kind === "add-part"
+            ? { original: "building outline", pending: "outline expanded" }
+            : override.kind === "glue"
+              ? { original: "shared wall", pending: "corner shared" }
+              : { original: "footprint", pending: "footprint reshaped" };
     return {
       entity,
       property: "geometry",
@@ -133,6 +137,7 @@ function entityAction(entity: string, createdParts: CreatedPartMap): string {
 /** Left drawer for reviewing and navigating to pending tag overrides. */
 export function ChangesSidebar({
   open,
+  selectedId,
   edits,
   geometryEdits,
   createdParts,
@@ -145,6 +150,7 @@ export function ChangesSidebar({
   onSubmit,
 }: {
   open: boolean;
+  selectedId: string | null;
   edits: EditMap;
   geometryEdits: GeometryEditMap;
   createdParts: CreatedPartMap;
@@ -218,114 +224,138 @@ export function ChangesSidebar({
 
       <div className="flex-1 overflow-y-auto p-3">
         <ul className="space-y-3">
-          {groups.map((group) => (
-            <li
-              key={group.entity}
-              className="overflow-hidden rounded-lg border border-slate-200 bg-white"
-            >
-              <div className="flex items-stretch border-b border-slate-200 bg-slate-50">
-                <a
-                  href={`#${group.entity}`}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    onNavigate(group.entity);
-                  }}
-                  className="group flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 transition-colors hover:bg-violet-50"
+          {groups.map((group) => {
+            const selected = group.entity === selectedId;
+            return (
+              <li
+                key={group.entity}
+                className={`overflow-hidden rounded-lg border bg-white ${
+                  selected ? "border-violet-400 ring-2 ring-violet-200" : "border-slate-200"
+                }`}
+              >
+                <div
+                  className={`flex items-stretch border-b ${
+                    selected ? "border-violet-200 bg-violet-100" : "border-slate-200 bg-slate-50"
+                  }`}
                 >
-                  <span className="truncate font-mono text-xs font-semibold text-violet-700">
-                    {group.entity}
-                  </span>
-                  <FiArrowRight
-                    className="ml-auto h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700"
-                    aria-hidden
-                  />
-                </a>
-                <button
-                  type="button"
-                  onClick={() => setConfirmTarget({ entity: group.entity })}
-                  aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                  title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                  className="border-l border-slate-200 px-3 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-700"
-                >
-                  <FiTrash2 className="h-4 w-4" aria-hidden />
-                </button>
-              </div>
-              <table className="w-full table-fixed text-xs">
-                <tbody>
-                  {group.changes.map((change) => (
-                    <tr
-                      key={change.property}
-                      className="group border-b border-slate-100 align-top last:border-0"
-                    >
-                      <th
-                        scope="row"
-                        className="w-2/5 px-3 py-1.5 text-left font-medium break-words text-slate-500"
-                        title={change.property}
+                  <a
+                    href={`#${group.entity}`}
+                    onClick={(event) => {
+                      if (
+                        event.button !== 0 ||
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey
+                      )
+                        return;
+                      onClose();
+                      // Real OSM ids follow their ordinary hash link. A newly
+                      // drawn part has no upstream id for the hash resolver, so
+                      // select that local entity directly as well.
+                      if (group.entity in createdParts) {
+                        event.preventDefault();
+                        onNavigate(group.entity);
+                      }
+                    }}
+                    aria-current={selected ? "location" : undefined}
+                    className="group flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 transition-colors hover:bg-violet-50"
+                  >
+                    <span className="truncate font-mono text-xs font-semibold text-violet-700">
+                      {group.entity}
+                    </span>
+                    <FiArrowRight
+                      className="ml-auto h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700"
+                      aria-hidden
+                    />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmTarget({ entity: group.entity })}
+                    aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
+                    title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
+                    className="border-l border-slate-200 px-3 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-700"
+                  >
+                    <FiTrash2 className="h-4 w-4" aria-hidden />
+                  </button>
+                </div>
+                <table className="w-full table-fixed text-xs">
+                  <tbody>
+                    {group.changes.map((change) => (
+                      <tr
+                        key={change.property}
+                        className="group border-b border-slate-100 align-top last:border-0"
                       >
-                        {change.property}
-                      </th>
-                      <td className="px-3 py-1.5 break-words text-slate-900">
-                        <span className="flex flex-wrap items-center gap-1.5">
-                          <Value value={change.original} muted />
-                          <span className="text-slate-400" aria-hidden>
-                            →
-                          </span>
-                          <span
-                            className="rounded bg-amber-100 px-1 font-semibold text-amber-900"
-                            title={`Pending — OSM has ${change.original ?? "no value"}`}
-                          >
-                            {change.pending === "" ? (
-                              <span className="italic">not set</span>
-                            ) : (
-                              change.pending
+                        <th
+                          scope="row"
+                          className="w-2/5 px-3 py-1.5 text-left font-medium break-words text-slate-500"
+                          title={change.property}
+                        >
+                          {change.property}
+                        </th>
+                        <td className="px-3 py-1.5 break-words text-slate-900">
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <Value value={change.original} muted />
+                            <span className="text-slate-400" aria-hidden>
+                              →
+                            </span>
+                            <span
+                              className="rounded bg-amber-100 px-1 font-semibold text-amber-900"
+                              title={`Pending — OSM has ${change.original ?? "no value"}`}
+                            >
+                              {change.pending === "" ? (
+                                <span className="italic">not set</span>
+                              ) : (
+                                change.pending
+                              )}
+                            </span>
+                            {change.editable && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditing({
+                                    entity: group.entity,
+                                    property: change.property,
+                                    value: change.pending,
+                                    original: change.pending,
+                                  })
+                                }
+                                aria-label={`Edit ${change.property}`}
+                                title={`Edit ${change.property}`}
+                                className="text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:text-violet-700 focus:opacity-100"
+                              >
+                                <FiEdit2 className="h-3.5 w-3.5" aria-hidden />
+                              </button>
                             )}
-                          </span>
-                          {change.editable && (
                             <button
                               type="button"
-                              onClick={() =>
-                                setEditing({
-                                  entity: group.entity,
-                                  property: change.property,
-                                  value: change.pending,
-                                  original: change.pending,
-                                })
+                              disabled={change.locked !== null}
+                              onClick={() => onRemoveProperty(group.entity, change.property)}
+                              aria-label={`Remove ${change.property} from the changeset`}
+                              title={
+                                change.locked
+                                  ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
+                                  : change.original === undefined
+                                    ? `Drop ${change.property} from the changeset`
+                                    : `Revert to ${change.original}`
                               }
-                              aria-label={`Edit ${change.property}`}
-                              title={`Edit ${change.property}`}
-                              className="text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:text-violet-700 focus:opacity-100"
+                              className={
+                                change.locked !== null
+                                  ? "cursor-not-allowed text-slate-200"
+                                  : "text-slate-400 transition-colors hover:text-rose-600"
+                              }
                             >
-                              <FiEdit2 className="h-3.5 w-3.5" aria-hidden />
+                              <FiXCircle className="h-4 w-4" aria-hidden />
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            disabled={change.locked !== null}
-                            onClick={() => onRemoveProperty(group.entity, change.property)}
-                            aria-label={`Remove ${change.property} from the changeset`}
-                            title={
-                              change.locked
-                                ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
-                                : change.original === undefined
-                                  ? `Drop ${change.property} from the changeset`
-                                  : `Revert to ${change.original}`
-                            }
-                            className={
-                              change.locked !== null
-                                ? "cursor-not-allowed text-slate-200"
-                                : "text-slate-400 transition-colors hover:text-rose-600"
-                            }
-                          >
-                            <FiXCircle className="h-4 w-4" aria-hidden />
-                          </button>
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </li>
-          ))}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </li>
+            );
+          })}
         </ul>
       </div>
 

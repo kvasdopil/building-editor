@@ -1,5 +1,6 @@
 import type { FeatureCollection } from "geojson";
 import type { BuildingProperties, LngLat } from "../buildings";
+import { relationMemberWays } from "./member-way";
 import { coordinateKey, metersBetween, roundToOsmGrid } from "./precision";
 
 /**
@@ -63,8 +64,55 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
   const byKey = new Map<string, ExistingNode>();
   const buckets = new Map<string, ExistingNode[]>();
 
+  const addNodes = (input: {
+    ownerIds: string[];
+    nodeIds: number[];
+    coordinates: LngLat[];
+    versions: number[];
+    nodeTags: Record<string, Record<string, string>>;
+  }) => {
+    const { ownerIds, nodeIds, coordinates, versions, nodeTags } = input;
+    if (coordinates.length !== nodeIds.length) return;
+    for (const [index, id] of nodeIds.entries()) {
+      if (typeof id !== "number") continue;
+      const coordinatesAtNode = roundToOsmGrid(coordinates[index]);
+      const key = coordinateKey(coordinatesAtNode);
+      const known = byKey.get(key);
+      if (known) {
+        for (const ownerId of ownerIds) {
+          if (!known.ownerIds.includes(ownerId)) known.ownerIds.push(ownerId);
+        }
+        continue;
+      }
+      const version = versions[index];
+      const node: ExistingNode = {
+        id,
+        coordinates: coordinatesAtNode,
+        version: typeof version === "number" ? version : 0,
+        tags: nodeTags[id] ?? {},
+        ownerIds: [...ownerIds],
+      };
+      byKey.set(key, node);
+      const bucket = bucketKey(coordinatesAtNode[0], coordinatesAtNode[1]);
+      const cell = buckets.get(bucket);
+      if (cell) cell.push(node);
+      else buckets.set(bucket, [node]);
+    }
+  };
+
   for (const feature of collection.features) {
     const properties = (feature.properties ?? {}) as BuildingProperties;
+    const featureId = typeof properties.id === "string" ? properties.id : null;
+    for (const member of relationMemberWays(properties.member_ways)) {
+      addNodes({
+        ownerIds: [...(featureId ? [featureId] : []), `way/${member.id}`],
+        nodeIds: member.nodes,
+        coordinates: member.coordinates,
+        versions: member.node_versions,
+        nodeTags: member.node_tags ?? {},
+      });
+    }
+
     const nodeIds = properties.node_ids;
     if (properties.osm_type !== "way" || !Array.isArray(nodeIds)) continue;
     if (feature.geometry.type !== "Polygon") continue;
@@ -76,31 +124,13 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
     const versions = Array.isArray(properties.node_versions) ? properties.node_versions : [];
     const nodeTags = (properties.node_tags ?? {}) as Record<string, Record<string, string>>;
 
-    for (const [index, id] of nodeIds.entries()) {
-      if (typeof id !== "number") continue;
-      const coordinates = roundToOsmGrid([ring[index][0], ring[index][1]]);
-      const key = coordinateKey(coordinates);
-      const known = byKey.get(key);
-      if (known) {
-        if (typeof properties.id === "string" && !known.ownerIds.includes(properties.id)) {
-          known.ownerIds.push(properties.id);
-        }
-        continue;
-      }
-      const version = versions[index];
-      const node: ExistingNode = {
-        id,
-        coordinates,
-        version: typeof version === "number" ? version : 0,
-        tags: nodeTags[id] ?? {},
-        ownerIds: typeof properties.id === "string" ? [properties.id] : [],
-      };
-      byKey.set(key, node);
-      const bucket = bucketKey(coordinates[0], coordinates[1]);
-      const cell = buckets.get(bucket);
-      if (cell) cell.push(node);
-      else buckets.set(bucket, [node]);
-    }
+    addNodes({
+      ownerIds: featureId ? [featureId] : [],
+      nodeIds: nodeIds as number[],
+      coordinates: ring.map((point) => [point[0], point[1]]),
+      versions,
+      nodeTags,
+    });
   }
 
   return { byKey, buckets };

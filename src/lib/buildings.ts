@@ -24,13 +24,15 @@ export interface BuildingProperties {
   min_floor?: number;
   roof_shape?: string;
   roof_height?: number;
+  roof_orientation?: string;
+  roof_direction?: string;
   has_parts?: boolean;
   /** Pending local edits exist for this element; used by derived map styling. */
   locally_modified?: boolean;
   /** A local footprint override exists. */
   geometry_modified?: boolean;
   /** Why the local geometry differs, so 3D can distinguish holes from reshaping. */
-  geometry_edit_kind?: "hole" | "slice" | "reshape";
+  geometry_edit_kind?: "hole" | "slice" | "add-part" | "glue" | "reshape";
   "@name"?: string;
   [key: string]: unknown;
 }

@@ -68,6 +68,8 @@ function applyEditToProperties(
     min_floor: undefined,
     roof_shape: undefined,
     roof_height: undefined,
+    roof_orientation: undefined,
+    roof_direction: undefined,
     ...normalizeOsmTags(tags, role),
     // Identity is not editable, so keep what the source gave us.
     id: properties.id,

@@ -102,6 +102,8 @@ function insideElement(point: LngLat, element: BuildingElement): boolean {
   return element.polygons.some((footprint) => insideFootprint(point, footprint));
 }
 
+const minimumElevationCache = new WeakMap<TerrainModel, WeakMap<BuildingElement, number>>();
+
 function rawElevation(model: TerrainModel, pixelX: number, pixelY: number): number | null {
   const tileX = Math.floor(pixelX / TILE_SIZE);
   const tileY = Math.floor(pixelY / TILE_SIZE);
@@ -137,6 +139,8 @@ export function terrainElevation(model: TerrainModel, point: LngLat): number | n
  * one z13 pixel still receives a deterministic ground elevation.
  */
 export function minimumTerrainElevation(model: TerrainModel, element: BuildingElement): number {
+  const cached = minimumElevationCache.get(model)?.get(element);
+  if (cached !== undefined) return cached;
   const [west, south, east, north] = elementBounds(element);
   const [minX, minY] = worldPixel([west, north]);
   const [maxX, maxY] = worldPixel([east, south]);
@@ -158,9 +162,17 @@ export function minimumTerrainElevation(model: TerrainModel, element: BuildingEl
     }
   }
 
-  if (Number.isFinite(minimum)) return minimum;
   const center: LngLat = [(west + east) / 2, (south + north) / 2];
-  return terrainElevation(model, center) ?? model.referenceZ;
+  const resolved = Number.isFinite(minimum)
+    ? minimum
+    : (terrainElevation(model, center) ?? model.referenceZ);
+  let byElement = minimumElevationCache.get(model);
+  if (!byElement) {
+    byElement = new WeakMap();
+    minimumElevationCache.set(model, byElement);
+  }
+  byElement.set(element, resolved);
+  return resolved;
 }
 
 function decodeTerrarium(data: Uint8ClampedArray): Float32Array {

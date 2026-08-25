@@ -2,7 +2,7 @@
 
 import { type KeyboardEvent, type PointerEvent, useRef, useState } from "react";
 import { FiAlertCircle, FiEdit2, FiPlusCircle, FiXCircle } from "react-icons/fi";
-import { TbArrowsHorizontal } from "react-icons/tb";
+import { TbArrowsHorizontal, TbCompass } from "react-icons/tb";
 import type { Suggestion } from "@/lib/lod1";
 import { parseMeters } from "@/lib/osm/parse";
 import { ValueEditDialog } from "./ValueEditDialog";
@@ -16,7 +16,7 @@ export const EDITABLE_DIMENSION_KEYS = [
   "roof:height",
 ] as const;
 
-export const OPTIONAL_ROOF_KEYS = ["roof:shape"] as const;
+export const OPTIONAL_ROOF_KEYS = ["roof:shape", "roof:orientation", "roof:direction"] as const;
 
 const EDITABLE_LABELS: Record<(typeof EDITABLE_DIMENSION_KEYS)[number], string> = {
   "building:levels": "levels",
@@ -211,7 +211,17 @@ function RoofShapeSelect({
   edited: boolean;
   onChange: (value: string) => void;
 }) {
-  const standardValues = new Set(["", "pyramidal", "hipped", "dome", "onion"]);
+  const standardValues = new Set([
+    "",
+    "pyramidal",
+    "hipped",
+    "gabled",
+    "gambrel",
+    "round",
+    "skillion",
+    "dome",
+    "onion",
+  ]);
   const currentIsCustom = value !== "" && !standardValues.has(value);
   return (
     <select
@@ -228,6 +238,10 @@ function RoofShapeSelect({
       <option value="">none</option>
       <option value="pyramidal">pyramid</option>
       <option value="hipped">hipped</option>
+      <option value="gabled">gabled</option>
+      <option value="gambrel">gambrel</option>
+      <option value="round">round</option>
+      <option value="skillion">skillion</option>
       <option value="dome">dome</option>
       <option value="onion">onion</option>
       {currentIsCustom && <option value={value}>{value} (current value)</option>}
@@ -235,10 +249,125 @@ function RoofShapeSelect({
   );
 }
 
+function RoofOrientationSelect({
+  value,
+  edited,
+  onChange,
+}: {
+  value: string;
+  edited: boolean;
+  onChange: (value: string) => void;
+}) {
+  const standardValues = new Set(["", "along", "across"]);
+  const currentIsCustom = value !== "" && !standardValues.has(value);
+  return (
+    <select
+      aria-label="Roof orientation"
+      title="Set roof:orientation"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className={`max-w-full rounded border px-1.5 py-0.5 text-xs outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 ${
+        edited
+          ? "border-amber-300 bg-amber-100 font-semibold text-amber-900"
+          : "border-slate-300 bg-white text-slate-900"
+      }`}
+    >
+      <option value="">default (along)</option>
+      <option value="along">along</option>
+      <option value="across">across</option>
+      {currentIsCustom && <option value={value}>{value} (current value)</option>}
+    </select>
+  );
+}
+
+const ROOF_DIRECTION_DRAG_DEAD_ZONE_PX = 6;
+
+function RoofDirectionDragButton({
+  resolveLook,
+  onChange,
+}: {
+  resolveLook: (bearing: number) => string;
+  onChange: (value: string) => void;
+}) {
+  const drag = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastValue: string | null;
+  } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    drag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastValue: null,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+
+  const onPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    const east = event.clientX - current.startX;
+    const south = event.clientY - current.startY;
+    if (Math.hypot(east, south) < ROOF_DIRECTION_DRAG_DEAD_ZONE_PX) return;
+    event.preventDefault();
+    const lookBearing = (Math.atan2(east, -south) * 180) / Math.PI;
+    const value = resolveLook((lookBearing + 360) % 360);
+    if (value === current.lastValue) return;
+    current.lastValue = value;
+    onChange(value);
+  };
+
+  const finishDrag = (event: PointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    drag.current = null;
+    setDragging(false);
+  };
+
+  return (
+    <button
+      type="button"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      aria-label="Drag to change roof slope direction"
+      title="Drag toward a footprint edge to set its perpendicular roof slope"
+      className={`shrink-0 touch-none rounded p-0.5 transition-colors select-none ${
+        dragging
+          ? "cursor-crosshair bg-violet-100 text-violet-700"
+          : "cursor-crosshair text-slate-400 hover:bg-violet-50 hover:text-violet-700"
+      }`}
+    >
+      <TbCompass className="h-4 w-4" aria-hidden />
+    </button>
+  );
+}
+
+function roofDirectionLabel(value: string): string {
+  if (value === "") return "automatic";
+  return parseNumber(value) === undefined ? value : `${value}°`;
+}
+
 function editError(draft: EditDraft, rows: TagRow[]): string | null {
   const label = editableLabel(draft.key) ?? draft.key;
+  if (draft.key === "roof:direction" && draft.value.trim() === "") return null;
   const value = parseNumber(draft.value);
   if (value === undefined) return `${label} must be a number`;
+  if (draft.key === "roof:direction") {
+    return value < 0 || value > 360 ? "roof:direction must be between 0 and 360 degrees" : null;
+  }
   // A flat roof is `roof:levels=0`, and a part can start at ground level.
   const minimumCanBeZero = ["building:min_level", "min_height", "roof:levels"].includes(draft.key);
   if (minimumCanBeZero ? value < 0 : value <= 0)
@@ -267,6 +396,7 @@ export function TagRows({
   onApply,
   onEdit,
   onRevert,
+  roofDirectionForLook,
   parentId,
   onSelectParent,
 }: {
@@ -274,6 +404,7 @@ export function TagRows({
   onApply: (suggestion: Suggestion) => void;
   onEdit: (key: string, value: string) => void;
   onRevert: (key: string) => void;
+  roofDirectionForLook: (bearing: number) => string;
   parentId?: string | null;
   onSelectParent?: () => void;
 }) {
@@ -282,9 +413,14 @@ export function TagRows({
 
   const saveEditing = () => {
     if (!editing || error || editing.value.trim() === editing.original.trim()) return;
+    if (editing.key === "roof:direction" && editing.value.trim() === "") {
+      onEdit(editing.key, "");
+      setEditing(null);
+      return;
+    }
     const value = parseNumber(editing.value);
     if (value === undefined) return;
-    onEdit(editing.key, String(value));
+    onEdit(editing.key, String(editing.key === "roof:direction" && value === 360 ? 0 : value));
     setEditing(null);
   };
 
@@ -328,6 +464,38 @@ export function TagRows({
                           if (value !== row.value) onEdit(row.key, value);
                         }}
                       />
+                    ) : row.key === "roof:orientation" ? (
+                      <RoofOrientationSelect
+                        value={row.value}
+                        edited={row.edited}
+                        onChange={(value) => {
+                          if (value !== row.value) onEdit(row.key, value);
+                        }}
+                      />
+                    ) : row.key === "roof:direction" ? (
+                      <>
+                        <RoofDirectionDragButton
+                          resolveLook={roofDirectionForLook}
+                          onChange={(value) => {
+                            if (value !== row.value) onEdit(row.key, value);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditing({ key: row.key, value: row.value, original: row.value })
+                          }
+                          aria-label="Set roof slope direction in degrees"
+                          title="Set roof:direction in degrees"
+                          className={`max-w-full rounded border px-1.5 py-0.5 text-xs outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 ${
+                            row.edited
+                              ? "border-amber-300 bg-amber-100 font-semibold text-amber-900"
+                              : "border-slate-300 bg-white text-slate-900"
+                          }`}
+                        >
+                          {roofDirectionLabel(row.value)}
+                        </button>
+                      </>
                     ) : row.value === "" ? (
                       <span className="text-slate-400 italic">not set</span>
                     ) : (
@@ -394,7 +562,7 @@ export function TagRows({
 
       {editing && (
         <ValueEditDialog
-          title={`Edit ${editableLabel(editing.key)}`}
+          title={`Edit ${editableLabel(editing.key) ?? editing.key}`}
           subtitle={editing.key}
           value={editing.value}
           onChange={(value) => setEditing((current) => (current ? { ...current, value } : current))}

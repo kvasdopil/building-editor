@@ -6,7 +6,7 @@ Normative rules for turning the local pending changes into an OSM changeset, and
 
 Related documents:
 
-- [Building Explorer domain spec](building-explorer.md): The editing behavior that produces these pending changes — tag edits, Cut hole, Slice, and the height rules the checks reuse. Read it first.
+- [Building Explorer domain spec](building-explorer.md): The editing behavior that produces these pending changes — tag edits, Cut hole, Slice, Add part, and the height rules the checks reuse. Read it first.
 - [EP-001 Edit buildings and submit to OSM](../../plans/epics/EP-001-osm-editing/index.md): Delivery sequence. Read it to see which slice owns sign-in and the upload itself.
 - [Live OSM data for editing](../../adr/0001-live-osm-data-for-editing.md): Why edit targets come from the OSM API and carry element type, id and version. Node identity below depends on it.
 
@@ -29,9 +29,9 @@ Every vertex of an edited or created footprint is resolved against the nodes alr
 
 The result: slicing a building in two adds two nodes, not eight, and an unchanged wall keeps every node id it had.
 
-### Moving a node
+### Moving or merging a node
 
-**A dragged corner moves its node; it never replaces it.** Position alone cannot tell a moved vertex
+**A freely dragged corner moves its node; it never replaces it.** Position alone cannot tell a moved vertex
 from a new one, so each drag is recorded on the geometry override as a `from`/`to` pair, and the
 upload turns that into a `modify` on the node itself.
 
@@ -47,8 +47,12 @@ all of them, loaded or not. It is also what JOSM does, and why OSM node history 
   never moved: that is a blocking `node-version-unknown`, not a guess.
 - **Dragging the same node twice is one move**, from where OSM has it, and dragging it back to where
   it started is no move at all.
-- **A node dragged exactly onto another node** would stack two in one place. Merging nodes is not
-  supported, so that is a blocking `node-merge-unsupported`.
+- **A node dragged exactly onto another node merges into the target node.** Edited way and relation-
+  member node lists use the target node id instead of moving the source node onto it, so no stacked
+  nodes are written. An adjacent duplicate in one ring collapses to the surviving corner. Owners not
+  present in the loaded building/part collection are not rewritten and may continue to reference the
+  source node; the editor never deletes a source node whose complete upstream ownership it has not
+  loaded.
 - **A node that has been dragged away is no longer at its old position.** Another vertex landing on
   the vacated spot resolves as a new node, not as the one that left.
 - **Ways an upload would rewrite identically are left out.** Moving a node changes the node, not the
@@ -74,9 +78,33 @@ no exact vertex matches it.
 
 ### Node insertion into shared walls
 
-A slice ends on a wall, so its end vertices lie on a segment of the outline (or of a sibling part) without being nodes of it. Those vertices are inserted into the host way at the right position, ordered along the segment. Unjoined, the part boundary crosses the outline with nothing shared — what JOSM reports as crossing building ways, and what comes apart the first time somebody drags the wall.
+A slice or exterior-part draft ends on a wall, so its snapped vertices can lie on a segment of the outline (or, for Slice, of a sibling part) without being nodes of it. Those vertices are inserted into the host way at the right position, ordered along the segment. Unjoined, the part boundary crosses the outline with nothing shared — what JOSM reports as crossing building ways, and what comes apart the first time somebody drags the wall.
 
-A host that is a relation cannot take the node, because assembled ring geometry does not say which member way to change. That is reported as a warning rather than uploaded as a wall that only looks shared.
+**This happens in the local model first, when the cut is made.** A wall is rarely one element's
+alone: cutting the left half of a building already split down the middle puts a corner in the middle
+of the _right_ half's wall too, and that half is not touched by the cut. Every corner the operation
+produces that was not already there is therefore inserted into every ring of the building group it
+lands on — the outline and every part, drawn or upstream — before the edit is stored. Doing it
+locally rather than only at upload is what makes the map, the 3D view and the next edit agree: a
+shared corner is one coordinate, so dragging it later moves every element that owns it, and the
+pre-upload checks measure the geometry that will actually be sent.
+
+Add part applies the same rule specifically to both snapped attachment points. Each point is inserted
+into every existing, edited, or newly created base-part ring whose segment shares the outline edge.
+This includes a snap that already existed as a node of another element: sharing its coordinate does
+not make it part of the sibling way until that sibling's node list also includes it.
+
+The changeset pass stays as the backstop, and it is narrower in one way that matters: it can only
+insert into ways it loaded from OSM, so a part drawn in this session is out of its reach. The local
+pass has no such limit.
+
+A relation host delegates boundary changes to its member ways. The parsed feature retains each
+member's coordinates, node identities, direction, version and tags. During submission, every old
+boundary node (at its moved position, when applicable) must still occur in the edited ring in the
+same cyclic order. New vertices between two consecutive surviving anchors belong to that member.
+This works for both closed member rings and rings assembled from multiple open members, including an
+Add part detour outside the old segment. Removing or reordering an existing boundary node is still
+blocked because ownership would no longer be deterministic.
 
 ### Ids for drawn elements
 
@@ -111,8 +139,9 @@ Every modify carries the `version` read from the API, so a stale edit is rejecte
 A way holds exactly one ring, so anything with holes becomes a `type=multipolygon` relation:
 
 - Cutting a hole in an existing way **converts** it: the way stays as the untagged `outer` member and the tags move to the new relation, which is what the multipolygon wiki prescribes ("outer ways must be left untagged") and what JOSM's _create multipolygon_ does.
+- Cutting a hole through a building with parts plans geometry changes for the outline and every intersected part. Parts that contain the loop become multipolygons too; parts crossed by the loop retain the boolean-subtracted notched outline. Coincident hole and intersection vertices resolve through the normal node-reuse pass, so the affected elements share nodes rather than uploading stacked copies.
 - A created part with holes becomes new ways plus a new relation.
-- Changing the geometry of an element that is **already** a relation is not supported: ring geometry is assembled across member ways, so we cannot tell which member changed. It is an error, not a best guess.
+- Existing relation geometry is written through its member ways, never by replacing the assembled relation geometry. Parsed relation features retain every loaded member way's coordinates, node ids, direction, version and tags. Existing boundary nodes may move, and new vertices may be inserted between consecutive surviving nodes of either a closed member or one of several open members that assemble a ring. The relation and its member list remain unchanged unless its tags also changed. Removing or reordering an existing boundary node is unsupported because the owning member path can no longer be inferred safely; it is an error, not a guess.
 
 ### Tags
 
@@ -180,6 +209,18 @@ Rules that follow from that:
 - **No client id, no button.** Without `OSM_CLIENT_ID` the dialog says what to register
   and where, rather than offering a control that cannot work.
 
+## Changeset comment
+
+The editable default is multiline. It resolves every modified entry to its parent building, then
+prepends the available street addresses before the change summary. Addresses come from the
+building's own `addr:street`/`addr:housenumber` tags and from tagged boundary nodes, including member
+ways of a multipolygon. House numbers on the same street are deduplicated, naturally sorted and
+combined on one line; each change-summary clause follows on its own line. A mapper's existing text
+is never overwritten when recalculating the review. Newlines are encoded as XML character references
+so the OSM changeset receives them rather than XML attribute normalization turning them into spaces.
+After a successful upload, the comment state is cleared. The next review therefore generates a fresh
+default from its own plan instead of reusing the description of the previous changeset.
+
 ## Sending the changeset
 
 Three upstream calls, all server-side because the token is in an httpOnly cookie: create the changeset,
@@ -208,6 +249,13 @@ so there is no partial state to reconcile.
 
 Errors block the upload; warnings are for a reviewer to accept or fix. Where an upstream rule exists we follow it rather than inventing one — numeric formats from JOSM's `numeric.mapcss`, geometry rules from its `geometry.mapcss` and validation tests, coverage from Simple 3D Buildings.
 
+Geometry findings carry the exact location of the defect. **Show** closes the review, selects the
+affected element, zooms to that coordinate and leaves a red marker on the map. A
+`self-intersecting-way` names the two one-based edge indexes that meet. **Fix** is offered only for
+the unambiguous local backtrack `A → B → C → D` where C lies on A-B and removing B makes the entire
+ring simple; it removes that corner from the affected ring and immediately rebuilds the review.
+General bow-ties and repeated paths have more than one plausible repair and remain manual.
+
 ### What the checks are allowed to complain about
 
 Only what the changeset writes. Real OSM buildings carry tagging and geometry from years of other
@@ -232,17 +280,16 @@ not turn into a lecture about somebody else's work, still less block an upload:
 | `changeset-too-large`                                                               | Over the API's 10 000 elements per changeset; it has to be split.                                                                                                              |
 | `way-too-many-nodes`                                                                | Over the API's 2 000 nodes per way.                                                                                                                                            |
 | `node-version-unknown`                                                              | A dragged corner's node has no version in the loaded data, so moving it could overwrite a newer edit.                                                                          |
-| `node-merge-unsupported`                                                            | A corner was dragged exactly onto another node, which would stack two in one place.                                                                                            |
 | `node-move-conflict`                                                                | The pending changes drag one node to two different places.                                                                                                                     |
 | `way-not-closed`                                                                    | An area way must be closed and have at least three corners (JOSM `UnclosedWays`).                                                                                              |
 | `duplicated-way-nodes`                                                              | The same node listed twice in a row (JOSM `DuplicatedWayNodes`).                                                                                                               |
 | `self-touching-way`                                                                 | The same node visited twice, so the outline touches itself.                                                                                                                    |
-| `self-intersecting-way`                                                             | A ring that crosses itself (JOSM `SelfIntersectingWay`).                                                                                                                       |
+| `self-intersecting-way`                                                             | A ring that crosses or touches itself (JOSM `SelfIntersectingWay`); each crossing reports its exact location and edge indexes.                                                 |
 | `degenerate-ring`                                                                   | A ring with fewer than three corners, before or after node resolution.                                                                                                         |
 | `part-outside-outline`                                                              | A `building:part` this changeset writes reaching outside its outline (JOSM: `area[building] ⧉ area[building:part]`, "Overlapping buildings"). Pre-existing parts warn instead. |
 | `multipolygon-without-outer`, `multipolygon-member-role`                            | A created multipolygon must have an `outer` member and only `outer`/`inner` roles.                                                                                             |
 | `element-not-loaded`, `missing-version`, `missing-node-list`, `missing-member-list` | The identity an upload needs is absent. Resending a relation without its members would empty it.                                                                               |
-| `relation-geometry-unsupported`                                                     | Geometry change on a multipolygon relation (see above).                                                                                                                        |
+| `relation-geometry-unsupported`                                                     | A multipolygon edit whose old boundary nodes cannot be mapped in order to their member-way paths (see above).                                                                  |
 | `negative-levels`, `levels-format`                                                  | `building:levels` must be a non-negative count, halves allowed: `/^(([0-9]\|[1-9][0-9]*)(\.5)?)$/` (JOSM).                                                                     |
 | `length-format`                                                                     | `height`, `min_height`, `roof:height` must parse as a length.                                                                                                                  |
 | `height-not-positive`                                                               | A height must be above zero.                                                                                                                                                   |
@@ -254,9 +301,9 @@ not turn into a lecture about somebody else's work, still less block an upload:
 | check                                        | rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `outline-not-covered`                        | Ground-level parts leave more than 2% and 2 m² of the outline uncovered. Simple 3D Buildings: "the entire building outline should be filled with `building:part` areas". Parts are **unioned**, not summed — `partsCoverage` in `src/lib/parts.ts` sums, which is right for its rendering threshold and wrong as a check.                                                                                                                                                                                           |
-| `overlapping-volumes`                        | Two parts overlap in plan **and** in their `[min_height, height]` range. 2D overlap is explicitly allowed; overlapping 3D volumes are what the wiki says to avoid.                                                                                                                                                                                                                                                                                                                                                  |
-| `part-above-building`                        | A part reaching above the outline's height; the outline should carry the overall height.                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `node-not-joined-to-host`                    | New nodes lying on a relation outline, which cannot take them.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `overlapping-volumes`                        | Two parts overlap in plan **and** in their `[min_height, height]` range. 2D overlap is explicitly allowed; overlapping 3D volumes are what the wiki says to avoid. When the shorter part starts at 0 m, the other part has a strictly higher top, and lifting that higher part above the shorter one removes the overlap, the warning offers **Fix**. It sets the higher part's `min_height` to the shorter part's effective top and immediately rebuilds the checks.                                               |
+| `part-above-building`                        | A part reaching above the outline's height; the outline should carry the overall height. The warning offers **Fix**, which adds or replaces the outline's `height` with the maximum effective top height across all associated parts and immediately rebuilds the pending changeset and checks.                                                                                                                                                                                                                     |
+| `node-not-joined-to-host`                    | New nodes lying on a relation ring whose owning member way cannot be resolved safely.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `disconnected-parts`                         | A part, or a small group of them, touching no other part of the building. Simple 3D Buildings allows parts to "be disjunct, depending on the building", so this is a heuristic: a wing across a courtyard is legitimate, a part sitting on its own is more often misplaced. Groups holding more than half the parts are treated as the main structure and not named. Adjacency is geometric — overlap, or a wall within 5 cm of another wall — so parts that abut without being glued still count as one structure. |
 | `tiny-part`                                  | A part under 1 m², usually a slice artefact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `too-large-building`                         | Footprint over 920 000 m² (JOSM's "Too large building").                                                                                                                                                                                                                                                                                                                                                                                                                                                            |

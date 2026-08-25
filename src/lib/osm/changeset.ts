@@ -1,8 +1,13 @@
 import type { Feature, FeatureCollection } from "geojson";
 import type { BuildingProperties, LngLat } from "../buildings";
 import type { EditMap } from "../edits";
-import type { CreatedPartMap, EditableGeometry, GeometryEditMap } from "../geometry-edits";
-import { closestPointOnSegment, openRing } from "../geometry";
+import {
+  type CreatedPartMap,
+  type EditableGeometry,
+  type GeometryEditMap,
+  positionOnSegment,
+} from "../geometry-edits";
+import { openRing } from "../geometry";
 import { issue, type Issue } from "./issues";
 import {
   buildNodeIndex,
@@ -11,9 +16,10 @@ import {
   nodeAt,
   NODE_REUSE_METERS,
 } from "./nodes";
-import { coordinateKey, formatCoordinate, metersBetween, roundToOsmGrid } from "./precision";
+import { coordinateKey, formatCoordinate, roundToOsmGrid } from "./precision";
 import { drawnId } from "./ref";
-import { selectFromOsm } from "./select";
+import { OsmBuildingLookup } from "./building-lookup";
+import { relationMemberWays } from "./member-way";
 
 /**
  * Turn the local pending changes into the elements an OSM changeset would carry.
@@ -61,8 +67,9 @@ interface ChangesetWay {
   id: number;
   version?: number;
   action: "create" | "modify";
-  /** Closed node list: the first id is repeated at the end. */
+  /** Node list. Areas repeat the first id at the end; relation members may be open. */
   nodes: number[];
+  area: boolean;
   tags: Tags;
 }
 
@@ -103,7 +110,7 @@ export interface ChangesetPlan {
   entries: ChangesetEntry[];
   /** Vertices resolved onto a node that already exists in OSM. */
   reusedNodes: number;
-  /** Vertices that collapsed onto another new node at the same position. */
+  /** Drawn vertices or existing nodes that collapsed onto one surviving node. */
   mergedNodes: number;
   /** Existing nodes being moved to a new position rather than replaced. */
   movedNodes: number;
@@ -158,19 +165,92 @@ function ringsOf(geometry: EditableGeometry): LngLat[][][] {
   return polygons.map((rings) => rings.map((ring) => ring.map((p): LngLat => [p[0], p[1]])));
 }
 
+interface RoleRing {
+  role: "outer" | "inner";
+  coordinates: LngLat[];
+}
+
+function roleRingsOf(geometry: EditableGeometry): RoleRing[] {
+  return ringsOf(geometry).flatMap((rings) =>
+    rings.map((coordinates, index) => ({
+      role: index === 0 ? ("outer" as const) : ("inner" as const),
+      coordinates,
+    })),
+  );
+}
+
+function sameCoordinate(a: LngLat, b: LngLat): boolean {
+  return coordinateKey(roundToOsmGrid(a)) === coordinateKey(roundToOsmGrid(b));
+}
+
+function effectiveRing(ring: LngLat[], movedByCoordinate: Map<string, LngLat>): LngLat[] {
+  return ring.map((point) => movedByCoordinate.get(coordinateKey(roundToOsmGrid(point))) ?? point);
+}
+
 /**
- * How far along the segment `point` sits, or null when it is not on the segment.
- * Endpoints are excluded: a vertex on one would have matched that node exactly.
+ * Return a member's coordinates in the direction used by an assembled ring.
+ * Member ways may be reversed while a multipolygon is assembled, so their XML
+ * order cannot by itself tell us which edited arc belongs to them.
  */
-function positionOnSegment(point: LngLat, start: LngLat, end: LngLat): number | null {
-  const { at, closest } = closestPointOnSegment(point, start, end);
-  if (at <= 0 || at >= 1) return null;
-  return metersBetween(point, closest) <= NODE_REUSE_METERS ? at : null;
+function orientMemberInRing(memberCoordinates: LngLat[], assembledRing: LngLat[]): LngLat[] | null {
+  const ring = openRing(assembledRing);
+  const closed =
+    memberCoordinates.length >= 2 &&
+    sameCoordinate(memberCoordinates[0], memberCoordinates[memberCoordinates.length - 1]);
+  const member = closed ? openRing(memberCoordinates) : memberCoordinates;
+  if (ring.length === 0 || member.length < 2) return null;
+
+  const candidates = [member, [...member].reverse()];
+  for (const candidate of candidates) {
+    for (let start = 0; start < ring.length; start++) {
+      if (!sameCoordinate(ring[start], candidate[0])) continue;
+      const matches = candidate.every((point, offset) =>
+        sameCoordinate(ring[(start + offset) % ring.length], point),
+      );
+      if (!matches) continue;
+      if (closed && candidate.length !== ring.length) continue;
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract the edited arc owned by a member from its surviving anchor nodes.
+ * Extra vertices are accepted between consecutive anchors; every old anchor
+ * must remain, in order. That makes boundary insertion and an add-part detour
+ * deterministic without guessing from proximity.
+ */
+function editedMemberPath(
+  editedRing: LngLat[],
+  anchors: LngLat[],
+  closed: boolean,
+): LngLat[] | null {
+  const ring = openRing(editedRing);
+  if (ring.length === 0 || anchors.length < 2) return null;
+
+  for (let start = 0; start < ring.length; start++) {
+    if (!sameCoordinate(ring[start], anchors[0])) continue;
+    const path: LngLat[] = [ring[start]];
+    let anchorIndex = 1;
+    const limit = closed ? ring.length : ring.length - 1;
+    for (let offset = 1; offset <= limit; offset++) {
+      const point = ring[(start + offset) % ring.length];
+      path.push(point);
+      if (anchorIndex < anchors.length && sameCoordinate(point, anchors[anchorIndex])) {
+        anchorIndex++;
+      }
+      if (!closed && anchorIndex === anchors.length) return path;
+    }
+    if (closed && anchorIndex === anchors.length) return path;
+  }
+  return null;
 }
 
 export function buildChangeset(input: ChangesetInput): ChangesetPlan {
   const { features, tagEdits, geometryEdits, createdParts } = input;
   const index = buildNodeIndex(features);
+  const buildingLookup = new OsmBuildingLookup(features);
   const existingPositions = new Map<number, LngLat>();
   for (const node of index.byKey.values()) existingPositions.set(node.id, node.coordinates);
   const rawById = new Map<string, Feature>();
@@ -205,7 +285,12 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
    * believed they had moved. Modifying the node moves all of them with it.
    */
   const movedNodes = new Map<number, { node: ExistingNode; to: LngLat }>();
-  const movedToKey = new Map<string, ExistingNode>();
+  /** Existing nodes replaced by the node already occupying their snap target. */
+  const mergedExistingNodes = new Map<
+    number,
+    { node: ExistingNode; into: ExistingNode; to: LngLat }
+  >();
+  const movedToKey = new Map<string, { node: ExistingNode; kind: "merge" | "move" }>();
   for (const [ref, override] of Object.entries(geometryEdits)) {
     for (const move of override.movedNodes ?? []) {
       const from = roundToOsmGrid(move.from);
@@ -228,11 +313,43 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       }
       const occupant = nodeAt(index, to);
       if (occupant && occupant.id !== node.id) {
+        const previous = mergedExistingNodes.get(node.id);
+        if (previous && previous.into.id !== occupant.id) {
+          issues.push(
+            issue(
+              "error",
+              "node-move-conflict",
+              `Node ${node.id} is merged into two different nodes by the pending changes, so the upload cannot say which one is meant.`,
+              [ref],
+              to,
+            ),
+          );
+          continue;
+        }
+        const moved = movedNodes.get(node.id);
+        if (moved && coordinateKey(moved.to) !== coordinateKey(to)) {
+          issues.push(
+            issue(
+              "error",
+              "node-move-conflict",
+              `Node ${node.id} is dragged to two different places by the pending changes, so the upload cannot say which one is meant.`,
+              [ref],
+              to,
+            ),
+          );
+          continue;
+        }
+        mergedExistingNodes.set(node.id, { node, into: occupant, to });
+        movedToKey.set(coordinateKey(to), { node: occupant, kind: "merge" });
+        continue;
+      }
+      const merged = mergedExistingNodes.get(node.id);
+      if (merged && coordinateKey(merged.to) !== coordinateKey(to)) {
         issues.push(
           issue(
             "error",
-            "node-merge-unsupported",
-            `A dragged corner of ${ref} landed exactly on node ${occupant.id}, which would leave two nodes stacked in one place. Merging nodes is not supported yet; drag it a little off.`,
+            "node-move-conflict",
+            `Node ${node.id} is dragged to two different places by the pending changes, so the upload cannot say which one is meant.`,
             [ref],
             to,
           ),
@@ -253,7 +370,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         continue;
       }
       movedNodes.set(node.id, { node, to });
-      movedToKey.set(coordinateKey(to), node);
+      movedToKey.set(coordinateKey(to), { node, kind: "move" });
     }
   }
   for (const { node, to } of movedNodes.values()) {
@@ -276,7 +393,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
   const groupOf = (elementId: string): Set<string> => {
     const cached = groups.get(elementId);
     if (cached) return cached;
-    const selection = selectFromOsm(features, elementId);
+    const selection = buildingLookup.select(elementId);
     const group = new Set<string>([elementId]);
     if (selection) {
       group.add(selection.building.id);
@@ -294,26 +411,30 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     return entry;
   };
 
-  const resolveRing = (ring: LngLat[], ref: string, scope: Set<string>) => {
+  const resolveVertices = (vertices: LngLat[], ref: string, scope: Set<string>, close: boolean) => {
     const ids: number[] = [];
     const sharedWith = new Set<string>();
     let reused = 0;
     let created = 0;
     let moved = 0;
-    for (const vertex of openRing(ring)) {
+    for (const vertex of close ? openRing(vertices) : vertices) {
       const point = roundToOsmGrid(vertex);
       const relocated = movedToKey.get(coordinateKey(point));
       if (relocated) {
-        ids.push(relocated.id);
-        moved++;
-        for (const owner of relocated.ownerIds) if (owner !== ref) sharedWith.add(owner);
+        ids.push(relocated.node.id);
+        if (relocated.kind === "move") moved++;
+        else {
+          reused++;
+          reusedNodes++;
+        }
+        for (const owner of relocated.node.ownerIds) if (owner !== ref) sharedWith.add(owner);
         continue;
       }
       const found = findExistingNode(index, point, scope);
       // A node that has been dragged away is not here any more, whatever the
       // index built from the pre-edit data still says. Reusing it would list the
       // same node twice in one ring.
-      if (found && !movedNodes.has(found.node.id)) {
+      if (found && !movedNodes.has(found.node.id) && !mergedExistingNodes.has(found.node.id)) {
         ids.push(found.node.id);
         reused++;
         reusedNodes++;
@@ -336,8 +457,18 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       ids.push(id);
       created++;
     }
-    return { nodes: ids.length > 0 ? [...ids, ids[0]] : ids, reused, created, moved, sharedWith };
+    return {
+      nodes: close && ids.length > 0 ? [...ids, ids[0]] : ids,
+      reused,
+      created,
+      moved,
+      sharedWith,
+    };
   };
+  const resolveRing = (ring: LngLat[], ref: string, scope: Set<string>) =>
+    resolveVertices(ring, ref, scope, true);
+  const resolvePath = (path: LngLat[], ref: string, scope: Set<string>) =>
+    resolveVertices(path, ref, scope, false);
 
   /**
    * Plan the elements for one polygonal geometry. A single ring is one way;
@@ -375,6 +506,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         version: reuseOfExisting ? existing.version : undefined,
         action: reuseOfExisting ? "modify" : "create",
         nodes: resolved.nodes,
+        area: true,
         tags: wayTags,
       };
       ways.set(wayRef, way);
@@ -481,13 +613,192 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     if (!target) continue;
     const { properties, osmId, version } = target;
     if (properties.osm_type !== "way") {
-      // Ring geometry is assembled across member ways, so we cannot tell which
-      // member changed. Editing relation geometry needs its own slice.
+      const memberWays = relationMemberWays(properties.member_ways);
+      const base = tagsOf(properties);
+      const tags = mergeTags(base, tagEdits[ref]?.changed);
+      const changes = tagChanges(base, tags);
+      const members = properties.members;
+
+      const raw = rawById.get(ref);
+      if (
+        raw &&
+        (raw.geometry.type === "Polygon" || raw.geometry.type === "MultiPolygon") &&
+        memberWays.length > 0 &&
+        Array.isArray(members) &&
+        members.length > 0
+      ) {
+        const rawRings = roleRingsOf(raw.geometry);
+        const editedRings = roleRingsOf(override.geometry);
+        const movedByCoordinate = new Map<string, LngLat>();
+        const movedMemberNodeIds = new Set<number>();
+        let ambiguousMove = false;
+        for (const member of memberWays) {
+          for (const [index, point] of member.coordinates.entries()) {
+            const moved = movedNodes.get(member.nodes[index]);
+            const merged = mergedExistingNodes.get(member.nodes[index]);
+            const destination = moved?.to ?? merged?.to;
+            if (!destination) continue;
+            if (moved) movedMemberNodeIds.add(moved.node.id);
+            const key = coordinateKey(roundToOsmGrid(point));
+            const previous = movedByCoordinate.get(key);
+            if (previous && !sameCoordinate(previous, destination)) ambiguousMove = true;
+            movedByCoordinate.set(key, destination);
+          }
+        }
+
+        const ringPairs =
+          !ambiguousMove && rawRings.length === editedRings.length
+            ? rawRings.map((rawRing, index) => {
+                const editedRing = editedRings[index];
+                if (rawRing.role !== editedRing.role) return null;
+                const anchors = openRing(effectiveRing(rawRing.coordinates, movedByCoordinate));
+                return editedMemberPath(editedRing.coordinates, anchors, true)
+                  ? { raw: rawRing, edited: editedRing }
+                  : null;
+              })
+            : [];
+
+        if (ringPairs.length === rawRings.length && ringPairs.every((pair) => pair !== null)) {
+          const mappedMembers: {
+            member: (typeof memberWays)[number];
+            coordinates: LngLat[];
+            closed: boolean;
+          }[] = [];
+          let mappingFailed = false;
+
+          for (const member of memberWays) {
+            const pair = ringPairs.find(
+              (candidate) =>
+                candidate?.raw.role === member.role &&
+                orientMemberInRing(member.coordinates, candidate.raw.coordinates) !== null,
+            );
+            if (!pair) {
+              mappingFailed = true;
+              break;
+            }
+            const oriented = orientMemberInRing(member.coordinates, pair.raw.coordinates);
+            if (!oriented) {
+              mappingFailed = true;
+              break;
+            }
+            const closed = sameCoordinate(
+              member.coordinates[0],
+              member.coordinates[member.coordinates.length - 1],
+            );
+            const effectiveAnchors = oriented.map(
+              (point) =>
+                movedByCoordinate.get(coordinateKey(roundToOsmGrid(point))) ??
+                roundToOsmGrid(point),
+            );
+            const coordinates = editedMemberPath(pair.edited.coordinates, effectiveAnchors, closed);
+            if (!coordinates) {
+              mappingFailed = true;
+              break;
+            }
+            // Return to the way's original XML direction after using the
+            // assembled-ring direction to identify which edited arc it owns.
+            const sameDirection = sameCoordinate(oriented[0], openRing(member.coordinates)[0]);
+            mappedMembers.push({
+              member,
+              coordinates: sameDirection ? coordinates : [...coordinates].reverse(),
+              closed,
+            });
+          }
+
+          if (!mappingFailed) {
+            const scope = groupOf(ref);
+            const changedMemberRefs: string[] = [];
+            const entry = entryFor(ref, { ref, action: "modify", target: "its nodes only" });
+            entry.tagChanges = changes;
+            let inserted = 0;
+
+            for (const mapped of mappedMembers) {
+              const resolved = mapped.closed
+                ? resolveRing(mapped.coordinates, ref, scope)
+                : resolvePath(mapped.coordinates, ref, scope);
+              const unchanged =
+                resolved.nodes.length === mapped.member.nodes.length &&
+                resolved.nodes.every((node, index) => node === mapped.member.nodes[index]);
+              if (unchanged) continue;
+
+              const memberRef = `way/${mapped.member.id}`;
+              ways.set(memberRef, {
+                ref: memberRef,
+                id: mapped.member.id,
+                version: mapped.member.version,
+                action: "modify",
+                nodes: resolved.nodes,
+                area: mapped.closed,
+                tags: mapped.member.tags,
+              });
+              changedMemberRefs.push(memberRef);
+              inserted += Math.max(0, resolved.nodes.length - mapped.member.nodes.length);
+              entry.geometry = {
+                reusedNodes: (entry.geometry?.reusedNodes ?? 0) + resolved.reused,
+                newNodes: (entry.geometry?.newNodes ?? 0) + resolved.created,
+                movedNodes: (entry.geometry?.movedNodes ?? 0) + resolved.moved,
+                sharedWith: [
+                  ...new Set([...(entry.geometry?.sharedWith ?? []), ...resolved.sharedWith]),
+                ],
+              };
+            }
+
+            if (changes.length > 0) {
+              relations.set(ref, {
+                ref,
+                id: osmId,
+                version,
+                action: "modify",
+                members: (members as { type: string; ref: number; role: string }[]).map(
+                  (member) => ({
+                    type: member.type as OsmElementType,
+                    ref: member.ref,
+                    role: member.role,
+                  }),
+                ),
+                tags,
+              });
+            }
+            entry.target =
+              [...changedMemberRefs, ...(changes.length > 0 ? [ref] : [])].join(", ") ||
+              "its nodes only";
+            if (entry.geometry) entry.geometry.movedNodes = movedMemberNodeIds.size;
+            else if (movedMemberNodeIds.size > 0) {
+              entry.geometry = {
+                reusedNodes: 0,
+                newNodes: 0,
+                movedNodes: movedMemberNodeIds.size,
+                sharedWith: [],
+              };
+            }
+            if (inserted > 0) {
+              entry.notes.push(
+                `${inserted} new outline node${inserted === 1 ? " was" : "s were"} assigned to ${changedMemberRefs.length === 1 ? "its member way" : "their member ways"} between surviving boundary nodes.`,
+              );
+            }
+            if (movedMemberNodeIds.size > 0) {
+              entry.notes.push(
+                "Existing relation corners move through their nodes; the relation member list is unchanged.",
+              );
+            }
+            if (
+              changedMemberRefs.length === 0 &&
+              changes.length === 0 &&
+              movedMemberNodeIds.size === 0
+            ) {
+              entries.delete(ref);
+              dropped.push(ref);
+            }
+            continue;
+          }
+        }
+      }
+
       issues.push(
         issue(
           "error",
           "relation-geometry-unsupported",
-          `${ref} is a multipolygon relation; changing relation geometry is not supported yet.`,
+          `${ref} is a multipolygon relation whose edited outline cannot be mapped safely to its member ways. Existing boundary nodes must remain in the same order; reload it if the member data is stale.`,
           [ref],
         ),
       );
@@ -502,7 +813,11 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         ? "A hole was cut."
         : override.kind === "slice"
           ? "The footprint was sliced."
-          : "The footprint was reshaped.",
+          : override.kind === "add-part"
+            ? "The building outline was expanded for a new part."
+            : override.kind === "glue"
+              ? "A new corner on one of its walls was added to this way, so the wall is shared rather than crossed."
+              : "The footprint was reshaped.",
     );
     planGeometry(ref, override.geometry, tags, { type: "way", id: osmId, version }, entry);
   }
@@ -539,6 +854,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         version,
         action: "modify",
         nodes: nodeIds as number[],
+        area: true,
         tags,
       });
       continue;
@@ -585,7 +901,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     relations: [...relations.values()],
     entries: [...entries.values()].sort((a, b) => a.ref.localeCompare(b.ref)),
     reusedNodes,
-    mergedNodes,
+    mergedNodes: mergedNodes + mergedExistingNodes.size,
     movedNodes: movedNodes.size,
     dropped,
     issues,
@@ -685,20 +1001,26 @@ function glueNewNodes(context: {
           : raw.geometry.type === "MultiPolygon"
             ? raw.geometry.coordinates
             : [];
-      const touching = candidates.filter((node) =>
-        rings.some((polygon) =>
-          polygon.some((edge) =>
-            edge.some(
-              (point, i) =>
-                i > 0 &&
-                positionOnSegment(
-                  node.coordinates,
-                  [edge[i - 1][0], edge[i - 1][1]],
-                  [point[0], point[1]],
-                ) !== null,
+      const memberWayRefs = relationMemberWays(properties.member_ways).map(
+        (member) => `way/${member.id}`,
+      );
+      const touching = candidates.filter(
+        (node) =>
+          !memberWayRefs.some((memberRef) => ways.get(memberRef)?.nodes.includes(node.id)) &&
+          rings.some((polygon) =>
+            polygon.some((edge) =>
+              edge.some(
+                (point, i) =>
+                  i > 0 &&
+                  positionOnSegment(
+                    node.coordinates,
+                    [edge[i - 1][0], edge[i - 1][1]],
+                    [point[0], point[1]],
+                    NODE_REUSE_METERS,
+                  ) !== null,
+              ),
             ),
           ),
-        ),
       );
       if (touching.length > 0) {
         issues.push(
@@ -719,7 +1041,12 @@ function glueNewNodes(context: {
     for (const node of candidates) {
       if (nodeIds.includes(node.id)) continue;
       for (let i = 1; i < hostRing.length; i++) {
-        const at = positionOnSegment(node.coordinates, hostRing[i - 1], hostRing[i]);
+        const at = positionOnSegment(
+          node.coordinates,
+          hostRing[i - 1],
+          hostRing[i],
+          NODE_REUSE_METERS,
+        );
         if (at === null) continue;
         const list = insertions.get(i - 1) ?? [];
         list.push({ at, id: node.id });
@@ -748,6 +1075,7 @@ function glueNewNodes(context: {
         id: osmId,
         version,
         action: "modify" as const,
+        area: true,
         tags: (properties.tags ?? {}) as Tags,
       }),
       nodes: next,
@@ -773,11 +1101,16 @@ export function changesetSize(plan: ChangesetPlan): number {
 }
 
 function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return (
+    value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      // XML normalizes literal newlines in attributes to spaces. Character
+      // references preserve the multiline changeset comment OSM receives.
+      .replace(/\r\n?|\n/g, "&#10;")
+  );
 }
 
 function tagXml(tags: Tags, indent: string): string {

@@ -1,13 +1,7 @@
-import type { Feature, FeatureCollection } from "geojson";
-import type {
-  BuildingElement,
-  BuildingProperties,
-  BuildingSelection,
-  BuildingWithParts,
-} from "../buildings";
-import { toFootprints } from "../geometry";
-import { belongsToBuilding, overlapFraction } from "../parts";
-import { assembleSelection } from "../selection";
+import type { FeatureCollection } from "geojson";
+import type { BuildingSelection } from "../buildings";
+import { assembleSelection, nearbyBuildings, retargetSelection } from "../selection";
+import { OsmBuildingLookup } from "./building-lookup";
 
 /**
  * Build a selection from live OSM features. Unlike Overture, OSM has no
@@ -15,19 +9,37 @@ import { assembleSelection } from "../selection";
  * building outline it sits inside — so pairing is a geometric test.
  */
 
-function toElement(feature: Feature): BuildingElement | null {
-  const properties = (feature.properties ?? {}) as BuildingProperties;
-  const id = properties.id;
-  if (typeof id !== "string") return null;
-  if (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon") return null;
-  const polygons = toFootprints(feature.geometry);
-  if (polygons.length === 0) return null;
-  return { id, properties, polygons };
+class OsmMapSelectionLookup {
+  private readonly lookup: OsmBuildingLookup;
+  private readonly contexts = new Map<string, BuildingSelection>();
+
+  constructor(collection: FeatureCollection) {
+    this.lookup = new OsmBuildingLookup(collection);
+  }
+
+  select(elementId: string): BuildingSelection | null {
+    const group = this.lookup.select(elementId);
+    if (!group) return null;
+
+    let context = this.contexts.get(group.building.id);
+    if (!context) {
+      // Associating every loaded building with every loaded part dominated the
+      // click handler. Bounds and distance are enough to choose the at-most-60
+      // context outlines; run exact polygon overlap only for those groups.
+      const nearby = nearbyBuildings(group.building, this.lookup.buildings);
+      context = assembleSelection(
+        group,
+        nearby.map((building) => this.lookup.groupForBuilding(building)),
+        group.building,
+      );
+      this.contexts.set(group.building.id, context);
+    }
+    return retargetSelection(context, group.selected);
+  }
 }
 
-function partsInside(building: BuildingElement, parts: BuildingElement[]): BuildingElement[] {
-  return parts.filter((part) => belongsToBuilding(part, building));
-}
+/** One parsed and geometrically associated lookup per immutable displayed snapshot. */
+const lookups = new WeakMap<FeatureCollection, OsmMapSelectionLookup>();
 
 /**
  * Assemble the clicked building or part, its parent building, sibling parts,
@@ -37,35 +49,10 @@ export function selectFromOsm(
   collection: FeatureCollection,
   elementId: string,
 ): BuildingSelection | null {
-  const buildings: BuildingElement[] = [];
-  const parts: BuildingElement[] = [];
-  for (const feature of collection.features) {
-    const element = toElement(feature);
-    if (!element) continue;
-    if (element.properties.role === "part") parts.push(element);
-    else buildings.push(element);
+  let lookup = lookups.get(collection);
+  if (!lookup) {
+    lookup = new OsmMapSelectionLookup(collection);
+    lookups.set(collection, lookup);
   }
-
-  const withParts = (building: BuildingElement): BuildingWithParts => ({
-    building,
-    parts: partsInside(building, parts),
-  });
-
-  const selectedBuilding = buildings.find((building) => building.id === elementId);
-  const selectedPart = parts.find((part) => part.id === elementId);
-  const selected = selectedBuilding ?? selectedPart;
-  if (!selected) return null;
-
-  const parent = selectedBuilding
-    ? selectedBuilding
-    : buildings
-        .filter((building) => belongsToBuilding(selected, building))
-        .sort((a, b) => overlapFraction(selected, b) - overlapFraction(selected, a))[0];
-  const target = parent ? withParts(parent) : { building: selected, parts: [] };
-
-  return assembleSelection(
-    target,
-    buildings.filter((building) => building.id !== target.building.id).map(withParts),
-    selected,
-  );
+  return lookup.select(elementId);
 }

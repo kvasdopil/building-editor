@@ -1,6 +1,7 @@
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import type { BuildingProperties, LngLat } from "../buildings";
 import { pointInRing, ringCenter } from "../geometry";
+import type { RelationMemberWay } from "./member-way";
 
 /**
  * Turns an OSM API `/map.json` response into building and building:part
@@ -101,6 +102,10 @@ export function normalizeOsmTags(tags: OsmTags, role: "building" | "part"): Buil
 
   if (tags["roof:shape"]) properties.roof_shape = tags["roof:shape"];
 
+  if (tags["roof:orientation"]) properties.roof_orientation = tags["roof:orientation"];
+
+  if (tags["roof:direction"]) properties.roof_direction = tags["roof:direction"];
+
   const roofHeight = parseMeters(tags["roof:height"]);
   if (roofHeight !== undefined) properties.roof_height = roofHeight;
 
@@ -178,6 +183,7 @@ function feature(
   role: "building" | "part",
   geometry: Polygon | MultiPolygon,
   nodes: Map<number, OsmNode>,
+  memberWays?: RelationMemberWay[],
 ): Feature<Polygon | MultiPolygon> {
   const tags = element.tags ?? {};
   return {
@@ -204,6 +210,10 @@ function feature(
       // A relation modify must resend the full member list, so keep it. Ring
       // geometry is assembled across members, so it carries no node identity.
       members: element.type === "relation" ? element.members : undefined,
+      // Unlike the assembled GeoJSON rings, these retain which upstream way
+      // owns each node. Slice can therefore insert a shared boundary node into
+      // the member way without rewriting or guessing the relation topology.
+      member_ways: element.type === "relation" ? memberWays : undefined,
     },
   };
 }
@@ -254,6 +264,26 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
     if (outers.length === 0) continue;
     const inners = assembleRings(segmentsFor("inner"));
 
+    const memberWays = relation.members
+      .filter((member) => member.type === "way")
+      .map((member): RelationMemberWay | null => {
+        const way = ways.get(member.ref);
+        if (!way) return null;
+        const coordinates = way.nodes.map((id) => nodes.get(id));
+        if (coordinates.some((node) => node === undefined)) return null;
+        return {
+          id: way.id,
+          version: way.version,
+          role: member.role || "outer",
+          nodes: [...way.nodes],
+          coordinates: coordinates.map((node) => [node!.lon, node!.lat]),
+          node_versions: way.nodes.map((id) => nodes.get(id)?.version ?? 0),
+          node_tags: taggedNodes(way, nodes),
+          tags: { ...way.tags },
+        };
+      })
+      .filter((member): member is RelationMemberWay => member !== null);
+
     const polygons: LngLat[][][] = outers.map((outer) => [outer]);
     for (const inner of inners) {
       const center = ringCenter(inner);
@@ -261,7 +291,14 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
       host.push(inner);
     }
     features.push(
-      feature("relation", relation, role, { type: "MultiPolygon", coordinates: polygons }, nodes),
+      feature(
+        "relation",
+        relation,
+        role,
+        { type: "MultiPolygon", coordinates: polygons },
+        nodes,
+        memberWays,
+      ),
     );
   }
 

@@ -23,6 +23,46 @@ function footprintFeature(
   return { ...elementFeature(element), properties: { id: element.id, role } };
 }
 
+/** Nearest building outlines eligible for 3D context, before parts are associated. */
+export function nearbyBuildings(
+  target: BuildingElement,
+  candidates: BuildingElement[],
+): BuildingElement[] {
+  const targetBounds = elementBounds(target);
+  const searchArea = padBounds(targetBounds, NEIGHBOR_PADDING_M);
+  const origin = boundsCenter(targetBounds);
+  const cosLat = Math.cos((origin[1] * Math.PI) / 180);
+
+  return candidates
+    .filter((candidate) => candidate.id !== target.id)
+    .map((candidate) => ({ candidate, bounds: elementBounds(candidate) }))
+    .filter(({ bounds }) => boundsOverlap(bounds, searchArea))
+    .map(({ candidate, bounds }) => ({
+      candidate,
+      distance: distanceSq(boundsCenter(bounds), origin, cosLat),
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, MAX_NEIGHBORS)
+    .map(({ candidate }) => candidate);
+}
+
+/** Change only the active entity while retaining its parent's assembled 3D context. */
+export function retargetSelection(
+  selection: BuildingSelection,
+  selected: BuildingElement,
+): BuildingSelection {
+  const wholeBuilding = selected.id === selection.building.id;
+  const outline = featureCollection(
+    wholeBuilding
+      ? [
+          footprintFeature(selection.building, "building"),
+          ...selection.parts.map((part) => footprintFeature(part, "part")),
+        ]
+      : [footprintFeature(selected, "part")],
+  );
+  return { ...selection, selected, outline };
+}
+
 /**
  * Finish a selection: pick the nearest neighboring buildings within
  * `NEIGHBOR_PADDING_M` as 3D context and build the map highlight outline.
@@ -33,31 +73,21 @@ export function assembleSelection(
   candidates: BuildingWithParts[],
   selected: BuildingElement = target.building,
 ): BuildingSelection {
-  const targetBounds = elementBounds(target.building);
-  const searchArea = padBounds(targetBounds, NEIGHBOR_PADDING_M);
-  const origin = boundsCenter(targetBounds);
-  const cosLat = Math.cos((origin[1] * Math.PI) / 180);
-
-  const neighbors = candidates
-    .filter((candidate) => candidate.building.id !== target.building.id)
-    .map((candidate) => ({ candidate, bounds: elementBounds(candidate.building) }))
-    .filter(({ bounds }) => boundsOverlap(bounds, searchArea))
-    .map(({ candidate, bounds }) => ({
-      candidate,
-      distance: distanceSq(boundsCenter(bounds), origin, cosLat),
-    }))
-    .sort((a, b) => a.distance - b.distance)
-    .slice(0, MAX_NEIGHBORS)
-    .map(({ candidate }) => candidate);
-
-  const wholeBuilding = selected.id === target.building.id;
-  const outline = featureCollection(
-    wholeBuilding
-      ? [
-          footprintFeature(target.building, "building"),
-          ...target.parts.map((part) => footprintFeature(part, "part")),
-        ]
-      : [footprintFeature(selected, "part")],
+  const byId = new Map(candidates.map((candidate) => [candidate.building.id, candidate] as const));
+  const neighbors = nearbyBuildings(
+    target.building,
+    candidates.map((candidate) => candidate.building),
+  ).flatMap((building) => {
+    const candidate = byId.get(building.id);
+    return candidate ? [candidate] : [];
+  });
+  return retargetSelection(
+    {
+      ...target,
+      selected: target.building,
+      neighbors,
+      outline: featureCollection([]),
+    },
+    selected,
   );
-  return { ...target, selected, neighbors, outline };
 }

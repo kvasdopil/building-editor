@@ -23,16 +23,25 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
 import { ChangesSidebar } from "./ChangesSidebar";
 import { SubmitDialog } from "./SubmitDialog";
+import { addPartToBuilding } from "@/lib/add-part";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
 import {
   applyEditsToFeatureCollection,
+  applyEditsToSelection,
   type EditMap,
   type PendingGeometry,
   useBuildingEdits,
   usePendingGeometry,
 } from "@/lib/edits";
 import type { BuildingElement, BuildingSelection, LngLat } from "@/lib/buildings";
-import { pointInRing, elementBounds, openRing, padBounds, toFootprints } from "@/lib/geometry";
+import {
+  boundsCenter,
+  pointInRing,
+  elementBounds,
+  openRing,
+  padBounds,
+  toFootprints,
+} from "@/lib/geometry";
 import { useSelectionHash } from "@/lib/use-selection-hash";
 import {
   applyGeometryEdits,
@@ -42,20 +51,40 @@ import {
   type EditableGeometry,
   geometryHasVertex,
   type GeometryEditMap,
+  geometryVertices,
   insertGeometryVertex,
+  mergeSharedGeometryVertices,
   moveSharedGeometryVertex,
   type NodeMove,
   recordNodeMove,
+  removeGeometryRingNode,
+  subtractHoleFromGeometry,
+  weldNewVertices,
+  weldVerticesIntoGeometries,
 } from "@/lib/geometry-edits";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
 import { drawnId, drawnRef, parseOsmRef } from "@/lib/osm/ref";
-import { roundToOsmGrid } from "@/lib/osm/precision";
+import { relationMemberWays } from "@/lib/osm/member-way";
+import { NODE_REUSE_METERS } from "@/lib/osm/nodes";
+import type { IssueFix } from "@/lib/osm/issues";
+import { coordinateKey, roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
 import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
+import { PART_ROOF_KEYS } from "@/lib/part-tags";
+import {
+  edgeNormalRoofDirection,
+  isCompassRoofDirection,
+  minimumRoofFrame,
+  parseRoofDirection,
+  roofCenter,
+  roofFrameElement,
+  type Point2,
+} from "@/lib/roofs";
 import { BUILDINGS_PMTILES_URL } from "@/lib/overture";
 import { sliceBuilding } from "@/lib/slice";
 import type { LidarCloud } from "@/lib/lidar";
 import { LidarMapLayer } from "@/lib/lidar-map-layer";
+import { type Lod1Match, lod1TilesFor, matchLod1 } from "@/lib/lod1";
 
 const MIN_BUILDING_ZOOM = 10;
 const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
@@ -113,6 +142,41 @@ const LEGEND: [keyof typeof BUILDING_COLORS, string][] = [
 ];
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
+const LOD1_SNAP_TARGET = "lod1-reference";
+
+/** Fetch the LOD1 blocks under the selected building and pick the best match. */
+function useLod1(selection: BuildingSelection | null): Lod1Match | null {
+  const selectedId =
+    selection && selection.selected.properties.role !== "part" ? selection.selected.id : null;
+  const [result, setResult] = useState<{ selectedId: string; match: Lod1Match | null } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!selection || !selectedId) return;
+    let cancelled = false;
+    void Promise.all(
+      lod1TilesFor(selection.selected).map((tile) =>
+        fetch(`/api/lod1/tile/${tile.z}/${tile.x}/${tile.y}`)
+          .then((response) =>
+            response.ok ? (response.json() as Promise<FeatureCollection>) : null,
+          )
+          .catch(() => null),
+      ),
+    ).then((collections) => {
+      if (cancelled) return;
+      const usable = collections.filter((collection): collection is FeatureCollection =>
+        Boolean(collection),
+      );
+      setResult({ selectedId, match: matchLod1(selection.selected, usable) });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, selection]);
+
+  return result?.selectedId === selectedId ? result.match : null;
+}
 
 interface HoleDraft {
   targetId: string | null;
@@ -129,6 +193,14 @@ interface SliceDraft {
 }
 
 const EMPTY_SLICE_DRAFT: SliceDraft = { targetId: null, mode: null, nodes: [], snap: null };
+
+interface AddPartDraft {
+  targetId: string | null;
+  nodes: LngLat[];
+  snap: BoundarySnap | null;
+}
+
+const EMPTY_ADD_PART_DRAFT: AddPartDraft = { targetId: null, nodes: [], snap: null };
 
 /** Raw RGBA square used by MapLibre's symbol layer for editable vertices. */
 function squareImage(
@@ -173,6 +245,90 @@ function hollowSquareImage(size: number) {
   return { width: size, height: size, data };
 }
 
+function distanceToSegment(
+  x: number,
+  y: number,
+  start: readonly [number, number],
+  end: readonly [number, number],
+): number {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  const amount =
+    lengthSquared === 0
+      ? 0
+      : Math.max(0, Math.min(1, ((x - start[0]) * dx + (y - start[1]) * dy) / lengthSquared));
+  return Math.hypot(x - (start[0] + amount * dx), y - (start[1] + amount * dy));
+}
+
+/** White-cased chevron whose sharp corner points toward the roof slope. */
+function roofDirectionImage(size: number) {
+  const data = new Uint8Array(size * size * 4);
+  const tip: [number, number] = [(size - 1) / 2, 2];
+  const left: [number, number] = [3, size - 5];
+  const right: [number, number] = [size - 4, size - 5];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const distance = Math.min(
+        distanceToSegment(x, y, tip, left),
+        distanceToSegment(x, y, tip, right),
+      );
+      if (distance <= 3.25) data.set([255, 255, 255, 245], (y * size + x) * 4);
+      if (distance <= 1.6) data.set([124, 58, 237, 255], (y * size + x) * 4);
+    }
+  }
+  return { width: size, height: size, data };
+}
+
+/** Local east/south points keep map bearings aligned with the Three.js roof frame. */
+function localRoofOutlines(element: BuildingElement, origin: LngLat): Point2[][] {
+  const cosLat = Math.max(Math.cos((origin[1] * Math.PI) / 180), 0.01);
+  return element.polygons.map((footprint) =>
+    openRing(footprint.outer).map(
+      ([lon, lat]): Point2 => [(lon - origin[0]) * cosLat, origin[1] - lat],
+    ),
+  );
+}
+
+/** Selected skillion centroid and its resolved downhill map bearing. */
+function skillionDirectionFeatures(selection: BuildingSelection | null): FeatureCollection {
+  if (!selection) return EMPTY;
+  const element = selection.selected;
+  const parent = selection.building;
+  const shape = element.properties.roof_shape ?? parent.properties.roof_shape;
+  if (shape !== "skillion") return EMPTY;
+
+  const origin = boundsCenter(elementBounds(element));
+  const center = roofCenter(localRoofOutlines(element, origin));
+  const cosLat = Math.max(Math.cos((origin[1] * Math.PI) / 180), 0.01);
+  const coordinates: LngLat = [origin[0] + center[0] / cosLat, origin[1] - center[1]];
+  const rawDirection = element.properties.roof_direction ?? parent.properties.roof_direction;
+  const requested = parseRoofDirection(rawDirection);
+  const frameElement = roofFrameElement(element, parent);
+  const frameOutlines = localRoofOutlines(frameElement, origin);
+
+  let bearing = requested;
+  if (bearing !== undefined && isCompassRoofDirection(rawDirection)) {
+    bearing = edgeNormalRoofDirection(frameOutlines, roofCenter(frameOutlines), bearing);
+  } else if (bearing === undefined) {
+    const frame = minimumRoofFrame(frameOutlines);
+    if (!frame) return EMPTY;
+    bearing = (Math.atan2(frame.across[0], -frame.across[1]) * 180) / Math.PI;
+    if (bearing < 0) bearing += 360;
+  }
+
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { bearing },
+        geometry: { type: "Point", coordinates },
+      },
+    ],
+  };
+}
+
 function draftFeatures(
   nodes: LngLat[],
   closePreview: boolean,
@@ -213,12 +369,34 @@ function draftFeatures(
 /** One point per footprint vertex, without GeoJSON's repeated closing coordinate. */
 function selectionNodeFeatures(selection: BuildingSelection | null): FeatureCollection {
   if (!selection) return EMPTY;
+  const taggedCoordinates = new Set<string>();
+  const properties = selection.selected.properties;
+  const nodeIds = Array.isArray(properties.node_ids) ? (properties.node_ids as number[]) : [];
+  const nodeTags = (properties.node_tags ?? {}) as Record<string, Record<string, string>>;
+  const outer = selection.selected.polygons[0]?.outer ?? [];
+  nodeIds.forEach((id, index) => {
+    if (Object.keys(nodeTags[id] ?? {}).length > 0 && outer[index]) {
+      taggedCoordinates.add(coordinateKey(roundToOsmGrid(outer[index])));
+    }
+  });
+  for (const member of relationMemberWays(properties.member_ways)) {
+    member.nodes.forEach((id, index) => {
+      if (Object.keys(member.node_tags?.[id] ?? {}).length > 0 && member.coordinates[index]) {
+        taggedCoordinates.add(coordinateKey(roundToOsmGrid(member.coordinates[index])));
+      }
+    });
+  }
   const features: Feature<Point>[] = selection.selected.polygons.flatMap(
     (footprint, polygonIndex) =>
       [footprint.outer, ...footprint.holes].flatMap((ring, ringIndex) =>
         openRing(ring).map((coordinates, vertexIndex) => ({
           type: "Feature",
-          properties: { polygonIndex, ringIndex, vertexIndex },
+          properties: {
+            polygonIndex,
+            ringIndex,
+            vertexIndex,
+            tagged: taggedCoordinates.has(coordinateKey(roundToOsmGrid(coordinates))),
+          },
           geometry: { type: "Point", coordinates },
         })),
       ),
@@ -278,6 +456,40 @@ function nearestSelectionNode(
   };
 }
 
+/** Every corner in the matched generalized LOD1 footprint. */
+function lod1Nodes(match: Lod1Match | null): LngLat[] {
+  if (!match) return [];
+  return match.outline.features.flatMap((feature) =>
+    feature.geometry.type === "Polygon" || feature.geometry.type === "MultiPolygon"
+      ? geometryVertices(feature.geometry)
+      : [],
+  );
+}
+
+/** Nearest LOD1 reference node within a screen-space snap tolerance. */
+function nearestLod1Node(
+  map: MaplibreMap,
+  nodes: LngLat[],
+  point: { x: number; y: number },
+  tolerance = 9,
+): BoundarySnap | null {
+  let nearest: { coordinates: LngLat; distance: number } | null = null;
+  for (const coordinates of nodes) {
+    const projected = map.project(coordinates);
+    const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
+    if (distance > tolerance || (nearest && distance >= nearest.distance)) continue;
+    nearest = { coordinates, distance };
+  }
+  return nearest
+    ? {
+        targetId: LOD1_SNAP_TARGET,
+        coordinates: roundToOsmGrid(nearest.coordinates),
+        distance: nearest.distance,
+        kind: "node",
+      }
+    : null;
+}
+
 function geometryOf(element: BuildingElement): EditableGeometry {
   return {
     type: "MultiPolygon",
@@ -301,6 +513,21 @@ function geometriesSharingVertex(
     )
       continue;
     geometries[id] = feature.geometry;
+  }
+  return geometries;
+}
+
+/** Every editable polygon in the currently loaded local model, keyed by entity. */
+function polygonalGeometries(collection: FeatureCollection): GeometryByEntity {
+  const geometries: GeometryByEntity = {};
+  for (const feature of collection.features) {
+    const id = feature.properties?.id;
+    if (
+      typeof id === "string" &&
+      (feature.geometry.type === "Polygon" || feature.geometry.type === "MultiPolygon")
+    ) {
+      geometries[id] = feature.geometry;
+    }
   }
   return geometries;
 }
@@ -346,6 +573,8 @@ interface NodeDrag {
   coordinates: LngLat | null;
   originalGeometries: GeometryByEntity;
   geometries: GeometryByEntity;
+  snap: BoundarySnap | null;
+  gluedEntities: Set<string>;
 }
 
 interface SelectionSegment {
@@ -458,6 +687,10 @@ function selectionBoundaryRings(selection: BuildingSelection): LngLat[][] {
   );
 }
 
+function buildingOuterBoundaryRings(selection: BuildingSelection): LngLat[][] {
+  return selection.building.polygons.map((footprint) => footprint.outer);
+}
+
 function projectBoundaryRings(map: MaplibreMap, rings: LngLat[][]): ProjectedBoundaryNode[][] {
   return rings.map((ring) =>
     openRing(ring).map((coordinates) => {
@@ -472,12 +705,15 @@ function nearestProjectedBoundary(
   click: { x: number; y: number },
   targetId: string,
   tolerance: number,
+  excludedVertex?: LngLat,
 ): BoundarySnap | null {
   let nearestNode: BoundarySnap | null = null;
   let nearestEdge: BoundarySnap | null = null;
   const nodeTolerance = Math.min(tolerance, 9);
+  const excludedKey = excludedVertex ? coordinateKey(roundToOsmGrid(excludedVertex)) : undefined;
   for (const ring of projectedRings) {
     for (const node of ring) {
+      if (excludedKey === coordinateKey(roundToOsmGrid(node.coordinates))) continue;
       const distance = Math.hypot(click.x - node.x, click.y - node.y);
       if (distance > nodeTolerance || (nearestNode && distance >= nearestNode.distance)) continue;
       nearestNode = { targetId, coordinates: node.coordinates, distance, kind: "node" };
@@ -485,6 +721,12 @@ function nearestProjectedBoundary(
     for (let index = 0; index < ring.length; index++) {
       const start = ring[index];
       const end = ring[(index + 1) % ring.length];
+      if (
+        excludedKey &&
+        (excludedKey === coordinateKey(roundToOsmGrid(start.coordinates)) ||
+          excludedKey === coordinateKey(roundToOsmGrid(end.coordinates)))
+      )
+        continue;
       const dx = end.x - start.x;
       const dy = end.y - start.y;
       const lengthSquared = dx * dx + dy * dy;
@@ -519,10 +761,17 @@ function nearestBuildingBoundary(
   click: { x: number; y: number },
   tolerance = 12,
   target?: SliceBoundaryCache | null,
+  excludedVertex?: LngLat,
 ): BoundarySnap | null {
   if (target) {
     target.projected ??= projectBoundaryRings(map, target.rings);
-    return nearestProjectedBoundary(target.projected, click, target.targetId, tolerance);
+    return nearestProjectedBoundary(
+      target.projected,
+      click,
+      target.targetId,
+      tolerance,
+      excludedVertex,
+    );
   }
 
   const candidateIds = map
@@ -546,6 +795,7 @@ function nearestBuildingBoundary(
       click,
       id,
       tolerance,
+      excludedVertex,
     );
     if (!nearest) continue;
     if (nearest.kind === "node") {
@@ -637,9 +887,12 @@ function editorStyle(): StyleSpecification {
         attribution: "Buildings © Overture Maps Foundation",
       },
       live: { type: "geojson", data: EMPTY, attribution: "© OpenStreetMap contributors" },
+      lod1: { type: "geojson", data: EMPTY },
       selection: { type: "geojson", data: EMPTY },
       "selection-nodes": { type: "geojson", data: EMPTY },
       "selection-node-hover": { type: "geojson", data: EMPTY },
+      "roof-direction": { type: "geojson", data: EMPTY },
+      "validation-location": { type: "geojson", data: EMPTY },
     },
     layers: [
       {
@@ -658,6 +911,12 @@ function editorStyle(): StyleSpecification {
       ...footprintLayers({ id: "live-building", source: "live", live: true }),
       ...footprintLayers({ id: "live-part", source: "live", live: true, part: true }),
       {
+        id: "lod1-outline",
+        type: "line",
+        source: "lod1",
+        paint: { "line-color": "#d3d3d3", "line-width": 3, "line-opacity": 0.95 },
+      },
+      {
         id: "selection-casing",
         type: "line",
         source: "selection",
@@ -673,7 +932,10 @@ function editorStyle(): StyleSpecification {
         id: "selection-nodes",
         type: "circle",
         source: "selection-nodes",
-        paint: { "circle-color": "#000000", "circle-radius": 3 },
+        paint: {
+          "circle-color": ["case", ["==", ["get", "tagged"], true], "#f59e0b", "#000000"],
+          "circle-radius": 3,
+        },
       },
       {
         id: "selection-node-hover",
@@ -684,6 +946,40 @@ function editorStyle(): StyleSpecification {
           "circle-radius": 5,
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 2,
+        },
+      },
+      {
+        id: "roof-direction",
+        type: "symbol",
+        source: "roof-direction",
+        layout: {
+          "icon-image": "roof-direction-chevron",
+          "icon-rotate": ["get", "bearing"],
+          "icon-rotation-alignment": "map",
+          "icon-pitch-alignment": "map",
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+        },
+      },
+      {
+        id: "validation-location-casing",
+        type: "circle",
+        source: "validation-location",
+        paint: {
+          "circle-color": "#ffffff",
+          "circle-radius": 11,
+          "circle-opacity": 0.95,
+        },
+      },
+      {
+        id: "validation-location",
+        type: "circle",
+        source: "validation-location",
+        paint: {
+          "circle-color": "#e11d48",
+          "circle-radius": 7,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1.5,
         },
       },
     ],
@@ -752,28 +1048,35 @@ export function MapView() {
   });
   const [photos, setPhotos] = useState(false);
   const [lidar, setLidar] = useState(false);
+  const [lod1Visible, setLod1Visible] = useState(true);
   const [photoAdjustActive, setPhotoAdjustActive] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [cutHoleActive, setCutHoleActive] = useState(false);
   const [sliceActive, setSliceActive] = useState(false);
+  const [addPartActive, setAddPartActive] = useState(false);
   const [geometryEdits, setGeometryEdits] = useState<GeometryEditMap>({});
   const [createdParts, setCreatedParts] = useState<CreatedPartMap>({});
   const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
+  const lod1Match = useLod1(selection);
   const selectionBuildingId = selection?.building.id ?? null;
   const selectionRef = useRef<BuildingSelection | null>(selection);
   const [selectionBearing, setSelectionBearing] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [validationLocation, setValidationLocation] = useState<LngLat | null>(null);
   /** Pending-changes entity to select as soon as its tile is loaded. */
   const pendingSelectRef = useRef<string | null>(null);
   const cutHoleActiveRef = useRef(cutHoleActive);
   const sliceActiveRef = useRef(sliceActive);
+  const addPartActiveRef = useRef(addPartActive);
   const photoAdjustActiveRef = useRef(photoAdjustActive);
   const suppressSelectionClickRef = useRef(false);
   const holeDraftRef = useRef<HoleDraft>(EMPTY_HOLE_DRAFT);
   const sliceDraftRef = useRef<SliceDraft>(EMPTY_SLICE_DRAFT);
+  const addPartDraftRef = useRef<AddPartDraft>(EMPTY_ADD_PART_DRAFT);
   const sliceBoundaryCacheRef = useRef<SliceBoundaryCache | null>(null);
+  const addPartBoundaryCacheRef = useRef<SliceBoundaryCache | null>(null);
   const nextPartIdRef = useRef(1);
   const geometryEditsRef = useRef(geometryEdits);
   const createdPartsRef = useRef(createdParts);
@@ -781,6 +1084,7 @@ export function MapView() {
   const editsRef = useRef(edits.edits);
   cutHoleActiveRef.current = cutHoleActive;
   sliceActiveRef.current = sliceActive;
+  addPartActiveRef.current = addPartActive;
   photoAdjustActiveRef.current = photoAdjustActive;
   selectionRef.current = selection;
   geometryEditsRef.current = geometryEdits;
@@ -809,6 +1113,14 @@ export function MapView() {
   const submitInput = useMemo(
     () => ({ features: liveFeatures, tagEdits: edits.edits, geometryEdits, createdParts }),
     [createdParts, edits.edits, geometryEdits, liveFeatures],
+  );
+  const displayedFeatures = useMemo(
+    () => applyLocalEdits(liveFeatures, edits.edits, geometryEdits, createdParts),
+    [createdParts, edits.edits, geometryEdits, liveFeatures],
+  );
+  const effectiveSelection = useMemo(
+    () => (selection ? applyEditsToSelection(selection, edits.edits) : null),
+    [edits.edits, selection],
   );
 
   useEffect(() => {
@@ -890,7 +1202,12 @@ export function MapView() {
     });
 
     const setCursor = (cursor: string) => () => {
-      if (!cutHoleActiveRef.current && !sliceActiveRef.current && !photoAdjustActiveRef.current)
+      if (
+        !cutHoleActiveRef.current &&
+        !sliceActiveRef.current &&
+        !addPartActiveRef.current &&
+        !photoAdjustActiveRef.current
+      )
         instance.getCanvas().style.cursor = cursor;
     };
     instance.on("click", (event: MapMouseEvent) => {
@@ -898,7 +1215,12 @@ export function MapView() {
         suppressSelectionClickRef.current = false;
         return;
       }
-      if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
+      if (
+        cutHoleActiveRef.current ||
+        sliceActiveRef.current ||
+        addPartActiveRef.current ||
+        photoAdjustActiveRef.current
+      )
         return;
       // Selection is live-OSM only: the Overture overview is a snapshot we
       // cannot edit, and its fields are not OSM tags (ADR 0001).
@@ -945,6 +1267,7 @@ export function MapView() {
       }));
       const overlay = editorStyle();
       for (const [id, source] of Object.entries(overlay.sources)) instance.addSource(id, source);
+      instance.addImage("roof-direction-chevron", roofDirectionImage(27));
       const lidarBackground = overlay.layers.find((layer) => layer.id === "lidar-background");
       if (lidarBackground) instance.addLayer(lidarBackground);
       const lidarLayer = new LidarMapLayer();
@@ -1265,6 +1588,18 @@ export function MapView() {
     setSliceActive(false);
   }, [updateSliceDraft]);
 
+  const updateAddPartDraft = useCallback((draft: AddPartDraft) => {
+    addPartDraftRef.current = draft;
+    const source = mapRef.current?.getSource<GeoJSONSource>("hole-draft");
+    void source?.setData(draftFeatures(draft.nodes, true, draft.snap));
+  }, []);
+
+  const cancelAddPartDrawing = useCallback(() => {
+    addPartBoundaryCacheRef.current = null;
+    updateAddPartDraft(EMPTY_ADD_PART_DRAFT);
+    setAddPartActive(false);
+  }, [updateAddPartDraft]);
+
   const refreshDisplayedFeatures = useCallback(
     (nextGeometryEdits: GeometryEditMap, nextCreatedParts = createdPartsRef.current) => {
       const displayed = applyLocalEdits(
@@ -1422,6 +1757,56 @@ export function MapView() {
     [refreshDisplayedFeatures, selection],
   );
 
+  /** A part with an explicit roof shape owns it; the outline must stop supplying one. */
+  const clearParentRoofShape = useCallback(
+    (entity: string) => {
+      const feature = displayedFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === entity,
+      );
+      if (feature?.properties?.role !== "part") return;
+      const parentId =
+        typeof feature.properties.parent_id === "string"
+          ? feature.properties.parent_id
+          : selectFromOsm(displayedFeaturesRef.current, entity)?.building.id;
+      if (!parentId || parentId === entity) return;
+      const parent = displayedFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === parentId,
+      );
+      const effectiveTags = (parent?.properties?.tags ?? {}) as Record<string, string>;
+      if (!effectiveTags["roof:shape"]) return;
+      const rawParent = liveFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === parentId,
+      );
+      const rawTags = (rawParent?.properties?.tags ?? {}) as Record<string, string>;
+      edits.setTag(parentId, "roof:shape", "", rawTags["roof:shape"]);
+    },
+    [edits],
+  );
+
+  /** Store one tag edit and enforce roof-shape ownership when the entity is a part. */
+  const editEntityTag = useCallback(
+    (entity: string, key: string, value: string, currentValue?: string) => {
+      edits.setTag(entity, key, value, currentValue);
+      if (key === "roof:shape") clearParentRoofShape(entity);
+    },
+    [clearParentRoofShape, edits],
+  );
+
+  /** Remove roof details from an outline after its first parts receive explicit copies. */
+  const clearTransferredRoofTags = useCallback(
+    (building: BuildingElement) => {
+      const effectiveTags = (building.properties.tags ?? {}) as Record<string, string>;
+      const raw = liveFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === building.id,
+      );
+      const rawTags = (raw?.properties?.tags ?? {}) as Record<string, string>;
+      for (const key of PART_ROOF_KEYS) {
+        if (effectiveTags[key]) edits.setTag(building.id, key, "", rawTags[key]);
+      }
+    },
+    [edits],
+  );
+
   /**
    * Drop one pending property. What that means depends on where the property came
    * from: an override goes back to what OSM has, a drawn part's tag is simply
@@ -1463,13 +1848,96 @@ export function MapView() {
           ...((drawn.properties.tags ?? {}) as Record<string, string>),
           [property]: value,
         });
+        if (property === "roof:shape") clearParentRoofShape(entity);
         return;
       }
       // Keep the first-seen original, so reverting still restores what OSM has.
-      edits.setTag(entity, property, value, edits.edits[entity]?.original[property]);
+      editEntityTag(entity, property, value, edits.edits[entity]?.original[property]);
     },
-    [edits, updateDrawnPartTags],
+    [clearParentRoofShape, editEntityTag, edits.edits, updateDrawnPartTags],
   );
+
+  /** Apply a validator's deterministic correction without leaving review. */
+  const fixValidationIssue = useCallback(
+    (fix: IssueFix) => {
+      if (fix.kind === "set-tag") {
+        const source = liveFeaturesRef.current.features.find(
+          (feature) => feature.properties?.id === fix.entity,
+        );
+        const sourceTags = source?.properties?.tags as Record<string, string> | undefined;
+        edits.setTag(fix.entity, fix.key, fix.value, sourceTags?.[fix.key]);
+        setNotice(`Set ${fix.key}=${fix.value} on ${fix.entity}`);
+        return;
+      }
+
+      const feature = displayedFeaturesRef.current.features.find(
+        (candidate) => candidate.properties?.id === fix.entity,
+      );
+      if (
+        !feature ||
+        (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon")
+      ) {
+        setNotice(`Could not find ${fix.entity}'s current outline`);
+        return;
+      }
+      const geometry = removeGeometryRingNode(
+        feature.geometry,
+        fix.polygonIndex,
+        fix.ringIndex,
+        fix.nodeIndex,
+        fix.coordinate,
+      );
+      if (!geometry) {
+        setNotice("The outline changed; review it again before applying this fix");
+        return;
+      }
+
+      const drawn = createdPartsRef.current[fix.entity];
+      let nextCreatedParts = createdPartsRef.current;
+      let nextGeometryEdits = geometryEditsRef.current;
+      if (drawn) {
+        nextCreatedParts = {
+          ...createdPartsRef.current,
+          [fix.entity]: { ...drawn, geometry },
+        };
+      } else {
+        const previous = geometryEditsRef.current[fix.entity];
+        nextGeometryEdits = {
+          ...geometryEditsRef.current,
+          [fix.entity]: {
+            geometry,
+            kind: previous?.kind ?? "reshape",
+            movedNodes: previous?.movedNodes,
+          },
+        };
+      }
+      geometryEditsRef.current = nextGeometryEdits;
+      createdPartsRef.current = nextCreatedParts;
+      setGeometryEdits(nextGeometryEdits);
+      setCreatedParts(nextCreatedParts);
+      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      const selectedId = selectionRef.current?.selected.id;
+      if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+      setValidationLocation(null);
+      setNotice(`Removed the backtracking corner from ${fix.entity}`);
+    },
+    [edits, refreshDisplayedFeatures],
+  );
+
+  /** Close review, select the affected element, and mark the exact failing point. */
+  const locateValidationIssue = useCallback((at: LngLat, entity?: string) => {
+    const map = mapRef.current;
+    setSubmitOpen(false);
+    setValidationLocation(at);
+    if (entity) {
+      const next = selectFromOsm(displayedFeaturesRef.current, entity);
+      if (next && map) {
+        setSelectionBearing(map.getBearing());
+        setSelection(next);
+      }
+    }
+    map?.easeTo({ center: at, zoom: Math.max(map.getZoom(), 20), duration: 600 });
+  }, []);
 
   const finishHoleDrawing = useCallback(() => {
     const map = mapRef.current;
@@ -1490,22 +1958,60 @@ export function MapView() {
       setNotice("Could not find the target building");
       return;
     }
+    const targetSelection = selectFromOsm(displayedFeaturesRef.current, targetId);
     const geometry = cutHole(feature.geometry, nodes);
     if (!geometry) {
       setNotice("The hole must be a simple loop fully inside the building");
       return;
+    }
+    if (!targetSelection) {
+      setNotice("Could not find the target building and its parts");
+      return;
+    }
+
+    const partCuts = new Map<string, EditableGeometry>();
+    for (const part of targetSelection.parts) {
+      const cut = subtractHoleFromGeometry(geometryOf(part), nodes);
+      if (!cut) {
+        setNotice(`Could not cut the hole through ${part.id}`);
+        return;
+      }
+      if (!cut.changed) continue;
+      if (!cut.geometry) {
+        setNotice(`The hole would remove all of ${part.id}`);
+        return;
+      }
+      partCuts.set(part.id, cut.geometry);
     }
 
     // A drawn part is not in the raw tile data, so an override keyed by its id
     // would apply to nothing: its own geometry is the thing to change, the same
     // way Slice does it.
     const drawn = createdPartsRef.current[targetId];
-    const nextGeometryEdits: GeometryEditMap = drawn
-      ? geometryEditsRef.current
-      : { ...geometryEditsRef.current, [targetId]: { geometry, kind: "hole" } };
-    const nextCreatedParts = drawn
-      ? { ...createdPartsRef.current, [targetId]: { ...drawn, geometry } }
-      : createdPartsRef.current;
+    const previousTarget = geometryEditsRef.current[targetId];
+    const nextGeometryEdits: GeometryEditMap = { ...geometryEditsRef.current };
+    const nextCreatedParts = { ...createdPartsRef.current };
+    if (drawn) nextCreatedParts[targetId] = { ...drawn, geometry };
+    else {
+      nextGeometryEdits[targetId] = {
+        geometry,
+        kind: "hole",
+        movedNodes: previousTarget?.movedNodes,
+      };
+    }
+    for (const [partId, partGeometry] of partCuts) {
+      const drawnPart = nextCreatedParts[partId];
+      if (drawnPart) {
+        nextCreatedParts[partId] = { ...drawnPart, geometry: partGeometry };
+        continue;
+      }
+      const previous = nextGeometryEdits[partId];
+      nextGeometryEdits[partId] = {
+        geometry: partGeometry,
+        kind: "hole",
+        movedNodes: previous?.movedNodes,
+      };
+    }
     geometryEditsRef.current = nextGeometryEdits;
     createdPartsRef.current = nextCreatedParts;
     setGeometryEdits(nextGeometryEdits);
@@ -1518,7 +2024,11 @@ export function MapView() {
     }
     updateHoleDraft(EMPTY_HOLE_DRAFT);
     setCutHoleActive(false);
-    setNotice("Hole added");
+    setNotice(
+      partCuts.size === 0
+        ? "Hole added"
+        : `Hole added to the building and ${partCuts.size} underlying ${partCuts.size === 1 ? "part" : "parts"}`,
+    );
   }, [refreshDisplayedFeatures, updateHoleDraft]);
 
   const finishSliceDrawing = useCallback(() => {
@@ -1559,6 +2069,38 @@ export function MapView() {
       const id = drawnRef("way", nextPartIdRef.current++);
       nextCreatedParts[id] = createPartFeature(id, targetId, addition.geometry, addition.tags);
     }
+    if (target.parts.length === 0) clearTransferredRoofTags(target.building);
+
+    // A cut ends on a wall, and a wall is rarely one element's alone: the
+    // outline and the part on the other side own it too. Give them the new
+    // corner as well, or the pieces only look joined to their neighbours.
+    const group = [target.building, ...target.parts];
+    const untouched = Object.fromEntries(
+      group
+        .filter((element) => !(element.id in result.replacements))
+        .map((element) => [element.id, geometryOf(element)] as const),
+    );
+    const welds = weldNewVertices({
+      candidates: untouched,
+      existing: group.flatMap((element) => geometryVertices(geometryOf(element))),
+      produced: [
+        ...Object.values(result.replacements),
+        ...result.additions.map((addition) => addition.geometry),
+      ],
+      tolerance: NODE_REUSE_METERS,
+    });
+    for (const [id, geometry] of Object.entries(welds)) {
+      const created = nextCreatedParts[id];
+      if (created) nextCreatedParts[id] = { ...created, geometry };
+      else {
+        const previous = nextGeometryEdits[id];
+        nextGeometryEdits[id] = {
+          geometry,
+          kind: previous?.kind ?? "glue",
+          movedNodes: previous?.movedNodes,
+        };
+      }
+    }
 
     geometryEditsRef.current = nextGeometryEdits;
     createdPartsRef.current = nextCreatedParts;
@@ -1576,26 +2118,126 @@ export function MapView() {
     setNotice(
       `${result.additions.length} new ${result.additions.length === 1 ? "part" : "parts"} added`,
     );
-  }, [refreshDisplayedFeatures, updateSliceDraft]);
+  }, [clearTransferredRoofTags, refreshDisplayedFeatures, updateSliceDraft]);
+
+  const finishAddPartDrawing = useCallback(
+    (completedNodes?: LngLat[]) => {
+      const map = mapRef.current;
+      const { targetId, nodes: draftNodes } = addPartDraftRef.current;
+      const nodes = completedNodes ?? draftNodes;
+      if (!map || !targetId) return;
+      if (nodes.length < 3) {
+        setNotice("Add at least one exterior node before returning to the boundary");
+        return;
+      }
+
+      const target =
+        addPartBoundaryCacheRef.current?.targetId === targetId
+          ? addPartBoundaryCacheRef.current.selection
+          : selectFromOsm(displayedFeaturesRef.current, targetId);
+      if (!target || target.selected.id !== target.building.id) {
+        setNotice("Select a building outline before adding a part");
+        return;
+      }
+
+      const result = addPartToBuilding(target.building, target.parts.length, nodes);
+      if (!result) {
+        setNotice(
+          "The new part must stay outside and share a boundary segment with the building outline",
+        );
+        return;
+      }
+
+      const previousOverride = geometryEditsRef.current[targetId];
+      const nextGeometryEdits: GeometryEditMap = {
+        ...geometryEditsRef.current,
+        [targetId]: {
+          geometry: result.outline,
+          kind: "add-part",
+          movedNodes: previousOverride?.movedNodes,
+        },
+      };
+      const nextCreatedParts = { ...createdPartsRef.current };
+      const additions = result.base ? [result.base, result.addition] : [result.addition];
+      const createdIds: string[] = [];
+      for (const addition of additions) {
+        const id = drawnRef("way", nextPartIdRef.current++);
+        createdIds.push(id);
+        nextCreatedParts[id] = createPartFeature(id, targetId, addition.geometry, addition.tags);
+      }
+      if (target.parts.length === 0) clearTransferredRoofTags(target.building);
+
+      // The two attachment points belong to every part wall that follows the
+      // same outline edge, not only to the expanded building and the new part.
+      // Weld them locally now so an existing sibling (or the new base part)
+      // references the same nodes in the upload rather than merely crossing
+      // them at coincident coordinates.
+      const candidates = Object.fromEntries([
+        ...target.parts.map((part) => [part.id, geometryOf(part)] as const),
+        ...createdIds.map(
+          (id) => [id, nextCreatedParts[id].geometry] as [string, EditableGeometry],
+        ),
+      ]);
+      const welds = weldVerticesIntoGeometries({
+        candidates,
+        // These are the exact snapped attachment points, including a point that
+        // was already a node of another element but not yet of this part.
+        points: [nodes[0], nodes[nodes.length - 1]],
+        tolerance: NODE_REUSE_METERS,
+      });
+      for (const [id, geometry] of Object.entries(welds)) {
+        const created = nextCreatedParts[id];
+        if (created) nextCreatedParts[id] = { ...created, geometry };
+        else {
+          const previous = nextGeometryEdits[id];
+          nextGeometryEdits[id] = {
+            geometry,
+            kind: previous?.kind ?? "glue",
+            movedNodes: previous?.movedNodes,
+          };
+        }
+      }
+
+      geometryEditsRef.current = nextGeometryEdits;
+      createdPartsRef.current = nextCreatedParts;
+      setGeometryEdits(nextGeometryEdits);
+      setCreatedParts(nextCreatedParts);
+      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      const nextSelection = selectFromOsm(displayed, targetId);
+      if (nextSelection) {
+        setSelectionBearing(map.getBearing());
+        setSelection(nextSelection);
+      }
+      addPartBoundaryCacheRef.current = null;
+      updateAddPartDraft(EMPTY_ADD_PART_DRAFT);
+      setAddPartActive(false);
+      setNotice(
+        result.base ? "Part added with a new base part" : "Part added and outline expanded",
+      );
+    },
+    [clearTransferredRoofTags, refreshDisplayedFeatures, updateAddPartDraft],
+  );
 
   const toggleCutHole = useCallback(() => {
     if (cutHoleActiveRef.current) {
       cancelHoleDrawing();
       return;
     }
+    cancelAddPartDrawing();
     cancelSliceDrawing();
     setPhotoAdjustActive(false);
     setChangesOpen(false);
     updateHoleDraft(EMPTY_HOLE_DRAFT);
     setCutHoleActive(true);
     setNotice("Click inside a building to place the first node");
-  }, [cancelHoleDrawing, cancelSliceDrawing, updateHoleDraft]);
+  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateHoleDraft]);
 
   const toggleSlice = useCallback(() => {
     if (sliceActiveRef.current) {
       cancelSliceDrawing();
       return;
     }
+    cancelAddPartDrawing();
     cancelHoleDrawing();
     setPhotoAdjustActive(false);
     setChangesOpen(false);
@@ -1603,7 +2245,32 @@ export function MapView() {
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(true);
     setNotice("Start on an outline or part edge for an open slice, or inside for a loop");
-  }, [cancelHoleDrawing, cancelSliceDrawing, updateSliceDraft]);
+  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateSliceDraft]);
+
+  const toggleAddPart = useCallback(() => {
+    if (addPartActiveRef.current) {
+      cancelAddPartDrawing();
+      return;
+    }
+    const selected = selectionRef.current;
+    if (!selected || selected.selected.id !== selected.building.id) {
+      setNotice("Select a building outline before adding a part");
+      return;
+    }
+    cancelHoleDrawing();
+    cancelSliceDrawing();
+    setPhotoAdjustActive(false);
+    setChangesOpen(false);
+    addPartBoundaryCacheRef.current = {
+      targetId: selected.building.id,
+      selection: selected,
+      rings: buildingOuterBoundaryRings(selected),
+      projected: null,
+    };
+    updateAddPartDraft({ targetId: selected.building.id, nodes: [], snap: null });
+    setAddPartActive(true);
+    setNotice("Start on the selected building outline, draw outside, then return to the outline");
+  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateAddPartDraft]);
 
   useEffect(() => {
     if (!cutHoleActive || !mapReady) return;
@@ -1735,9 +2402,27 @@ export function MapView() {
       const draft = sliceDraftRef.current;
 
       if (!draft.targetId) {
-        const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+        // Shared walls can belong to several building outlines. Prefer the
+        // building the mapper already selected, or the first boundary click on
+        // relation/1794585 can lock onto its neighboring way/111680989 instead.
+        const selectedTargetId = selectionRef.current?.building.id;
+        const selectedCache = selectedTargetId ? prepareSliceBoundaryCache(selectedTargetId) : null;
+        const selectedSnap = selectedCache
+          ? nearestBuildingBoundary(
+              map,
+              displayedFeaturesRef.current,
+              event.point,
+              12,
+              selectedCache,
+            )
+          : null;
+        const snap =
+          selectedSnap ?? nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
         if (snap) {
-          const boundaryCache = prepareSliceBoundaryCache(snap.targetId);
+          const boundaryCache =
+            selectedSnap && selectedCache
+              ? selectedCache
+              : prepareSliceBoundaryCache(snap.targetId);
           if (!boundaryCache) {
             setNotice("Could not find the target building");
             return;
@@ -1751,8 +2436,13 @@ export function MapView() {
           setNotice("Add bends, then click another outline, hole, or part edge");
           return;
         }
-        const hit = map.queryRenderedFeatures(event.point, { layers: ["live-building-fill"] })[0];
-        const id = hit?.properties.id;
+        const selectedBuilding = selectedCache?.selection.building;
+        const insideSelected =
+          selectedBuilding !== undefined && pointInsideBuilding(point, selectedBuilding);
+        const hit = insideSelected
+          ? null
+          : map.queryRenderedFeatures(event.point, { layers: ["live-building-fill"] })[0];
+        const id = insideSelected ? selectedBuilding.id : hit?.properties.id;
         if (typeof id !== "string") {
           setNotice("Start on or inside a live OSM building");
           return;
@@ -1858,12 +2548,177 @@ export function MapView() {
     if (sliceActive && !live) cancelSliceDrawing();
   }, [cancelSliceDrawing, live, sliceActive]);
 
+  useEffect(() => {
+    if (!addPartActive || !mapReady) return;
+    const map = mapRef.current;
+    const boundaryCache = addPartBoundaryCacheRef.current;
+    if (!map || !boundaryCache) return;
+    const canvas = map.getCanvas();
+    canvas.style.cursor = "crosshair";
+    const referenceNodes = lod1Visible ? lod1Nodes(lod1Match) : [];
+    let pendingPoint: { x: number; y: number } | null = null;
+    let mouseMoveFrame = 0;
+
+    const updateSnapAt = (point: { x: number; y: number }) => {
+      const draft = addPartDraftRef.current;
+      const boundarySnap = nearestBuildingBoundary(
+        map,
+        displayedFeaturesRef.current,
+        point,
+        12,
+        boundaryCache,
+      );
+      // The first and last nodes still have to belong to the OSM outline.
+      // Once drawing has started, LOD1 corners guide exterior helper nodes.
+      const referenceSnap =
+        draft.nodes.length > 0 ? nearestLod1Node(map, referenceNodes, point) : null;
+      const snap = boundarySnap ?? referenceSnap;
+      if (!draft.snap && !snap) return;
+      if (
+        draft.snap &&
+        snap &&
+        draft.snap.kind === snap.kind &&
+        draft.snap.targetId === snap.targetId &&
+        draft.snap.coordinates[0] === snap.coordinates[0] &&
+        draft.snap.coordinates[1] === snap.coordinates[1]
+      )
+        return;
+      updateAddPartDraft({ ...draft, snap });
+    };
+
+    const cancelPendingMouseMove = () => {
+      pendingPoint = null;
+      if (mouseMoveFrame) {
+        window.cancelAnimationFrame(mouseMoveFrame);
+        mouseMoveFrame = 0;
+      }
+    };
+
+    const onMouseMove = (event: MapMouseEvent) => {
+      pendingPoint = { x: event.point.x, y: event.point.y };
+      if (mouseMoveFrame) return;
+      mouseMoveFrame = window.requestAnimationFrame(() => {
+        mouseMoveFrame = 0;
+        const point = pendingPoint;
+        pendingPoint = null;
+        if (point) updateSnapAt(point);
+      });
+    };
+
+    const clearSnap = () => {
+      cancelPendingMouseMove();
+      const draft = addPartDraftRef.current;
+      if (draft.snap) updateAddPartDraft({ ...draft, snap: null });
+    };
+
+    const onClick = (event: MapMouseEvent) => {
+      cancelPendingMouseMove();
+      const draft = addPartDraftRef.current;
+      const point = roundToOsmGrid([event.lngLat.lng, event.lngLat.lat]);
+      const previewPoint = draft.snap ? map.project(draft.snap.coordinates) : null;
+      const previewTolerance = draft.snap?.targetId === LOD1_SNAP_TARGET ? 9 : 12;
+      const visibleSnap =
+        draft.snap &&
+        previewPoint &&
+        Math.hypot(previewPoint.x - event.point.x, previewPoint.y - event.point.y) <=
+          previewTolerance
+          ? draft.snap
+          : null;
+      const boundarySnap = nearestBuildingBoundary(
+        map,
+        displayedFeaturesRef.current,
+        event.point,
+        12,
+        boundaryCache,
+      );
+      const snap = boundarySnap ?? visibleSnap;
+      const outlineSnap = snap?.targetId === boundaryCache.targetId ? snap : null;
+
+      if (draft.nodes.length === 0) {
+        if (!outlineSnap) {
+          setNotice("The first node must snap to the selected building outline");
+          return;
+        }
+        updateAddPartDraft({ ...draft, nodes: [outlineSnap.coordinates], snap: null });
+        setNotice("Add exterior nodes, then return to a different point on the outline");
+        return;
+      }
+
+      if (outlineSnap) {
+        if (draft.nodes.length < 2) {
+          setNotice("Add at least one exterior node before returning to the outline");
+          return;
+        }
+        const first = draft.nodes[0];
+        if (outlineSnap.coordinates[0] === first[0] && outlineSnap.coordinates[1] === first[1]) {
+          setNotice("Return to a different point so the new part shares a wall");
+          return;
+        }
+        finishAddPartDrawing([...draft.nodes, outlineSnap.coordinates]);
+        return;
+      }
+
+      // Do not run a second, per-click inside/outside classification here. It
+      // can disagree with the boolean geometry used to complete the addition,
+      // especially on an edited outline or within a rounding step of its edge.
+      // addPartToBuilding validates the entire finished ring: it rejects real
+      // interior overlap and accepts only a connected outline expansion.
+      const nextPoint = snap?.targetId === LOD1_SNAP_TARGET ? snap.coordinates : point;
+      updateAddPartDraft({ ...draft, nodes: [...draft.nodes, nextPoint], snap: null });
+    };
+
+    const invalidateProjectedBoundaries = () => {
+      boundaryCache.projected = null;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancelAddPartDrawing();
+    };
+
+    map.on("mousemove", onMouseMove);
+    map.on("move", invalidateProjectedBoundaries);
+    map.on("click", onClick);
+    canvas.addEventListener("mouseleave", clearSnap);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      map.off("mousemove", onMouseMove);
+      map.off("move", invalidateProjectedBoundaries);
+      map.off("click", onClick);
+      canvas.removeEventListener("mouseleave", clearSnap);
+      window.removeEventListener("keydown", onKeyDown);
+      cancelPendingMouseMove();
+      canvas.style.cursor = "";
+    };
+  }, [
+    addPartActive,
+    cancelAddPartDrawing,
+    finishAddPartDrawing,
+    lod1Match,
+    lod1Visible,
+    mapReady,
+    updateAddPartDraft,
+  ]);
+
+  useEffect(() => {
+    if (!addPartActive) return;
+    const targetId = addPartDraftRef.current.targetId;
+    if (
+      !live ||
+      !selection ||
+      selection.building.id !== targetId ||
+      selection.selected.id !== targetId
+    )
+      cancelAddPartDrawing();
+  }, [addPartActive, cancelAddPartDrawing, live, selection]);
+
   // Selected footprint dots are direct handles. The draft follows the pointer;
   // releasing it records one persistent geometry override and refreshes 3D.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady || !selection) return;
     const canvas = map.getCanvas();
+    const referenceNodes = lod1Visible ? lod1Nodes(lod1Match) : [];
     let drag: NodeDrag | null = null;
     let nodeHovered = false;
 
@@ -1922,6 +2777,7 @@ export function MapView() {
       /** The drag behind this commit, so the upload moves the node rather than
        * creating one beside it and orphaning the original. */
       move?: NodeMove,
+      gluedEntities = new Set<string>(),
     ) => {
       const targetId = selection.selected.id;
       const nextGeometryEdits: GeometryEditMap = { ...geometryEditsRef.current };
@@ -1934,7 +2790,7 @@ export function MapView() {
           const previous = nextGeometryEdits[entity];
           nextGeometryEdits[entity] = {
             geometry,
-            kind: previous?.kind ?? "reshape",
+            kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : "reshape"),
             movedNodes: move
               ? recordNodeMove(previous?.movedNodes, move.from, move.to)
               : previous?.movedNodes,
@@ -1954,14 +2810,42 @@ export function MapView() {
     const onDragMove = (event: MapMouseEvent) => {
       if (!drag) return;
       const activeDrag = drag;
-      const coordinates = roundToOsmGrid([event.lngLat.lng, event.lngLat.lat]);
-      const geometries = Object.fromEntries(
+      const boundarySnap = nearestBuildingBoundary(
+        map,
+        displayedFeaturesRef.current,
+        event.point,
+        12,
+        undefined,
+        activeDrag.originalCoordinates,
+      );
+      const referenceNode = boundarySnap ? null : nearestLod1Node(map, referenceNodes, event.point);
+      const snap = boundarySnap ?? referenceNode;
+      const coordinates = roundToOsmGrid(snap?.coordinates ?? [event.lngLat.lng, event.lngLat.lat]);
+      let geometries = Object.fromEntries(
         Object.entries(activeDrag.originalGeometries).map(([entity, geometry]) => [
           entity,
-          moveSharedGeometryVertex(geometry, activeDrag.originalCoordinates, coordinates),
+          boundarySnap?.kind === "node"
+            ? mergeSharedGeometryVertices(geometry, activeDrag.originalCoordinates, coordinates)
+            : moveSharedGeometryVertex(geometry, activeDrag.originalCoordinates, coordinates),
         ]),
       );
-      drag = { ...activeDrag, geometries, coordinates };
+      const gluedEntities = new Set<string>();
+      if (boundarySnap?.kind === "edge") {
+        const candidates = {
+          ...polygonalGeometries(displayedFeaturesRef.current),
+          ...geometries,
+        };
+        const welded = weldVerticesIntoGeometries({
+          candidates,
+          points: [coordinates],
+          tolerance: NODE_REUSE_METERS,
+        });
+        for (const entity of Object.keys(welded)) {
+          if (!(entity in activeDrag.originalGeometries)) gluedEntities.add(entity);
+        }
+        geometries = { ...geometries, ...welded };
+      }
+      drag = { ...activeDrag, geometries, coordinates, snap, gluedEntities };
       preview(geometries);
       setNodeHover({
         polygonIndex: activeDrag.polygonIndex,
@@ -1989,16 +2873,26 @@ export function MapView() {
       }, 0);
 
       const affected = Object.keys(finished.geometries).length;
+      const action =
+        finished.snap?.kind === "node" && finished.snap.targetId !== LOD1_SNAP_TARGET
+          ? "merged"
+          : "moved";
       commitGeometries(
         finished.geometries,
-        affected === 1 ? "Node moved" : `Shared node moved in ${affected} footprints`,
+        affected === 1 ? `Node ${action}` : `Node ${action} across ${affected} footprints`,
         { from: finished.originalCoordinates, to: coordinates },
+        finished.gluedEntities,
       );
     };
 
     const onMouseDown = (event: MapMouseEvent) => {
       if (event.originalEvent.button !== 0) return;
-      if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
+      if (
+        cutHoleActiveRef.current ||
+        sliceActiveRef.current ||
+        addPartActiveRef.current ||
+        photoAdjustActiveRef.current
+      )
         return;
       const handle = nearestSelectionNode(map, selection, event.point);
       if (!handle) return;
@@ -2020,6 +2914,8 @@ export function MapView() {
         coordinates: null,
         originalGeometries,
         geometries: originalGeometries,
+        snap: null,
+        gluedEntities: new Set(),
       };
       setNodeHover(handle);
       map.dragPan.disable();
@@ -2029,7 +2925,12 @@ export function MapView() {
     };
 
     const onDoubleClick = (event: MapMouseEvent) => {
-      if (cutHoleActiveRef.current || sliceActiveRef.current || photoAdjustActiveRef.current)
+      if (
+        cutHoleActiveRef.current ||
+        sliceActiveRef.current ||
+        addPartActiveRef.current ||
+        photoAdjustActiveRef.current
+      )
         return;
       const segment = nearestSelectionSegment(map, selection, event.point);
       if (!segment) return;
@@ -2041,8 +2942,25 @@ export function MapView() {
         segment.coordinates,
       );
       if (!geometry) return;
+      const candidates = {
+        ...polygonalGeometries(displayedFeaturesRef.current),
+        [selection.selected.id]: geometry,
+      };
+      const welded = weldVerticesIntoGeometries({
+        candidates,
+        points: [segment.coordinates],
+        tolerance: NODE_REUSE_METERS,
+      });
+      const geometries = { ...welded, [selection.selected.id]: geometry };
       event.preventDefault();
-      commitGeometries({ [selection.selected.id]: geometry }, "Node added");
+      commitGeometries(
+        geometries,
+        Object.keys(geometries).length === 1
+          ? "Node added"
+          : `Node added to ${Object.keys(geometries).length} shared footprints`,
+        undefined,
+        new Set(Object.keys(welded)),
+      );
     };
 
     const onHover = (event: MapMouseEvent) => {
@@ -2050,6 +2968,7 @@ export function MapView() {
         drag ||
         cutHoleActiveRef.current ||
         sliceActiveRef.current ||
+        addPartActiveRef.current ||
         photoAdjustActiveRef.current
       )
         return;
@@ -2090,7 +3009,10 @@ export function MapView() {
       canvas.style.cursor = "";
     };
   }, [
+    addPartActive,
     cutHoleActive,
+    lod1Match,
+    lod1Visible,
     mapReady,
     photoAdjustActive,
     refreshDisplayedFeatures,
@@ -2157,20 +3079,52 @@ export function MapView() {
     void nodeSource?.setData(selectionNodeFeatures(selection));
   }, [mapReady, selection]);
 
+  // A selected skillion shows its downhill direction over the footprint centroid.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource<GeoJSONSource>("roof-direction");
+    void source?.setData(skillionDirectionFeatures(effectiveSelection));
+  }, [effectiveSelection, mapReady]);
+
+  // The map and advice panel share the same best-overlap LOD1 match.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource<GeoJSONSource>("lod1");
+    void source?.setData(lod1Visible && lod1Match ? lod1Match.outline : EMPTY);
+  }, [lod1Match, lod1Visible, mapReady]);
+
+  // A review finding can point to a millimetre-scale fold that is otherwise
+  // invisible at ordinary map zoom. Keep a high-contrast marker after review closes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource<GeoJSONSource>("validation-location");
+    void source?.setData(
+      validationLocation
+        ? {
+            type: "FeatureCollection",
+            features: [
+              {
+                type: "Feature",
+                properties: { role: "validation-location" },
+                geometry: { type: "Point", coordinates: validationLocation },
+              },
+            ],
+          }
+        : EMPTY,
+    );
+  }, [mapReady, validationLocation]);
+
   // Pending tag and geometry overrides are projected over raw OSM together.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    const displayed = applyLocalEdits(
-      liveFeaturesRef.current,
-      edits.edits,
-      geometryEdits,
-      createdParts,
-    );
-    displayedFeaturesRef.current = displayed;
+    displayedFeaturesRef.current = displayedFeatures;
     const source = map.getSource<GeoJSONSource>("live");
-    void source?.setData(displayed);
-  }, [createdParts, edits.edits, geometryEdits, mapReady]);
+    void source?.setData(displayedFeatures);
+  }, [displayedFeatures, mapReady]);
 
   return (
     <div
@@ -2223,10 +3177,28 @@ export function MapView() {
           />
           LiDAR
         </label>
+        <button
+          type="button"
+          onClick={() => setLod1Visible((visible) => !visible)}
+          disabled={!lod1Match}
+          aria-label={lod1Visible ? "Hide LOD1 outline" : "Show LOD1 outline"}
+          aria-pressed={lod1Visible && Boolean(lod1Match)}
+          title={lod1Match ? "Toggle the matched LOD1 outline" : "No matching LOD1 outline"}
+          className={`rounded-md px-2 py-1 text-sm font-medium transition-colors ${
+            !lod1Match
+              ? "cursor-not-allowed text-slate-400"
+              : lod1Visible
+                ? "bg-slate-200 text-slate-900"
+                : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+          }`}
+        >
+          LOD1
+        </button>
         {photos && (
           <button
             type="button"
             onClick={() => {
+              cancelAddPartDrawing();
               cancelHoleDrawing();
               cancelSliceDrawing();
               setPhotoAdjustActive((active) => !active);
@@ -2292,6 +3264,7 @@ export function MapView() {
           <button
             type="button"
             onClick={() => {
+              cancelAddPartDrawing();
               cancelHoleDrawing();
               cancelSliceDrawing();
               setChangesOpen(true);
@@ -2336,6 +3309,24 @@ export function MapView() {
           >
             Slice
           </button>
+          <button
+            type="button"
+            onClick={toggleAddPart}
+            disabled={
+              !addPartActive &&
+              (!live || !selection || selection.selected.id !== selection.building.id)
+            }
+            aria-pressed={addPartActive}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold shadow-md transition-colors ${
+              addPartActive
+                ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
+                : live && selection?.selected.id === selection?.building.id
+                  ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                  : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+            }`}
+          >
+            Add part
+          </button>
         </div>
       )}
 
@@ -2351,6 +3342,12 @@ export function MapView() {
         </div>
       )}
 
+      {addPartActive && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
+          Outline → exterior nodes → outline · Esc cancels
+        </div>
+      )}
+
       {photoAdjustActive && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
           Drag to align photos · map position stays fixed
@@ -2359,6 +3356,7 @@ export function MapView() {
 
       <ChangesSidebar
         open={changesOpen}
+        selectedId={selection?.selected.id ?? null}
         edits={edits.edits}
         geometryEdits={geometryEdits}
         createdParts={createdParts}
@@ -2368,25 +3366,32 @@ export function MapView() {
         onRemoveProperty={removeProperty}
         onEditProperty={editProperty}
         onRevertAll={revertAllChanges}
-        onSubmit={() => setSubmitOpen(true)}
+        onSubmit={() => {
+          setValidationLocation(null);
+          setSubmitOpen(true);
+        }}
       />
 
       <SubmitDialog
         open={submitOpen}
         input={submitInput}
-        displayed={displayedFeaturesRef.current}
+        displayed={displayedFeatures}
         onClose={() => setSubmitOpen(false)}
         onNavigate={(entity) => {
           setSubmitOpen(false);
           navigateToEditedEntity(entity);
         }}
+        onLocate={locateValidationIssue}
+        onFix={fixValidationIssue}
         onUploaded={onUploaded}
       />
 
       <BuildingPanel
         selection={selection}
+        lod1Match={lod1Match}
         initialHeading={selectionBearing}
         edits={edits}
+        onEditTag={editEntityTag}
         onLidarCloudChange={onLidarCloudChange}
         onSelectEntity={selectLoadedEntity}
         onClose={() => setSelection(null)}

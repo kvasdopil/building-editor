@@ -14,7 +14,28 @@ export interface Issue {
   entities: string[];
   /** Where to look, when the finding is about one spot. */
   at?: LngLat;
+  /** A deterministic correction the reviewer can apply without leaving the dialog. */
+  fix?: IssueFix;
 }
+
+export interface TagIssueFix {
+  kind: "set-tag";
+  entity: string;
+  key: string;
+  value: string;
+}
+
+export interface GeometryIssueFix {
+  kind: "remove-ring-node";
+  entity: string;
+  polygonIndex: number;
+  ringIndex: number;
+  nodeIndex: number;
+  /** Guards against applying a suggestion after the geometry has changed. */
+  coordinate: LngLat;
+}
+
+export type IssueFix = TagIssueFix | GeometryIssueFix;
 
 export function issue(
   level: Issue["level"],

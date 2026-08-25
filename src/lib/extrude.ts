@@ -4,7 +4,7 @@ import { levelHeight, verticalExtent } from "./heights";
 import type { LidarCloud } from "./lidar";
 import { classOf } from "./lidar-format";
 import { partsCoverage } from "./parts";
-import { roofPlan, roofSurface, type Point2 } from "./roofs";
+import { resolvedRoofPlan, roofSurface, type RoofFootprint, type RoofSurface } from "./roofs";
 import { minimumTerrainElevation, terrainElevation, type TerrainModel } from "./terrain";
 import type {
   BuildingElement,
@@ -27,11 +27,6 @@ const NEIGHBOR_COLOR = 0xc3cbd4;
  * building disappear from the view.
  */
 const OUTLINE_REPLACED_ABOVE = 0.85;
-
-/** Only a locally cut hole must suppress parts that could fill the opening. */
-function outlineIsAuthoritative(building: BuildingElement): boolean {
-  return building.properties.geometry_edit_kind === "hole";
-}
 
 /**
  * Above-roof discrepancy colours, expressed in sRGB. Repeated colour-family
@@ -92,17 +87,61 @@ function pointInBounds([lon, lat]: LngLat, [west, south, east, north]: Bounds): 
   return lon >= west && lon <= east && lat >= south && lat <= north;
 }
 
+function roofFootprints(element: BuildingElement, projector: Projector): RoofFootprint[] {
+  const ring = (points: LngLat[]) =>
+    points.slice(0, -1).map((point): [number, number] => {
+      const [x, y] = projector.toLocal(point);
+      return [x, -y];
+    });
+  return element.polygons.map((footprint) => ({
+    outer: ring(footprint.outer),
+    holes: footprint.holes.map(ring),
+  }));
+}
+
+function addRoofSurface(
+  group: THREE.Group,
+  surface: RoofSurface,
+  roofMaterial: THREE.Material,
+  wallMaterial: THREE.Material,
+  edgeMaterial: THREE.LineBasicMaterial,
+  renderTop: boolean,
+): void {
+  if (renderTop) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(surface.positions, 3));
+    if (surface.indices) geometry.setIndex(new THREE.BufferAttribute(surface.indices, 1));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, roofMaterial);
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), edgeMaterial);
+    group.add(mesh, edges);
+  }
+  if (surface.wallPositions) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(surface.wallPositions, 3));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, wallMaterial);
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), edgeMaterial);
+    group.add(mesh, edges);
+  }
+}
+
 function extrudeElement(
   element: BuildingElement,
+  parent: BuildingElement,
   projector: Projector,
   metersPerLevel: number,
   color: number,
   edgeOpacity: number,
   groundOffset: number,
 ): THREE.Object3D {
-  const extent = verticalExtent(element.properties, metersPerLevel);
-  const plan = roofPlan(element.properties, extent);
-  const facadeTop = plan?.eaves ?? extent.top;
+  const extent = verticalExtent(
+    element.properties,
+    metersPerLevel,
+    element.id === parent.id ? undefined : parent.properties,
+  );
+  const resolvedRoof = resolvedRoofPlan(element, parent, metersPerLevel);
+  const facadeTop = resolvedRoof?.plan.eaves ?? extent.top;
   const group = new THREE.Group();
   const roofMaterial = new THREE.MeshLambertMaterial({ color });
   const wallMaterial = new THREE.MeshLambertMaterial({
@@ -116,14 +155,7 @@ function extrudeElement(
     transparent: true,
     opacity: edgeOpacity,
   });
-  const outlines: Point2[][] = [];
   for (const footprint of element.polygons) {
-    outlines.push(
-      footprint.outer.slice(0, -1).map((point) => {
-        const [x, y] = projector.toLocal(point);
-        return [x, -y];
-      }),
-    );
     const shape = footprintShape(footprint, projector);
     const geometry = new THREE.ExtrudeGeometry(shape, {
       depth: Math.max(facadeTop - extent.base, 0.001),
@@ -138,18 +170,53 @@ function extrudeElement(
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), edgeMaterial);
     group.add(mesh, edges);
   }
-  if (plan) {
-    const surface = roofSurface(plan, outlines, groundOffset);
+  if (resolvedRoof) {
+    const surface = roofSurface(
+      resolvedRoof.plan,
+      roofFootprints(element, projector),
+      roofFootprints(resolvedRoof.frameElement, projector),
+      groundOffset,
+    );
     if (surface) {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(surface.positions, 3));
-      if (surface.indices) geometry.setIndex(new THREE.BufferAttribute(surface.indices, 1));
-      geometry.computeVertexNormals();
-      const mesh = new THREE.Mesh(geometry, roofMaterial);
-      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), edgeMaterial);
-      group.add(mesh, edges);
+      addRoofSurface(
+        group,
+        surface,
+        roofMaterial,
+        wallMaterial,
+        edgeMaterial,
+        !resolvedRoof.shared,
+      );
     }
   }
+  return group;
+}
+
+/** Render one parent roof shell when its covered outline solid is omitted. */
+function sharedParentRoof(
+  building: BuildingElement,
+  projector: Projector,
+  metersPerLevel: number,
+  color: number,
+  edgeOpacity: number,
+  groundOffset: number,
+): THREE.Object3D | null {
+  const resolved = resolvedRoofPlan(building, building, metersPerLevel);
+  if (!resolved) return null;
+  const footprints = roofFootprints(building, projector);
+  const surface = roofSurface(resolved.plan, footprints, footprints, groundOffset);
+  if (!surface) return null;
+  const group = new THREE.Group();
+  const roofMaterial = new THREE.MeshLambertMaterial({ color });
+  const wallMaterial = new THREE.MeshLambertMaterial({
+    color: new THREE.Color(color).multiplyScalar(0.68),
+    side: THREE.DoubleSide,
+  });
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: 0x1f2937,
+    transparent: true,
+    opacity: edgeOpacity,
+  });
+  addRoofSurface(group, surface, roofMaterial, wallMaterial, edgeMaterial, true);
   return group;
 }
 
@@ -169,14 +236,13 @@ function extrudeBuildingWithParts(
   const objects = new Map<string, THREE.Object3D>();
   // One level height for the whole building, so its parts stack on each other.
   const metersPerLevel = levelHeight(building.properties);
-  const authoritativeOutline = outlineIsAuthoritative(building);
-  const covered = !authoritativeOutline && partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
-  // A cut belongs to the outline geometry. Rendering covering parts instead
-  // would fill the opening again, so the edited outline becomes the solid.
-  const elements = authoritativeOutline ? [building] : covered ? parts : [building, ...parts];
+  const covered = partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
+  const elements = covered ? parts : [building, ...parts];
+  const outlineRendered = elements.some((element) => element.id === building.id);
   elements.forEach((element, index) => {
     const object = extrudeElement(
       element,
+      building,
       projector,
       metersPerLevel,
       colorFor(element, index),
@@ -186,6 +252,21 @@ function extrudeBuildingWithParts(
     objects.set(element.id, object);
     group.add(object);
   });
+  const hasSharedParts = parts.some((part) => {
+    const shape = part.properties.roof_shape;
+    return typeof shape !== "string" || shape.trim() === "";
+  });
+  if (!outlineRendered && hasSharedParts) {
+    const roof = sharedParentRoof(
+      building,
+      projector,
+      metersPerLevel,
+      colorFor(building, 0),
+      edgeOpacity,
+      groundOffset,
+    );
+    if (roof) group.add(roof);
+  }
   return { group, elements: objects };
 }
 
@@ -207,6 +288,8 @@ interface BuildingScene {
   root: THREE.Group;
   /** Bounds of the selected building alone, so the camera frames it. */
   focus: THREE.Box3;
+  /** Existing scene objects that can become camera focus without re-extruding. */
+  focusTargets: Map<string, THREE.Object3D>;
   /** Lon/lat the local metric frame is centered on, for anything added later. */
   origin: LngLat;
 }
@@ -238,7 +321,11 @@ function median(values: number[]): number {
  * Survey-to-terrain offsets from ground returns. Mapterhorn remains the datum:
  * LiDAR is translated to it, never used to move the terrain or buildings.
  */
+const lidarBiasCache = new WeakMap<LidarCloud, WeakMap<TerrainModel, [number, number]>>();
+
 function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): [number, number] {
+  const cached = lidarBiasCache.get(cloud)?.get(terrain);
+  if (cached) return cached;
   const residuals: [number[], number[]] = [[], []];
   // A few thousand evenly distributed ground pairs are enough for a robust
   // median and keep sorting cost bounded on a dense million-point city tile.
@@ -251,10 +338,17 @@ function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): [number, 
   }
   const combined = [...residuals[0], ...residuals[1]];
   const fallback = combined.length > 0 ? median(combined) : 0;
-  return [
+  const biases: [number, number] = [
     residuals[0].length >= 3 ? median(residuals[0]) : fallback,
     residuals[1].length >= 3 ? median(residuals[1]) : fallback,
   ];
+  let byTerrain = lidarBiasCache.get(cloud);
+  if (!byTerrain) {
+    byTerrain = new WeakMap();
+    lidarBiasCache.set(cloud, byTerrain);
+  }
+  byTerrain.set(terrain, biases);
+  return biases;
 }
 
 interface RoofProfile {
@@ -272,7 +366,11 @@ function selectedRoofProfile(selection: BuildingSelection): RoofProfile {
   const target = selection.selected;
   const metersPerLevel = levelHeight(selection.building.properties);
   const topFor = (element: BuildingElement) =>
-    verticalExtent(element.properties, metersPerLevel).top;
+    verticalExtent(
+      element.properties,
+      metersPerLevel,
+      element.id === selection.building.id ? undefined : selection.building.properties,
+    ).top;
 
   if (target.id !== selection.building.id) {
     const top = topFor(target);
@@ -289,7 +387,6 @@ function selectedRoofProfile(selection: BuildingSelection): RoofProfile {
     top: topFor(part),
   }));
   const partsReplaceOutline =
-    !outlineIsAuthoritative(selection.building) &&
     partsCoverage(selection.building, selection.parts) >= OUTLINE_REPLACED_ABOVE;
 
   return {
@@ -333,6 +430,67 @@ function roofDistanceColour(distance: number): [number, number, number] {
   ) as [number, number, number];
 }
 
+interface PointCloudAlignment {
+  biases: readonly [number, number];
+  datum: number;
+  buildingGround: number;
+}
+
+function pointCloudAlignment(
+  cloud: LidarCloud,
+  selection: BuildingSelection,
+  terrain: TerrainModel | null,
+): PointCloudAlignment {
+  const biases = terrain ? lidarTerrainBiases(cloud, terrain) : ([0, 0] as const);
+  const datum = terrain?.referenceZ ?? cloud.groundZ;
+  return {
+    biases,
+    datum,
+    buildingGround: terrain ? minimumTerrainElevation(terrain, selection.building) - datum : 0,
+  };
+}
+
+function recolourPointCloud(
+  colours: Float32Array,
+  cloud: LidarCloud,
+  selection: BuildingSelection,
+  alignment: PointCloudAlignment,
+): void {
+  colours.set(cloud.colours);
+  const roof = selectedRoofProfile(selection);
+
+  for (let i = 0; i < cloud.count; i++) {
+    const point: LngLat = [cloud.lon[i], cloud.lat[i]];
+    if (!pointInBounds(point, roof.bounds)) continue;
+    const roofTop = roof.topAt(point);
+    if (roofTop === null) continue;
+    const survey = cloud.surveys[i] === 0 ? 0 : 1;
+    const pointHeight = cloud.z[i] - alignment.biases[survey] - alignment.datum;
+    const distance = pointHeight - (alignment.buildingGround + roofTop);
+    if (distance <= 0) continue;
+    colours.set(roofDistanceColour(distance), i * 3);
+  }
+}
+
+/** Reuse static LiDAR positions and update only selection-sensitive colours. */
+export function updatePointCloudSelection(
+  points: THREE.Points,
+  cloud: LidarCloud,
+  selection: BuildingSelection,
+  terrain: TerrainModel | null = null,
+): void {
+  const attribute = points.geometry.getAttribute("color");
+  if (!(attribute instanceof THREE.BufferAttribute) || !(attribute.array instanceof Float32Array))
+    return;
+  recolourPointCloud(
+    attribute.array,
+    cloud,
+    selection,
+    pointCloudAlignment(cloud, selection, terrain),
+  );
+  attribute.needsUpdate = true;
+}
+
 export function buildPointCloud(
   cloud: LidarCloud,
   selection: BuildingSelection,
@@ -341,31 +499,20 @@ export function buildPointCloud(
 ): THREE.Points {
   const projector = makeProjector(origin);
   const positions = new Float32Array(cloud.count * 3);
-  const biases = terrain ? lidarTerrainBiases(cloud, terrain) : ([0, 0] as const);
-  const datum = terrain?.referenceZ ?? cloud.groundZ;
-  const roof = selectedRoofProfile(selection);
-  const buildingGround = terrain ? minimumTerrainElevation(terrain, selection.building) - datum : 0;
-  let colours = cloud.colours;
+  const alignment = pointCloudAlignment(cloud, selection, terrain);
   for (let i = 0; i < cloud.count; i++) {
     const point: LngLat = [cloud.lon[i], cloud.lat[i]];
     const [x, y] = projector.toLocal(point);
     positions[i * 3] = x;
     const survey = cloud.surveys[i] === 0 ? 0 : 1;
-    const pointHeight = cloud.z[i] - biases[survey] - datum;
+    const pointHeight = cloud.z[i] - alignment.biases[survey] - alignment.datum;
     positions[i * 3 + 1] = pointHeight;
     // Three's local axes are east (+X), up (+Y), south (+Z), so north is -Z.
     positions[i * 3 + 2] = -y;
-
-    if (!pointInBounds(point, roof.bounds)) continue;
-    const roofTop = roof.topAt(point);
-    if (roofTop === null) continue;
-    const distance = pointHeight - (buildingGround + roofTop);
-    if (distance <= 0) continue;
-
-    if (colours === cloud.colours) colours = cloud.colours.slice();
-    const colour = roofDistanceColour(distance);
-    colours.set(colour, i * 3);
   }
+
+  const colours = cloud.colours.slice();
+  recolourPointCloud(colours, cloud, selection, alignment);
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -449,6 +596,8 @@ export function buildScene(
       ? selected.group
       : (selected.elements.get(selection.selected.id) ?? selected.group);
   const focus = new THREE.Box3().setFromObject(focusTarget);
+  const focusTargets = new Map<string, THREE.Object3D>(selected.elements);
+  focusTargets.set(selection.building.id, selected.group);
 
   for (const neighbor of selection.neighbors) {
     root.add(
@@ -464,7 +613,7 @@ export function buildScene(
 
   if (terrain) {
     root.add(buildTerrainSurface(terrain, projector));
-    return { root, focus, origin };
+    return { root, focus, focusTargets, origin };
   }
 
   // Ground spans the half-diagonal of everything drawn, so no building
@@ -486,5 +635,5 @@ export function buildScene(
   grid.position.set(center.x, -0.04, center.z);
   root.add(grid);
 
-  return { root, focus, origin };
+  return { root, focus, focusTargets, origin };
 }

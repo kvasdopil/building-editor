@@ -72,9 +72,15 @@ the click point, the part wins as the more specific entity. The map highlights o
 the inspector shows and edits the part's own OSM id and tags. The selection still carries its
 parent building and sibling parts: the parent supplies the shared level height, the complete
 building stays visible as 3D context, and the camera frames the selected part. LOD1 advice is not
-offered for parts because the source describes whole building blocks. The part's
-`building:part=yes` inspector row includes a **parent** link that switches selection to its loaded
-building outline without another network request.
+offered for parts because the source describes whole building blocks. The inspector toolbar always
+shows the selected entity id. For a part, that id comes before a `part of way/…` parent link, which
+switches selection to its loaded building outline without another network request.
+
+Selection assembly is cached per immutable displayed-feature snapshot. The snapshot is parsed once,
+parent and sibling associations are lazy, and building parts are associated only after bounding-box
+and distance filtering has reduced 3D context to the nearest eligible buildings. Switching between
+a parent and its already assembled parts therefore reuses the parent, siblings, and neighbors rather
+than repeating the building-by-part polygon-overlap pass.
 
 ## External 3D views
 
@@ -113,12 +119,16 @@ existing hole.
 
 Escape, pressing **Cut hole** again, opening the changes sidebar, or leaving live-OSM zoom cancels
 the whole draft and commits nothing. Successful completion adds an interior ring as a local
-geometry override, refreshes the live map, selection outline, 3D building and context, marks the
-element purple, and adds one `geometry` entry to the changes sidebar. Geometry overrides are
-current-session state and are not uploaded. The 3D extrusion removes both caps inside the loop
-and renders the resulting inner vertical faces with a distinct, two-sided wall material so the
-opening reads from every camera direction. When building parts would normally replace the outline,
-a locally cut outline is authoritative in 3D; otherwise those uncut parts would fill the opening.
+geometry override to the building. The same loop is boolean-subtracted from every associated part
+whose solid area it intersects, including locally drawn parts. A loop wholly inside a part creates an
+inner ring; a loop crossing a part boundary leaves the corresponding notch. The operation is rejected
+atomically if a boolean subtraction fails or would consume an entire part. Successful completion
+refreshes the live map, selection outline, 3D building and context, marks the building and affected
+parts purple, and adds their `geometry` entries to the changes sidebar. Geometry overrides persist in
+IndexedDB until reverted or uploaded. The 3D extrusion removes both caps inside the loop and renders
+the resulting inner vertical faces with a distinct, two-sided wall material so the opening reads from
+every camera direction. Normal part-coverage rendering remains active because the actual part
+geometries now carry the opening instead of relying on an outline-only rendering exception.
 
 ## Slicing buildings into parts
 
@@ -134,15 +144,29 @@ A first click inside the footprint, away from every boundary, starts a closed-lo
 its first node or pressing Enter closes it after at least three nodes. Every segment must remain in
 the solid building footprint and the path must be simple.
 
+If a building is already selected when the first Slice node is placed, its building group is tested
+first for both boundary snaps and interior-loop containment. Only a click that is not on or inside
+that selected building falls back to the global rendered-feature search. This makes a shared wall
+deterministic: relation/1794585 and way/111680989 share several consecutive segments, but selecting
+the relation before Slice keeps it as the target instead of silently locking the draft to the way.
+
 The two modes differ in what they change:
 
 - An **open polyline** partitions what it crosses, and must divide something — the outline, an
   existing part, or the area no part covers yet — otherwise it is rejected. A cut that ends on a part
   edge leaves the outline itself whole.
-- A **closed loop** creates two new parts without changing the `building=*` outline: one base part
-  copies the complete building footprint and one center part uses the enclosed loop. They overlap in
-  2D deliberately, avoiding a ring-shaped complement while covering the whole outline. Both inherit
-  the outline's known physical tags; the mapper must adjust `height` plus `min_height` or
+- A **closed loop** creates a center tower part from the enclosed loop without changing the
+  `building=*` outline or any existing parts. If the building has no parts yet, it also creates one
+  base part copying the complete building footprint; that base and tower overlap in 2D deliberately,
+  avoiding a ring-shaped complement while covering the whole outline. If parts already exist, they
+  remain the base and only the tower is added. The tower begins with `building:part=yes` and explicit
+  copies of the outline's `height` and `min_height` when available. A generated base part copies only
+  `height`; other omitted physical values use the outline as their effective editor defaults. The
+  first time an outline without parts is partitioned, every generated part additionally receives
+  explicit copies of `roof:shape`, `roof:direction`, `roof:orientation`, and `roof:height` when
+  present, and those four tags are removed from the parent outline. Once parts exist, later slices retain the normal sparse
+  tag rule instead of repeatedly copying parent roof values.
+  The mapper must add only the differing `height` plus `min_height` or
   `building:levels` plus `building:min_level` when the center is stacked above the base, so their 3D
   volumes do not overlap. Escape, pressing **Slice** again, opening pending changes, or leaving
   live-OSM zoom cancels the draft.
@@ -154,16 +178,29 @@ map camera moves. Pointer events are coalesced to one snap calculation and draft
 animation frame. Completing a slice may run polygon boolean operations, but cursor movement must
 never associate every loaded part, assemble 3D neighbors, or run Turf intersections.
 
+Every corner a cut creates joins each ring of the building group it lands on, not only the pieces the
+cut produced. Ending a slice on the wall between two parts puts the corner in the part on the far side
+as well, and an endpoint on the outline puts it in the outline. A corner that was already there is
+left alone, and the sub-millimetre drift boolean geometry leaves on untouched corners does not count
+as new. Without this the new boundary only crosses its neighbours instead of sharing them, and the
+wall comes apart the first time it is dragged. Each element that gains a corner picks up its own
+pending geometry change, listed as **corner shared**.
+
 The operation follows [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings):
 
 - the single `building=*` outline remains unchanged and continues to hold whole-building metadata;
 - the partition regions cover the complete outline as `building:part=*` areas;
-- a newly covered region has `building:part=yes` plus any known physical tags inherited from the
-  outline: `height`, `building:levels`, `min_height`, `building:min_level`, facade/roof material
-  and colour, and roof geometry tags;
+- a newly covered region has `building:part=yes` plus an explicit copy of the outline's `height`
+  when available; matching level, material, colour, and roof values are omitted and use the outline
+  as effective defaults for rendering and validation;
+- a center tower created by a closed loop additionally copies the outline's `min_height` when
+  available;
+- an explicit part height/level, minimum height/level, or roof value overrides the corresponding
+  outline default;
 - names, addresses, operator and other whole-building tags are not copied to generated parts;
 - every existing part crossed by the path is partitioned by the same geometry, the largest
-  fragment retains the original OSM entity id, and new fragments inherit all tags of that part;
+  fragment retains the original OSM entity id, and new fragments keep explicit `height` plus only
+  values of that part which differ from the outline;
 - uncovered footprint regions become new session-local part entities. These and every modified
   original part appear in Pending changes and render purple on the map.
 
@@ -174,6 +211,53 @@ outline, Slice does not create a `type=building` relation; that relation is rese
 grouping or parts outside the outline. Slice geometry is current-session pending state until the
 changeset-upload feature exists.
 
+## Adding an exterior building part
+
+At live-OSM zoom, **Add part** is enabled only while a `building=*` outline—not one of its parts—is
+selected. Activating it fixes that outline as the target and makes the geometry tools mutually
+exclusive. The first node must snap to an outer-ring edge or existing node, and the last node must
+snap to a different point on the same outline. Edge snaps use the same 12-pixel tolerance as Slice
+and exact nodes take priority within nine pixels. A click honors the visible snap preview when it is
+still under the pointer; it must not discard that preview and independently classify the click as
+inside. When the matched LOD1 outline is visible, its vertices are additional nine-pixel snap targets
+for the helper gizmo and intermediate exterior nodes. OSM boundary snaps retain priority, and LOD1
+vertices cannot satisfy the required first or last attachment to the selected OSM outline. Hiding
+LOD1 removes those helper targets. Intermediate clicks are not rejected by a separate
+point-in-polygon approximation. The completed boolean operation below is the single authority for
+whether the path stayed outside, which avoids false rejections on edited outlines and at
+coordinate-grid rounding boundaries.
+Escape, changing selection, leaving live zoom, opening pending changes, or activating another
+geometry tool cancels the draft.
+
+The resulting loop must be simple, contribute at least 0.1 m² outside the outline, have no material
+interior overlap, and share a real wall segment rather than touching the building at only one point.
+The drawn exterior path is not closed with a straight chord. Both directions along the existing
+outer ring between the final and initial snaps are evaluated, including every intervening building
+corner; the valid non-overlapping candidate with the smaller part area is used. This permits an
+addition to wrap around one or several corners while rejecting the opposite boundary path, which
+would enclose or cross the original building. The two snaps must resolve to the same outer ring.
+Completion performs one atomic local operation:
+
+- union the drawn footprint into the existing `building=*` outline and record an `add-part` geometry
+  modification on that element;
+- create a pending `building:part=yes` using the drawn exterior footprint, with an explicit copy of
+  the outline's `height` when available; omitted physical values continue to use the outline as
+  effective editor defaults;
+- insert each snapped attachment node into every existing or pending part boundary whose segment
+  shares that outline edge, preserving any earlier geometry edit on that part;
+- when the selected building had no parts, also create one base `building:part=yes` from the complete
+  pre-expansion outline with the same sparse-tag rule and attachment nodes.
+
+When Add part creates the first parts for an outline, both the base and exterior part explicitly copy
+the outline's `roof:shape`, `roof:direction`, `roof:orientation`, and `roof:height`, and the outline loses those tags in
+the same pending operation. This is the same roof-ownership transfer used by Slice.
+
+If parts already existed, their areas remain unchanged—only a matching boundary segment gains the
+shared node—and no extra base is invented. Newly created parts use the building outline as their
+parent, participate in selection and 3D rendering immediately, and share snapped wall nodes with the
+modified outline in the upload plan. A disconnected point-touch, an overlapping addition, or a loop
+that crosses back through the building is rejected without changing any pending state.
+
 ## LOD1 advice and local edits
 
 Stockholm LOD1 (see ADR 0003) is matched to the selected building by greatest area overlap,
@@ -181,6 +265,14 @@ requiring at least 40% of the OSM footprint to be covered. Coverage is computed 
 when the OSM building accounts for less than half the LOD1 block, the block is generalized over
 several buildings and its heights are not about this building — advice is then marked
 unreliable rather than hidden, because the mapper decides.
+
+The matched generalized LOD1 footprint is drawn as a light-gray map outline beneath the selected
+OSM outline. It appears by default for an outline selection and shares the advice panel's exact
+best-overlap match. A top-map **LOD1** toggle hides or restores it; the control is unavailable when
+there is no match or a building part is selected. While the outline is visible, dragging an OSM
+footprint node within nine screen pixels of a LOD1 vertex snaps the destination to that vertex,
+rounded only to OSM's seven-decimal coordinate grid. Hiding LOD1 disables that snap target. If the
+dragged OSM node is shared, every loaded footprint which owns it still moves to the snapped position.
 
 Suggested tags: `height` (ridge minus ground), `roof:height` (ridge minus eaves, dropped when
 taller than half the building, which indicates a merged block), and `building:levels` estimated
@@ -199,10 +291,11 @@ building. The selected building, its parts, and every neighboring context buildi
 these effective properties. The live map source does too, so applying or reverting an edit
 immediately updates the building's height-data color. A global **X changes** button reports tag
 and geometry overrides from the map's top-left corner and opens a left sidebar grouped by entity.
-Each group has one linked building ID header followed by rows laid out like the inspector's tag
-table: the key on the left, then the original value, an arrow, and the pending value highlighted the
-way an edited value is highlighted there. Selecting the header closes the sidebar, centers the map on
-its entity through the normal ID lookup flow, and selects that building. Each header also carries a
+Each group has one ordinary hash-link entity header (`#way/…`) followed by rows laid out like the
+inspector's tag table: the key on the left, then the original value, an arrow, and the pending value
+highlighted the way an edited value is highlighted there. The group matching the current map
+selection is visibly highlighted. Following the header closes the sidebar, centers the map on its
+entity through the normal ID lookup flow, and selects it. Each header also carries a
 discard action for that entity alone, behind the same confirmation dialog: it drops every tag
 override on the entity plus its footprint override, and for a part drawn in this session — which
 exists only as a pending change — it deletes the part itself, tag overrides included.
@@ -228,8 +321,10 @@ Every row can also be changed or dropped on its own, without leaving the panel:
 For both buildings and parts, `height`, `building:levels`, `min_height`, `building:min_level`,
 `roof:levels`, and `roof:height` always have inspector rows, including a **not set** row when absent.
 Building outlines and parts additionally always expose `roof:shape` as a select: **none** removes the tag,
-**pyramid** writes the standard `pyramidal` value, **hipped** writes `hipped`, **dome** writes `dome`,
-and **onion** writes `onion`. A non-standard existing value remains available as its current value so opening the select never rewrites it. Hovering
+**pyramid** writes the standard `pyramidal` value, **hipped** writes `hipped`, **gabled** writes
+`gabled`, **gambrel** writes `gambrel`, **round** writes `round`, **skillion** writes `skillion`,
+**dome** writes `dome`, and **onion** writes `onion`. A
+non-standard existing value remains available as its current value so opening the select never rewrites it. Hovering
 their value reveals an edit icon. It opens a numeric modal using the user-facing labels `height`,
 `levels`, `min_height`, `min_levels`, `roof_levels`, and `roof_height`; Escape dismisses it and Enter saves a valid
 changed value. Heights must be positive metres, levels positive counts, and total height/levels must
@@ -238,6 +333,31 @@ exceed their corresponding minimum. `building:min_level`, `min_height` and `roof
 above it. Saving uses the standard singular OSM key `building:min_level` and immediately refreshes
 the effective map and 3D geometry. `roof:levels` is metadata only: the 3D height comes from `height`
 or `building:levels`, so editing it changes no geometry.
+
+When the effective `roof:shape` is `gabled`, `gambrel`, or `round`, the inspector additionally exposes
+`roof:orientation` as a select. **default (along)** removes the explicit tag and uses the OSM default,
+**along** writes `along`, and **across** writes `across`. A non-standard existing value remains
+available unchanged. `along` places the ridge on the long axis of the footprint's oriented minimum
+rectangle; `across` places it on the perpendicular short axis. `roof:direction` remains a distinct
+OSM tag describing downslope compass direction and is not interpreted as ridge orientation.
+
+When the effective `roof:shape` is `skillion`, the inspector additionally exposes `roof:direction`
+as a compass drag handle immediately to the left of a clickable value. The pointer displacement from
+the compass defines a continuous lookup bearing (up is north, right is east). After a 6 px dead zone,
+the editor casts that bearing as a ray from the selected footprint's area-weighted centroid, finds the
+nearest positive intersection with an outer edge, chooses the edge normal facing into the same
+half-plane as the ray, and writes the normal as numeric degrees rounded to the nearest whole number.
+If a ray hits a shared vertex, the edge whose normal aligns most closely with the lookup bearing wins.
+Clicking the displayed value opens the numeric editor, which accepts an exact manual bearing from 0°
+through 360°, normalizes 360° to 0°, and removes the explicit tag when the input is cleared. An unset
+value is displayed as **automatic**. Existing named compass tags resolve through the same edge-normal
+rule for rendering and are canonicalized to degrees by the next drag or manual edit. The stored value
+is the downhill direction from the high edge toward the low eave, matching OSM's rainwater-flow
+convention.
+
+Setting or removing `roof:shape` on a building part also removes `roof:shape` from its parent outline
+as a pending edit. A part with an explicitly edited roof type owns that roof definition; the outline
+must not retain a competing roof type.
 
 The `height` and `roof:height` rows also have a horizontal-arrow handle immediately before their
 property names. Dragging the handle left or right changes the effective value live in 0.5 m steps; the left and right arrow
@@ -253,8 +373,42 @@ shrunk rings whose sine/cosine profile approaches the center apex like a sphere.
 twelve height rings along a related profile whose slope changes from 90 degrees at the facade to 45
 degrees at the apex, instead of the dome's 90-to-0-degree change. Its radius correction spans the
 upper half of the roof so the pointed silhouette stays visibly distinct from a dome at normal viewing
-distance. Roof planning and surface geometry live in `src/lib/roofs.ts`, separate from scene assembly
-so additional roof types can be added without changing the facade height rules.
+distance.
+
+Gabled, gambrel and round roofs derive a deterministic main axis from the footprint's minimum-area oriented
+bounding rectangle. With no valid `roof:orientation`, or with `along`, the rectangle's longest edge
+is the ridge direction; `across` rotates the ridge onto its shorter edge. Other values are preserved
+as source tags but render with the OSM `along` default. A gabled roof is two planar
+slopes from that ridge to the two transverse rectangle edges. A gambrel roof divides each gabled half
+into two equal-length sloped panels, creating four planar bands. The two panels rotate 15° in opposite
+directions around the equivalent gable pitch while retaining the same eaves, ridge and `roof:height`;
+a 45° gable therefore becomes a 60° lower panel and a 30° upper panel. Extremely shallow or steep
+roofs use the largest smaller offset that keeps both panels rising toward the ridge. A round roof uses
+the same ridge and edge positions but samples twelve transverse strips along a semicircular arch. Each
+strip is intersected with the actual polygon before triangulation, so concave footprints,
+multipolygons and holes cut the roof rather than receiving a bounding-box cap. Boundary segments are
+split at the same profile samples and get vertical fill from the flat eaves extrusion to the slope or
+arch, producing closed gable, gambrel and arched end walls.
+
+A skillion roof is one clipped plane. Its high boundary reaches total `height` and its downhill
+boundary meets the facade at `height - roof:height`. A valid numeric `roof:direction` from 0° through
+360° fixes the downhill bearing exactly. A 16-point compass value from N through NNW resolves to the
+normal of the first outer edge hit from the frame footprint's centroid in that compass direction.
+Without a valid direction the footprint's minimum-area oriented rectangle supplies a deterministic default
+perpendicular to its longest side; either of the two perpendicular directions is valid, and the
+renderer keeps the one produced by the stable rectangle frame. Selecting a building or part whose
+effective roof shape is skillion draws a fixed-size purple V with a white casing at that selected
+footprint's area-weighted centroid. The sharp corner uses map-aligned rotation and points downhill,
+including while the map bearing changes or a pending direction edit updates the 3D roof.
+
+A part carrying its own non-empty `roof:shape`, `roof:height`, `roof:orientation`, or `roof:direction` resolves an
+independent roof plan and minimum rectangle from that part, inheriting any omitted roof values from
+the outline. A part without all four resolves the parent's roof plan, absolute eaves, apex,
+direction/orientation, and parent-derived axis; it is extruded and cut under that shared surface. The parent roof
+shell renders once across untagged parts when part coverage suppresses the parent outline solid,
+rather than giving every part a separate ridge. Roof inheritance, planning, axis selection, clipping,
+profiles and emitted surface/wall geometry live in `src/lib/roofs.ts`, separate from scene assembly so
+additional roof types can be added without changing facade orchestration.
 
 ## Laser point cloud
 
@@ -330,7 +484,8 @@ Selection and the inspector are **live OSM only**, at z >= 16. Both building out
 snapshot that cannot be edited and whose fields are not OSM tags (`is_underground`,
 `has_parts`, `@geometry_source`), so clicking it below that zoom shows a hint instead of
 opening the panel. Every vertex on the selected element's outer and inner footprint rings is shown
-as a small black dot; the repeated closing coordinate in GeoJSON produces only one dot. Inside its
+as a small black dot, except a node with its own OSM tags, which is amber; the repeated closing
+coordinate in GeoJSON produces only one dot. Inside its
 nine-pixel interaction target, a node becomes a larger purple dot with a white halo and the pointer
 cursor, and that highlight follows the node while it is dragged. Dragging previews the new footprint
 continuously and stores one pending geometry change on release, updating the map and 3D view.
@@ -340,11 +495,16 @@ affected existing entity. This preserves shared corners and walls instead of pul
 footprint away from its neighbors. The drag is recorded as a move of the OSM node, not as a new
 corner, so on upload the node itself moves and everything attached to it follows — including the ways
 this editor never loaded, which the on-screen expansion cannot reach (see
-[osm-submission](osm-submission.md)). Releasing without moving changes nothing. Double-clicking an empty
-position on a selected outer or inner ring inserts a node at the nearest point on that segment;
-double-clicking near an existing node does not add a duplicate. A node reshape remains compatible
-with parts in 3D: once parts cover the edited outline, they replace it normally. Only a **Cut hole**
-override makes the outline authoritative, because older parts could otherwise fill that opening.
+[osm-submission](osm-submission.md)). While dragging, every visible building and part boundary is a
+snap target: existing nodes take priority within nine pixels and edges attract within twelve pixels.
+The dragged node's own position and incident edges are excluded. Snapping onto another node merges
+the edited rings onto that existing node, collapsing an adjacent duplicate; snapping onto an edge
+inserts the node into every coincident loaded ring, including a part's parent outline. Releasing
+without moving changes nothing. Double-clicking an empty position on a selected outer or inner ring
+inserts a node at the nearest point on that segment and into every coincident loaded ring;
+double-clicking near an existing node does not add a duplicate. Node reshapes and hole cuts remain
+compatible with parts in 3D: once parts cover the edited outline, they replace it normally, and a
+hole cut has already subtracted the opening from every underlying part.
 
 ## 3D context
 
@@ -363,6 +523,11 @@ collapse to the newest geometry. `roof:height` changes the facade/roof join but
 not the apex, so it also reuses the existing LiDAR point buffer. A genuine
 viewer teardown explicitly releases its WebGL context so it cannot evict the
 MapLibre or persistent Google 3D context.
+
+Switching between the outline and parts of the same parent also keeps that runtime mounted. The
+building and neighbor meshes, terrain, decoded cloud, and LiDAR position buffer are parent-scoped;
+only camera focus and the selection-dependent discrepancy colours change. In-flight terrain and
+LiDAR reads continue across that switch instead of being aborted and restarted.
 
 Neighbors are read from the same tile features as the selection, so context stops
 at the edge of the loaded tiles — acceptable, since the click always happens

@@ -34,6 +34,8 @@ interface Lod1Properties {
 
 export interface Lod1Match {
   properties: Lod1Properties;
+  /** Exact generalized LOD1 footprint used for this match. */
+  outline: FeatureCollection;
   /** Fraction of the OSM footprint covered by the LOD1 block. */
   coverage: number;
   /**
@@ -95,6 +97,7 @@ export function matchLod1(
       if (!best || coverage > best.coverage) {
         best = {
           properties: (feature.properties ?? {}) as Lod1Properties,
+          outline: { type: "FeatureCollection", features: [feature] },
           coverage,
           blockShare,
           confident: blockShare >= BLOCK_SHARE_MIN,

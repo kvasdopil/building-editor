@@ -9,6 +9,7 @@ import {
 } from "@/lib/osm/cache";
 import { fetchUpstream, UpstreamUnavailableError } from "@/lib/osm/limiter";
 import { type OsmMapResponse, osmToBuildings } from "@/lib/osm/parse";
+import { OSM_TILE_SCHEMA } from "@/lib/osm/tiles";
 
 /**
  * Looks up one OSM element by id, for the "#way/123" search. Goes through the
@@ -30,7 +31,7 @@ export async function GET(
     return NextResponse.json({ error: "Expected way/<id> or relation/<id>" }, { status: 400 });
   }
 
-  const key = ["element", type, id];
+  const key = [OSM_TILE_SCHEMA, "element", type, id];
   const cached = await readCachedTile<FeatureCollection>(key);
   if (cached && isFresh(cached)) {
     return NextResponse.json(cached.data, { headers: { "x-cache": "hit" } });
