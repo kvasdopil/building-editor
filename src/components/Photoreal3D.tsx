@@ -1,7 +1,7 @@
 "use client";
 
 import { TilesRenderer } from "3d-tiles-renderer";
-import { GoogleCloudAuthPlugin } from "3d-tiles-renderer/plugins";
+import { CesiumIonAuthPlugin } from "3d-tiles-renderer/plugins";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { FiChevronDown, FiChevronRight } from "react-icons/fi";
@@ -15,16 +15,15 @@ import { mountCanvas } from "@/lib/three-canvas";
  * check next to our own extrusion. The camera follows the local orbit camera, so
  * both views show the same angle.
  *
- * Billing shape matters here (see README): the Map Tiles API charges per root
- * tileset request, and one token then covers three hours of mesh requests. So
- * the renderer is created once when the section is opened and only the camera
- * moves as the selection changes — mounting it per building would multiply the
- * session count by the number of buildings inspected.
+ * The renderer is created once when the section is opened and only the camera
+ * moves as the selection changes. That keeps the downloaded tiles warm and
+ * avoids starting fresh provider sessions for every inspected building.
  */
 
-const TILESET_URL = "https://tile.googleapis.com/v1/3dtiles/root.json";
+const CESIUM_ION_ASSET_ID = "2275207";
 
-const API_KEY = process.env.NEXT_PUBLIC_MAP_TILES_API_KEY;
+const CESIUM_TOKEN = process.env.NEXT_PUBLIC_CESIUM_TOKEN;
+const HAS_TILE_SOURCE = Boolean(CESIUM_TOKEN);
 
 const OPEN_STORAGE_KEY = "building-explorer:google-3d-open";
 /** Keeps remounts during selection changes from flashing the panel closed. */
@@ -136,15 +135,11 @@ function MissingKey() {
   return (
     <div className="space-y-1 px-4 py-3 text-[11px] text-slate-500">
       <p>
-        Set <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_MAP_TILES_API_KEY</code> in{" "}
-        <code className="rounded bg-slate-100 px-1">.env.local</code> to show Google&apos;s
-        photorealistic mesh here.
+        Set <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_CESIUM_TOKEN</code> in{" "}
+        <code className="rounded bg-slate-100 px-1">.env.local</code> to show the photorealistic
+        mesh here.
       </p>
-      <p>
-        Needs a billing-enabled Google Cloud project with the Map Tiles API enabled. Billed per
-        session, 1,000 free per month — opening this section starts one session that lasts three
-        hours.
-      </p>
+      <p>The token needs access to Google Photorealistic 3D Tiles in Cesium ion (asset 2275207).</p>
     </div>
   );
 }
@@ -185,7 +180,7 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!mounted || !API_KEY || !container) return;
+    if (!mounted || !CESIUM_TOKEN || !container) return;
 
     const scene = new THREE.Scene();
     scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 2));
@@ -196,8 +191,14 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
     const canvas = mountCanvas(container, camera, { logarithmicDepthBuffer: true });
     const { renderer } = canvas;
 
-    const tiles = new TilesRenderer(TILESET_URL);
-    tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: API_KEY, autoRefreshToken: true }));
+    const tiles = new TilesRenderer();
+    tiles.registerPlugin(
+      new CesiumIonAuthPlugin({
+        apiToken: CESIUM_TOKEN,
+        assetId: CESIUM_ION_ASSET_ID,
+        autoRefreshToken: true,
+      }),
+    );
     tiles.setCamera(camera);
     scene.add(tiles.group);
 
@@ -207,7 +208,7 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
     aim();
 
     tiles.addEventListener("load-error", () => {
-      setError("Google refused the tile request — check the key and that billing is enabled.");
+      setError("Cesium ion refused the tile request — check the token and asset access.");
     });
 
     let lastAttribution = 0;
@@ -239,10 +240,12 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
       // stream in, so refresh it about once a second rather than per frame.
       if (now - lastAttribution > 1000) {
         lastAttribution = now;
-        const credits = tiles
+        const tileCredits = tiles
           .getAttributions()
           .map((entry) => String(entry.value))
           .join(" · ");
+        const providerCredits = "Google · Cesium ion";
+        const credits = tileCredits ? `${providerCredits} · ${tileCredits}` : providerCredits;
         setAttribution((previous) => (previous === credits ? previous : credits));
       }
     });
@@ -262,7 +265,7 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
   return (
     <section
       className={`border-t border-slate-200 ${
-        open && API_KEY ? "flex min-h-48 flex-1 flex-col" : ""
+        open && HAS_TILE_SOURCE ? "flex min-h-48 flex-1 flex-col" : ""
       }`}
     >
       <button
@@ -289,11 +292,11 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
           <FiChevronRight className="h-3.5 w-3.5" aria-hidden />
         )}
         <span className="ml-auto text-[10px] font-normal normal-case">
-          {API_KEY ? "" : "no key"}
+          {HAS_TILE_SOURCE ? "" : "no key"}
         </span>
       </button>
 
-      {API_KEY ? (
+      {HAS_TILE_SOURCE ? (
         <>
           {mounted && (
             <div

@@ -99,10 +99,13 @@ closer would have hidden it for one frame and let it return on the first scroll.
 Creating the links makes no third-party request; coordinates and the user's IP leave the app only
 when a link is opened.
 
-The embedded Google photorealistic section remembers its expanded state in local storage. Once the
-mapper opens it, it stays expanded while switching buildings and after reloads until the mapper
-explicitly hides it. An in-memory copy supplies the same state immediately when selection changes
-temporarily unmount and remount the section, avoiding a closed-panel flash.
+The embedded Google photorealistic section authenticates exclusively through Cesium ion asset
+`2275207` when a Cesium browser token is configured. Direct Google Map Tiles keys are not supported
+because affected EEA Google Cloud projects cannot request the 3D tiles. The section remembers its
+expanded state in local storage. Once the mapper opens it, it stays expanded while switching
+buildings and after reloads until the mapper explicitly hides it. An in-memory copy supplies the
+same state immediately when selection changes temporarily unmount and remount the section, avoiding
+a closed-panel flash.
 
 Pending-change links for existing OSM ways and relations resolve the entity through the cached
 element route, fit its geometry without landing below z16, and select it once its live tile data

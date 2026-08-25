@@ -238,7 +238,9 @@ so the same edit can be validated in JOSM.
 
 Measured 2026-08-19: `bing.com/maps?style=3d` answers `X-Frame-Options: DENY`, and Google Maps answers `SAMEORIGIN`, so their photorealistic 3D views cannot be framed. The panel therefore links out and translates the current Three.js orbit into each provider's camera URL: target, heading, tilt and distance for Google Earth; direction, pitch, eye height and an approximate zoom for Bing.
 
-Real photorealistic 3D in-app would mean Google's 3D Tiles with CesiumJS — an API key and a paid quota, not an iframe.
+The optional in-app view streams Google's Photorealistic 3D Tiles through the existing Three.js
+renderer. It authenticates through Cesium ion rather than a direct Google API key and does not use
+an iframe.
 
 ## Height rules
 
@@ -286,8 +288,10 @@ Data attribution: © OpenStreetMap contributors, © Overture Maps Foundation, im
 
 ## Photorealistic 3D (optional)
 
-Set `NEXT_PUBLIC_MAP_TILES_API_KEY` in `.env.local` (billing-enabled Google Cloud project, Map
-Tiles API enabled) to render Google's photorealistic mesh in the panel's third section. Billed per
-session: $6/1,000 beyond 1,000 free per month, one session covering three hours. The renderer is
-created once and only the camera moves, and the section is collapsed by default so no session starts
-until you look. Orientation aid only — Google imagery is not a permitted source for OSM edits.
+Set `NEXT_PUBLIC_CESIUM_TOKEN` in `.env.local` and add Google Photorealistic 3D Tiles (asset
+`2275207`) to that Cesium ion account. Cesium plan, asset-access and attribution requirements apply;
+restrict the browser token to the intended assets and origins. Direct Google Map Tiles API keys are
+not supported because affected EEA Google Cloud projects cannot request Photorealistic 3D Tiles.
+The renderer is created once and only the camera moves, and the section is collapsed by default so
+it streams nothing until opened. Orientation aid only — Google imagery is not a permitted source
+for OSM edits.
