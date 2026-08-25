@@ -375,6 +375,15 @@ degrees at the apex, instead of the dome's 90-to-0-degree change. Its radius cor
 upper half of the roof so the pointed silhouette stays visibly distinct from a dome at normal viewing
 distance.
 
+A hipped roof uses the footprint's interior straight skeleton. Every outer and hole boundary edge
+moves inward at the same rate; edge-collapse and split events form the hips, ridges and valleys, so
+concave L-, H- and T-shaped footprints remain one continuous equal-pitch roof rather than a collection
+of rectangular roofs. The skeleton's propagation time becomes elevation from the eaves to the tagged
+`roof:height`, and each skeleton face is triangulated independently to retain hard facet creases. The
+CGAL/Wasm engine initializes once when the 3D viewer mounts. Until it is ready, or whenever a weakly
+simple skeleton cannot be constructed, the same footprint uses the existing pyramidal roof as a safe
+fallback instead of disappearing.
+
 Gabled, gambrel and round roofs derive a deterministic main axis from the footprint's minimum-area oriented
 bounding rectangle. With no valid `roof:orientation`, or with `along`, the rectangle's longest edge
 is the ridge direction; `across` rotates the ridge onto its shorter edge. Other values are preserved

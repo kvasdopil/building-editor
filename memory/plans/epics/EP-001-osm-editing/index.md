@@ -196,6 +196,12 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   an effective skillion building or part draws a map-aligned V at its centroid with the sharp corner
   downhill.
 
+- **Complex hipped roofs (2026-08-25).** `roof:shape=hipped` now builds one equal-pitch roof from the
+  complete footprint's CGAL-backed interior straight skeleton. Concave L, H and T outlines therefore
+  gain their natural hip, ridge and valley network without rectangular decomposition; holes are passed
+  through as inner rings. The browser-only Wasm engine initializes once at the 3D-view boundary, and
+  invalid or still-unavailable skeleton geometry falls back to the existing pyramidal surface.
+
 - **Overlapping-volume fix (2026-08-23).** The `overlapping-volumes` warning now offers a
   deterministic **Fix** when the shorter part starts at ground and the other part has a higher top.
   It sets the higher part's `min_height` to the shorter part's effective top, then the existing

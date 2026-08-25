@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { buildPointCloud, buildScene, updatePointCloudSelection } from "@/lib/extrude";
@@ -8,6 +8,7 @@ import { levelHeight, verticalExtent } from "@/lib/heights";
 import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
 import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
 import { mountCanvas } from "@/lib/three-canvas";
+import { initializeHippedRoofGeometry } from "@/lib/roofs";
 import type { BuildingSelection } from "@/lib/buildings";
 
 /**
@@ -132,6 +133,7 @@ export function Building3D({
   onTerrainStatus?: (status: TerrainStatus) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [hippedRoofsReady, setHippedRoofsReady] = useState(false);
   const selectionRef = useRef(selection);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   selectionRef.current = selection;
@@ -149,6 +151,16 @@ export function Building3D({
   const orbitRef = useRef<CameraView | null>(null);
   /** Map bearing behind the last render, to tell a map rotation from a reselect. */
   const bearingRef = useRef(initialHeading);
+
+  useEffect(() => {
+    let active = true;
+    void initializeHippedRoofGeometry().then((ready) => {
+      if (active && ready) setHippedRoofsReady(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -415,6 +427,7 @@ export function Building3D({
     onCloudChange,
     onCloudStatus,
     onTerrainStatus,
+    hippedRoofsReady,
     selection.building.id,
   ]);
 

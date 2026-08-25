@@ -29,6 +29,7 @@
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-icons": "^5.7.0",
+    "straight-skeleton": "^3.0.0",
     "three": "^0.185.1"
   },
   "devDependencies": {

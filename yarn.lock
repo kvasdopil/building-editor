@@ -2189,6 +2189,11 @@ splaytree-ts@^1.0.2:
   resolved "https://registry.yarnpkg.com/splaytree-ts/-/splaytree-ts-1.0.2.tgz#34963704587aff45eaa09c24713f552bbf56e8f0"
   integrity sha512-0kGecIZNIReCSiznK3uheYB8sbstLjCZLiwcQwbmLhgHJj2gz6OnSPkVzJQCMnmEz1BQ4gPK59ylhBoEWOhGNA==
 
+straight-skeleton@^3.0.0:
+  version "3.0.0"
+  resolved "https://registry.yarnpkg.com/straight-skeleton/-/straight-skeleton-3.0.0.tgz#562678d5467489caea52e11039f22da69eec21e0"
+  integrity sha512-XwL1vGE5L/S5BxWS9qEK4sKIo0BEzthKYkR9f9Yz/2Twtz/mIejc5khnTkEO12R2q/QndSsLnQ1gzsQ7STTSxw==
+
 string-width@^4.2.0:
   version "4.2.3"
   resolved "https://registry.yarnpkg.com/string-width/-/string-width-4.2.3.tgz#269c7117d27b05ad2e536830a8ec895ef9c6d010"

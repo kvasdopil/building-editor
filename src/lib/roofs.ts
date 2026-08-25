@@ -12,6 +12,7 @@ export interface RoofFootprint {
 
 export type RoofShape =
   | "pyramidal"
+  | "hipped"
   | "dome"
   | "onion"
   | "gabled"
@@ -107,19 +108,21 @@ export function roofPlan(
   const shape =
     rawShape === "pyramidal" || rawShape === "pyramid"
       ? "pyramidal"
-      : rawShape === "dome" || rawShape === "sphere"
-        ? "dome"
-        : rawShape === "onion"
-          ? "onion"
-          : rawShape === "gabled"
-            ? "gabled"
-            : rawShape === "gambrel"
-              ? "gambrel"
-              : rawShape === "round"
-                ? "round"
-                : rawShape === "skillion"
-                  ? "skillion"
-                  : null;
+      : rawShape === "hipped"
+        ? "hipped"
+        : rawShape === "dome" || rawShape === "sphere"
+          ? "dome"
+          : rawShape === "onion"
+            ? "onion"
+            : rawShape === "gabled"
+              ? "gabled"
+              : rawShape === "gambrel"
+                ? "gambrel"
+                : rawShape === "round"
+                  ? "round"
+                  : rawShape === "skillion"
+                    ? "skillion"
+                    : null;
   if (shape === null) return null;
 
   const requestedHeight = finiteNumber(properties.roof_height) ?? finiteNumber(parent?.roof_height);
@@ -259,6 +262,135 @@ export function pyramidalRoofSurface(
   }
 
   return { positions: Float32Array.from(positions), center };
+}
+
+type StraightSkeletonBuilder = (typeof import("straight-skeleton"))["SkeletonBuilder"];
+type StraightSkeletonModule = typeof import("straight-skeleton") & {
+  default?: typeof import("straight-skeleton");
+};
+type StraightSkeletonVertex = [number, number, number];
+
+let straightSkeletonBuilder: StraightSkeletonBuilder | null = null;
+let straightSkeletonInitialization: Promise<boolean> | null = null;
+
+/** Initialize the browser-only CGAL/Wasm engine once before building hipped roofs. */
+export function initializeHippedRoofGeometry(): Promise<boolean> {
+  if (straightSkeletonBuilder) return Promise.resolve(true);
+  if (straightSkeletonInitialization) return straightSkeletonInitialization;
+  if (typeof window === "undefined") return Promise.resolve(false);
+
+  straightSkeletonInitialization = import("straight-skeleton")
+    .then(async (loadedModule) => {
+      const skeletonModule = loadedModule as StraightSkeletonModule;
+      const SkeletonBuilder =
+        skeletonModule.SkeletonBuilder ?? skeletonModule.default?.SkeletonBuilder;
+      if (!SkeletonBuilder) return false;
+      await SkeletonBuilder.init();
+      straightSkeletonBuilder = SkeletonBuilder;
+      return true;
+    })
+    .catch(() => false);
+  return straightSkeletonInitialization;
+}
+
+function samePoint(first: Point2, second: Point2): boolean {
+  return first[0] === second[0] && first[1] === second[1];
+}
+
+function skeletonRing(points: Point2[], counterClockwise: boolean): Point2[] | null {
+  const ring: Point2[] = [];
+  for (const point of points) {
+    if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) return null;
+    if (!ring.length || !samePoint(ring[ring.length - 1], point)) ring.push(point);
+  }
+  if (ring.length > 1 && samePoint(ring[0], ring[ring.length - 1])) ring.pop();
+  if (ring.length < 3 || Math.abs(signedArea(ring)) <= 1e-9) return null;
+  const directed = oriented(ring, counterClockwise);
+  return [...directed, directed[0]];
+}
+
+function skeletonFace(vertices: StraightSkeletonVertex[]): StraightSkeletonVertex[] {
+  const face: StraightSkeletonVertex[] = [];
+  for (const vertex of vertices) {
+    const previous = face[face.length - 1];
+    if (!previous || previous[0] !== vertex[0] || previous[1] !== vertex[1]) face.push(vertex);
+  }
+  if (
+    face.length > 1 &&
+    face[0][0] === face[face.length - 1][0] &&
+    face[0][1] === face[face.length - 1][1]
+  )
+    face.pop();
+  return face;
+}
+
+/**
+ * Lift every face of an interior straight skeleton into one equal-pitch roof
+ * facet. Reflex footprint corners become valleys, so L, H and T outlines stay
+ * one continuous hipped roof instead of being decomposed into rectangles.
+ */
+export function hippedRoofSurface(
+  footprints: RoofFootprint[],
+  eaves: number,
+  top: number,
+): RoofSurface | null {
+  if (!straightSkeletonBuilder || footprints.length === 0 || top <= eaves) return null;
+
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const roofHeight = top - eaves;
+
+  try {
+    for (const footprint of footprints) {
+      const outer = skeletonRing(footprint.outer, true);
+      if (!outer) return null;
+      const holes: Point2[][] = [];
+      for (const footprintHole of footprint.holes) {
+        const hole = skeletonRing(footprintHole, false);
+        if (!hole) return null;
+        holes.push(hole);
+      }
+
+      const skeleton = straightSkeletonBuilder.buildFromPolygon([outer, ...holes]);
+      if (!skeleton) return null;
+      const maximumTime = Math.max(...skeleton.vertices.map((vertex) => vertex[2]));
+      if (!Number.isFinite(maximumTime) || maximumTime <= 1e-9) return null;
+
+      for (const polygon of skeleton.polygons) {
+        const face = skeletonFace(polygon.map((index) => skeleton.vertices[index]));
+        if (face.length < 3) return null;
+        const triangles = ShapeUtils.triangulateShape(
+          face.map(([x, y]) => new Vector2(x, y)),
+          [],
+        );
+        if (triangles.length === 0) return null;
+
+        for (const triangle of triangles) {
+          const triangleIndices = triangle.map((index) => {
+            const [x, y, time] = face[index];
+            const progress = Math.max(0, Math.min(1, time / maximumTime));
+            return pushVertex(positions, [x, eaves + progress * roofHeight, y]);
+          });
+          pushUpwardTriangle(
+            indices,
+            positions,
+            triangleIndices[0],
+            triangleIndices[1],
+            triangleIndices[2],
+          );
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  if (indices.length === 0) return null;
+  return {
+    positions: Float32Array.from(positions),
+    indices: Uint32Array.from(indices),
+    center: roofCenter(footprints.map((footprint) => footprint.outer)),
+  };
 }
 
 /** Number of curved bands between a dome's eaves and apex. */
@@ -1023,6 +1155,8 @@ export function roofSurface(
   const eaves = plan.eaves + groundOffset;
   const top = plan.top + groundOffset;
   const outlines = footprints.map((footprint) => footprint.outer);
+  if (plan.shape === "hipped")
+    return hippedRoofSurface(footprints, eaves, top) ?? pyramidalRoofSurface(outlines, eaves, top);
   if (plan.shape === "dome") return domedRoofSurface(outlines, eaves, top);
   if (plan.shape === "onion") return onionRoofSurface(outlines, eaves, top);
   if (plan.shape === "gabled")
