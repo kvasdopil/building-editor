@@ -26,7 +26,10 @@ export function useSelectionHash(
   // would otherwise erase the deep link before the one that follows it.
   const deepLink = useRef<OsmRef | null | undefined>(undefined);
   if (deepLink.current === undefined) {
-    deepLink.current = typeof window === "undefined" ? null : parseOsmRef(window.location.hash);
+    // Only the reference segment: the view segments that follow it would make
+    // `parseOsmRef`, which anchors the id to the end of the string, see nothing.
+    deepLink.current =
+      typeof window === "undefined" ? null : parseOsmRef(hashRef(window.location.hash));
   }
   // A deep link is in flight: the lookup needs a network round trip and the
   // tile it lands in, and nothing is selected until then.
@@ -36,7 +39,7 @@ export function useSelectionHash(
     if (!ready) return;
     if (deepLink.current) select(deepLink.current);
     const onHashChange = () => {
-      const ref = parseOsmRef(window.location.hash);
+      const ref = parseOsmRef(hashRef(window.location.hash));
       if (!ref) return;
       resolving.current = true;
       select(ref);

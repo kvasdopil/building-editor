@@ -40,7 +40,16 @@ import {
   padBounds,
   toFootprints,
 } from "@/lib/geometry";
-import { buildHash, hashRef, parseView, viewMode, viewState, writeHash } from "@/lib/map-hash";
+import {
+  buildHash,
+  DEFAULT_VIEW,
+  effectiveView,
+  hashRef,
+  type ViewHash,
+  viewMode,
+  viewState,
+  writeHash,
+} from "@/lib/map-hash";
 import { useSelectionHash } from "@/lib/use-selection-hash";
 import {
   applyGeometryEdits,
@@ -157,6 +166,13 @@ const LIDAR_COLOUR_MODES: { mode: LidarColourMode; label: string; title: string 
     mode: "normal",
     label: "Normal",
     title: "Colour each link by its angle from horizontal, violet flat to red vertical",
+  },
+  {
+    mode: "diff",
+    label: "Diff",
+    title:
+      "Colour each point by its height against the roof modelled from OSM: " +
+      "green agrees, red is above the model, violet below",
   },
 ];
 
@@ -1713,36 +1729,55 @@ export function MapView() {
   // The selected element lives in the URL hash, so a building can be linked to.
   useSelectionHash(selection?.selected.id ?? null, mapReady, searchById);
 
-  // The view lives there too. It is applied after mount rather than as initial
-  // state because the server cannot see the hash, so rendering it directly
-  // would not match what the server sent. Until this has run, the effect below
-  // must not write, or it would replace the incoming hash with the defaults.
-  const viewRestored = useRef(false);
+  /**
+   * The view the URL asked for, read once during render rather than inside the
+   * effect that applies it. Two things make the timing matter: the effect that
+   * writes the hash runs in the same commit as the one that applies it, so it
+   * would see the state still at its server-rendered defaults and replace the
+   * incoming view with them; and React's development double-mount would then
+   * re-read a hash that had already been overwritten. A ref settled before any
+   * effect runs is immune to both.
+   */
+  const initialView = useRef<ViewHash | null>(null);
+  if (initialView.current === null) {
+    initialView.current =
+      typeof window === "undefined" ? DEFAULT_VIEW : effectiveView(window.location.hash);
+  }
+
+  // Applied after mount rather than as initial state, because the server never
+  // sees the hash and rendering it directly would not match what it sent.
   useEffect(() => {
-    const view = parseView(window.location.hash);
+    const view = initialView.current ?? DEFAULT_VIEW;
     setLod1Visible(view.lod1);
     setLidarLines(view.lines);
-    // A LiDAR view needs a building. Honour it when the hash also carries a
-    // reference — the selection is on its way — and otherwise fall back to the
-    // plain map rather than showing an empty cloud that cannot be switched off.
     const wanted = viewState(view.mode);
-    const selectable = Boolean(hashRef(window.location.hash));
     setPhotos(wanted.photos);
-    setLidar(wanted.lidar && selectable);
+    setLidar(wanted.lidar);
     if (wanted.colour) setLidarColourMode(wanted.colour);
-    viewRestored.current = true;
   }, []);
 
+  const viewArmed = useRef(false);
   useEffect(() => {
-    if (!viewRestored.current) return;
-    const mode = viewMode(photos, lidar, lidarColourMode);
-    writeHash(
-      buildHash(hashRef(window.location.hash), {
-        mode,
-        lines: lidarLines,
-        lod1: lod1Visible,
-      }),
-    );
+    const current: ViewHash = {
+      mode: viewMode(photos, lidar, lidarColourMode),
+      lines: lidarLines,
+      lod1: lod1Visible,
+    };
+    if (!viewArmed.current) {
+      // Hold off until the restored view has actually reached the state. Until
+      // then the state is still the defaults, and writing it would erase the
+      // view the URL arrived with.
+      const target = initialView.current ?? DEFAULT_VIEW;
+      if (
+        current.mode !== target.mode ||
+        current.lines !== target.lines ||
+        current.lod1 !== target.lod1
+      ) {
+        return;
+      }
+      viewArmed.current = true;
+    }
+    writeHash(buildHash(hashRef(window.location.hash), current));
   }, [lidar, lidarColourMode, lidarLines, lod1Visible, photos]);
 
   /** Switch between an already loaded part and its parent without another request. */
@@ -3456,6 +3491,11 @@ export function MapView() {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  const onLidarDifferences = useCallback((buildingId: string, differences: Float32Array | null) => {
+    if (selectionRef.current?.building.id !== buildingId) return;
+    lidarLayerRef.current?.setDifferences(differences);
+  }, []);
+
   const onLidarCloudChange = useCallback((buildingId: string, cloud: LidarCloud | null) => {
     if (selectionRef.current?.building.id !== buildingId) return;
     lidarLayerRef.current?.setCloud(cloud);
@@ -3932,6 +3972,7 @@ export function MapView() {
         edits={edits}
         onEditTag={editEntityTag}
         onLidarCloudChange={onLidarCloudChange}
+        onLidarDifferences={onLidarDifferences}
         onSelectEntity={selectLoadedEntity}
         onClose={() => setSelection(null)}
       />

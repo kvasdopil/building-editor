@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { buildPointCloud, buildScene, updatePointCloudSelection } from "@/lib/extrude";
+import {
+  buildPointCloud,
+  buildScene,
+  roofDifferences,
+  updatePointCloudSelection,
+} from "@/lib/extrude";
 import { levelHeight, verticalExtent } from "@/lib/heights";
 import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
 import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
@@ -121,6 +126,7 @@ export function Building3D({
   onCameraChange,
   onCloudStatus,
   onCloudChange,
+  onCloudDifferences,
   onTerrainStatus,
 }: {
   selection: BuildingSelection;
@@ -130,6 +136,12 @@ export function Building3D({
   onCloudStatus?: (status: CloudStatus) => void;
   /** Shares the decoded cloud with the map's XY-only LiDAR mode. */
   onCloudChange?: (buildingId: string, cloud: LidarCloud | null) => void;
+  /**
+   * Per-point height difference against the modelled roof, for the map's diff
+   * colouring. Separate from the cloud because it depends on terrain and on
+   * which part is selected, both of which settle after the points arrive.
+   */
+  onCloudDifferences?: (buildingId: string, differences: Float32Array | null) => void;
   onTerrainStatus?: (status: TerrainStatus) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -185,6 +197,13 @@ export function Building3D({
     if (cloudPoints) scene.add(cloudPoints);
     let refocus: ((focus: THREE.Box3) => void) | null = null;
 
+    // The difference depends on the cloud, the terrain alignment and the
+    // selected part, so it is published from every place any of those settle
+    // rather than once when the points arrive.
+    const publishDifferences = () => {
+      onCloudDifferences?.(id, cloud ? roofDifferences(cloud, activeSelection, terrain) : null);
+    };
+
     const replacePointCloud = () => {
       if (cloudPoints) {
         scene.remove(cloudPoints);
@@ -192,7 +211,11 @@ export function Building3D({
       }
       cloudPoints = cloud ? buildPointCloud(cloud, activeSelection, built.origin, terrain) : null;
       if (cloudPoints) scene.add(cloudPoints);
+      publishDifferences();
     };
+    // A cached cloud is already in the scene and never reaches the rebuild
+    // above, so the opening state is published here.
+    publishDifferences();
 
     // Rebuilding changes terrain and neighbor base elevations, but never the
     // selected building's zero: its lowest Mapterhorn sample is the scene datum.
@@ -208,8 +231,10 @@ export function Building3D({
           built.focusTargets.get(nextSelection.selected.id) ??
           built.focusTargets.get(nextSelection.building.id);
         if (focusTarget) built.focus.setFromObject(focusTarget);
-        if (cloud && cloudPoints)
+        if (cloud && cloudPoints) {
           updatePointCloudSelection(cloudPoints, cloud, activeSelection, terrain);
+          publishDifferences();
+        }
         refocus?.(built.focus);
         return;
       }
@@ -262,12 +287,14 @@ export function Building3D({
       if (!cloud) {
         onCloudStatus?.({ buildingId: id, state: "loading" });
         onCloudChange?.(id, null);
+        onCloudDifferences?.(id, null);
       }
       const loaded = cloud ?? (await fetchLidarCloud(activeSelection.building, controller.signal));
       if (!loaded) {
         if (!disposed) {
           onCloudStatus?.({ buildingId: id, state: "empty" });
           onCloudChange?.(id, null);
+          onCloudDifferences?.(id, null);
         }
         return;
       }
@@ -425,6 +452,7 @@ export function Building3D({
     initialHeading,
     onCameraChange,
     onCloudChange,
+    onCloudDifferences,
     onCloudStatus,
     onTerrainStatus,
     hippedRoofsReady,

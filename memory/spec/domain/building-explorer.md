@@ -474,18 +474,30 @@ The basemap, the imagery and the point cloud are three positions of one **Map / 
 switch rather than independent toggles, because each replaces the one below it; `LiDAR` is
 unavailable without a selection. Whatever the chosen underlay needs sits on a second toolbar row
 rather than beside the switch, so the switch keeps its place as its options come and go: `Photos`
-puts the four-way alignment button there, and `LiDAR` a **Color / Height / Normal** selector plus a
+puts the four-way alignment button there, and `LiDAR` a **Color / Height / Normal / Diff** selector plus a
 **Lines** checkbox, which draws the links between consecutively recorded points; it starts off, so
 the mode opens on the bare dots.
 
 The whole view is in the URL hash alongside the selection, as `&`-separated segments — for example
 `#way/42764754&normals&lines=1&lod1=0`. The segment that parses as an OSM reference is the
-selection; `photos`, `lidar`, `height` and `normals` name the underlay together with its colouring,
+selection; `photos`, `lidar`, `height`, `normals` and `diff` name the underlay together with its
+colouring,
 since those read as one choice; `lines=1` and `lod1=0` carry the two toggles away from their
-defaults. Only non-defaults are written, so an ordinary link stays `#way/42764754`. The view is
-applied after mount rather than as initial state, because the server never sees the hash and
-rendering it directly would not match what was sent. A LiDAR mode is honoured only when the hash
-also names an element, so a cloud is never shown for a building that will never arrive.
+defaults. Only non-defaults are written, so an ordinary link stays `#way/42764754`. A LiDAR mode is
+honoured only when the hash also names an element, so a cloud is never shown for a building that
+will never arrive.
+
+The view is applied after mount rather than as initial state, because the server never sees the hash
+and rendering it directly would not match what was sent — but it is _read_ during render, into a ref,
+which two hazards make necessary. The effect that writes the hash runs in the same commit as the one
+that applies the view, so reading in the effect would let the write see state still at its defaults
+and replace the arriving view with them; and React's development double-mount would then re-read a
+hash that had already been overwritten, losing the view for good. Writing is additionally held back
+until the restored view has actually reached the state, so the first commit cannot publish the
+defaults. `parseOsmRef` anchors an element id to the end of its string, so the selection hook is
+given the reference segment rather than the whole hash; handed the whole hash it silently returns
+null for any URL carrying a view, which cost both the deep link and, through the deselect path, the
+reference in the URL.
 
 `Color` is the survey's own orthophoto sample. `Height` replaces it with a rainbow ramp — violet at
 the lowest point, through blue, green and yellow, to red at the highest. The ramp is fitted to the
@@ -508,6 +520,51 @@ Because it is per link, this reports the tilt along the beam's own bearing and n
 surface: a link running level across a pitched roof reports no slope, so one roof plane can read two
 ways depending on which way the scanner happened to be sweeping. Recovering the surface itself would
 need a second, differently-oriented link, which the sweep structure does not readily give.
+
+`Diff` runs the ramp over how far each point sits above what the app models for it. It is the same
+subtraction the 3D view colours discrepancies with, lifted out of `extrude.ts` so the flat map can
+show it too, and it therefore inherits the same per-survey terrain alignment: the point's height
+brought onto the scene datum, minus the modelled surface there.
+
+That surface spans the whole view rather than one footprint. A point is measured against whichever
+building covers it — the selected one or any neighbour the 3D view already draws as context, each on
+its own terrain base and using its parts where it has them — and against Mapterhorn terrain wherever
+no footprint does. Positive therefore means the survey found something above what is modelled: an
+unrecorded storey, a roof taller than its tags, a building nobody has mapped, or a tree, which is
+modelled nowhere and so reads as a large disagreement. Negative means the model stands above the
+scan. Footprints can overlap where an outline and a neighbouring part share a wall, so the higher
+roof wins, matching what the 3D view would draw.
+
+Testing every point against every footprint would be sixty polygons against half a million points,
+redone whenever the terrain or the selected part settles, so footprints are first bucketed into 25 m
+cells by bounding box and each point only tests the one or two buildings its own cell holds. That
+keeps a 400,000 point cloud against 61 buildings inside 100 ms.
+
+The scale is symmetric about zero and fixed at ten metres, not fitted to what is on screen. Fitting
+it sounds adaptive and is useless here: a single tree stands twenty metres above the terrain nobody
+modelled it on, so it sets the scale and squashes a building five metres wrong down to almost
+nothing. Fixed also means a colour is worth the same everywhere — one storey looks like one storey
+whichever building is selected and however far the map is zoomed — instead of shifting meaning under
+a pan.
+
+This mode does not use the violet-to-red ramp, because the reading that matters is a sign more than a
+magnitude. Colour is spent in proportion to how much there is to say: around zero everything is
+nearly grey, so the centimetre-scale disagreement covering most of a scene stops competing for
+attention, and strength builds linearly with the gap. The two signs take opposite halves of the
+wheel, so which way a point disagrees is legible before any magnitude is read: warm where the survey
+stands above the model — grey-green at 0.2 m, green at a storey, yellow at five metres, red at ten
+or more — and cold where it falls below it, grey-blue at a metre through blue to violet at ten. The
+cold side holds a floor of 0.26 saturation that the warm side does not, so the boundary where points
+pass under a roof is a step of about 0.19 in RGB rather than a fade through the same grey. That boundary is the point of the mode: it marks exactly where the survey
+drops inside the modelled solid. A horizontally misplaced building therefore shows as a red patch
+where its roof returns fall on unmodelled terrain, beside a blue one where the modelled solid stands
+over nothing but ground.
+
+The value is carried as a `(difference, known)` pair because a shader cannot be handed a missing
+value and NaN through a vertex attribute is not portable enough to rely on. Only points beyond the
+terrain tiles are left unknown, and those render grey. The difference depends on the terrain
+alignment and on which part is selected, both of which settle after the points arrive, so it is
+published separately from the cloud and refreshed wherever either changes.
 
 Height reaches the map only as colour in every mode; position stays flat XY throughout.
 

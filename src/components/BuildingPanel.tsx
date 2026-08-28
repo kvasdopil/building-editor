@@ -49,6 +49,7 @@ export function BuildingPanel({
   edits,
   onEditTag,
   onLidarCloudChange,
+  onLidarDifferences,
   onSelectEntity,
   onClose,
 }: {
@@ -58,6 +59,7 @@ export function BuildingPanel({
   edits: EditsApi;
   onEditTag: (entity: string, key: string, value: string, currentValue?: string) => void;
   onLidarCloudChange?: (buildingId: string, cloud: LidarCloud | null) => void;
+  onLidarDifferences?: (buildingId: string, differences: Float32Array | null) => void;
   onSelectEntity: (entityId: string) => void;
   onClose: () => void;
 }) {
@@ -245,6 +247,7 @@ export function BuildingPanel({
           onCameraChange={setCamera}
           onCloudStatus={setCloudStatus}
           onCloudChange={onLidarCloudChange}
+          onCloudDifferences={onLidarDifferences}
           onTerrainStatus={setTerrainStatus}
         />
       </div>

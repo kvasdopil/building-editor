@@ -380,19 +380,35 @@ function selectedRoofProfile(selection: BuildingSelection): RoofProfile {
     };
   }
 
-  const outlineTop = topFor(selection.building);
-  const parts = selection.parts.map((part) => ({
+  return wholeBuildingProfile(selection);
+}
+
+/**
+ * Roof height above a building's own flat base, across its whole footprint:
+ * covering parts where there are any, and the outline everywhere else.
+ */
+function wholeBuildingProfile(entity: BuildingWithParts): RoofProfile {
+  const metersPerLevel = levelHeight(entity.building.properties);
+  const topFor = (element: BuildingElement) =>
+    verticalExtent(
+      element.properties,
+      metersPerLevel,
+      element.id === entity.building.id ? undefined : entity.building.properties,
+    ).top;
+
+  const outlineTop = topFor(entity.building);
+  const parts = entity.parts.map((part) => ({
     element: part,
     bounds: elementBounds(part),
     top: topFor(part),
   }));
   const partsReplaceOutline =
-    partsCoverage(selection.building, selection.parts) >= OUTLINE_REPLACED_ABOVE;
+    partsCoverage(entity.building, entity.parts) >= OUTLINE_REPLACED_ABOVE;
 
   return {
-    bounds: elementBounds(selection.building),
+    bounds: elementBounds(entity.building),
     topAt(point) {
-      if (!pointInElement(point, selection.building)) return null;
+      if (!pointInElement(point, entity.building)) return null;
       let top = partsReplaceOutline ? -Infinity : outlineTop;
       for (const part of parts) {
         if (
@@ -450,6 +466,23 @@ function pointCloudAlignment(
   };
 }
 
+/**
+ * One point's height on the scene datum, with its own survey's terrain bias
+ * removed. Both the 3D view's discrepancy colours and the map's difference
+ * mode measure against this, and they have to measure against the same thing:
+ * two copies of the formula would let the two views quietly disagree about
+ * where a point is.
+ */
+function alignedHeight(cloud: LidarCloud, index: number, alignment: PointCloudAlignment): number {
+  const survey = cloud.surveys[index] === 0 ? 0 : 1;
+  return cloud.z[index] - alignment.biases[survey] - alignment.datum;
+}
+
+/** The lon/lat of one cloud point. */
+function cloudPoint(cloud: LidarCloud, index: number): LngLat {
+  return [cloud.lon[index], cloud.lat[index]];
+}
+
 function recolourPointCloud(
   colours: Float32Array,
   cloud: LidarCloud,
@@ -460,16 +493,148 @@ function recolourPointCloud(
   const roof = selectedRoofProfile(selection);
 
   for (let i = 0; i < cloud.count; i++) {
-    const point: LngLat = [cloud.lon[i], cloud.lat[i]];
+    const point = cloudPoint(cloud, i);
     if (!pointInBounds(point, roof.bounds)) continue;
     const roofTop = roof.topAt(point);
     if (roofTop === null) continue;
-    const survey = cloud.surveys[i] === 0 ? 0 : 1;
-    const pointHeight = cloud.z[i] - alignment.biases[survey] - alignment.datum;
-    const distance = pointHeight - (alignment.buildingGround + roofTop);
+    const distance = alignedHeight(cloud, i, alignment) - (alignment.buildingGround + roofTop);
     if (distance <= 0) continue;
     colours.set(roofDistanceColour(distance), i * 3);
   }
+}
+
+/** One modelled building, ready to be asked its roof height at a point. */
+interface ModelledBuilding {
+  profile: RoofProfile;
+  /** The building's flat base, on the scene datum. */
+  ground: number;
+}
+
+/**
+ * Which buildings can possibly cover each cell of a coarse grid.
+ *
+ * Testing every point against every building is 60 footprints times half a
+ * million points, and it is redone whenever the terrain or the selected part
+ * settles. Bucketing footprints by bounding box first turns that into a lookup
+ * plus a test against the one or two buildings actually near the point.
+ */
+const MODEL_INDEX_CELL_M = 25;
+
+class BuildingIndex {
+  private cells = new Map<string, ModelledBuilding[]>();
+  private west = 0;
+  private south = 0;
+  private cosLat = 1;
+
+  constructor(buildings: ModelledBuilding[], bounds: Bounds) {
+    [this.west, this.south] = [bounds[0], bounds[1]];
+    this.cosLat = Math.cos((((bounds[1] + bounds[3]) / 2) * Math.PI) / 180);
+    for (const building of buildings) {
+      const [west, south, east, north] = building.profile.bounds;
+      for (let row = this.row(south); row <= this.row(north); row++) {
+        for (let column = this.column(west); column <= this.column(east); column++) {
+          const key = `${column}/${row}`;
+          const cell = this.cells.get(key);
+          if (cell) cell.push(building);
+          else this.cells.set(key, [building]);
+        }
+      }
+    }
+  }
+
+  private column(longitude: number): number {
+    return Math.floor(
+      ((longitude - this.west) * EARTH_METERS_PER_DEG_LAT * this.cosLat) / MODEL_INDEX_CELL_M,
+    );
+  }
+
+  private row(latitude: number): number {
+    return Math.floor(((latitude - this.south) * EARTH_METERS_PER_DEG_LAT) / MODEL_INDEX_CELL_M);
+  }
+
+  at(point: LngLat): ModelledBuilding[] {
+    return this.cells.get(`${this.column(point[0])}/${this.row(point[1])}`) ?? [];
+  }
+}
+
+/**
+ * How far each laser point sits above what this app models for it, in metres,
+ * paired with a flag for the points nothing is modelled under.
+ *
+ * This is the same subtraction the 3D view colours discrepancies with, lifted
+ * out so the flat map can show it too, and widened from the selected footprint
+ * to everything on screen. The model a point is measured against is whichever
+ * building covers it — the selected one or any of the neighbours the 3D view
+ * draws as context — and Mapterhorn terrain everywhere else. Both sides are
+ * brought onto the scene datum through the same per-survey alignment the 3D
+ * view uses, so a point over open ground is compared against the ground and a
+ * point over a roof against that roof.
+ *
+ * Positive means the survey found something above what is modelled: an
+ * unrecorded storey, a roof taller than its tags, a building nobody has mapped,
+ * or a tree, which is modelled nowhere and so reads as a large disagreement.
+ * Negative means the model stands above the scan.
+ *
+ * Returned as `(difference, known)` pairs because a shader cannot be handed a
+ * missing value; NaN through a vertex attribute is not portable enough to rely
+ * on. Only points beyond the terrain tiles are left unknown.
+ */
+export function roofDifferences(
+  cloud: LidarCloud,
+  selection: BuildingSelection,
+  terrain: TerrainModel | null = null,
+): Float32Array {
+  const differences = new Float32Array(cloud.count * 2);
+  const alignment = pointCloudAlignment(cloud, selection, terrain);
+
+  const ground = (entity: BuildingWithParts) =>
+    terrain ? minimumTerrainElevation(terrain, entity.building) - alignment.datum : 0;
+  const modelled: ModelledBuilding[] = [selection, ...selection.neighbors].map((entity) => ({
+    profile: wholeBuildingProfile(entity),
+    ground: ground(entity),
+  }));
+  const index = new BuildingIndex(modelled, cloudBounds(cloud));
+
+  for (let i = 0; i < cloud.count; i++) {
+    const point = cloudPoint(cloud, i);
+
+    let surface: number | null = null;
+    for (const building of index.at(point)) {
+      if (!pointInBounds(point, building.profile.bounds)) continue;
+      const top = building.profile.topAt(point);
+      if (top === null) continue;
+      const roof = building.ground + top;
+      // Footprints can overlap where an outline and a neighbouring part share a
+      // wall; the higher roof is the one the 3D view would draw there.
+      if (surface === null || roof > surface) surface = roof;
+    }
+    if (surface === null) {
+      // Open ground: the model here is the terrain the buildings stand on.
+      const elevation = terrain ? terrainElevation(terrain, point) : alignment.datum;
+      if (elevation === null) continue;
+      surface = elevation - alignment.datum;
+    }
+
+    differences[i * 2] = alignedHeight(cloud, i, alignment) - surface;
+    differences[i * 2 + 1] = 1;
+  }
+
+  return differences;
+}
+
+/** The lon/lat extent of a cloud, for indexing what is modelled beneath it. */
+function cloudBounds(cloud: LidarCloud): Bounds {
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (let i = 0; i < cloud.count; i++) {
+    if (cloud.lon[i] < west) west = cloud.lon[i];
+    if (cloud.lon[i] > east) east = cloud.lon[i];
+    if (cloud.lat[i] < south) south = cloud.lat[i];
+    if (cloud.lat[i] > north) north = cloud.lat[i];
+  }
+  return cloud.count > 0 ? [west, south, east, north] : [0, 0, 0, 0];
 }
 
 /** Reuse static LiDAR positions and update only selection-sensitive colours. */

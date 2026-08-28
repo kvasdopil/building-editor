@@ -20,12 +20,12 @@ import { parseOsmRef } from "./osm/ref";
  * point cloud under its three colourings: the underlay and the colour it is
  * drawn in are one choice to a reader, so they are one word in the URL too.
  */
-type ViewMode = "map" | "photos" | "lidar" | "height" | "normals";
+type ViewMode = "map" | "photos" | "lidar" | "height" | "normals" | "diff";
 
-const VIEW_MODES: ViewMode[] = ["map", "photos", "lidar", "height", "normals"];
+const VIEW_MODES: ViewMode[] = ["map", "photos", "lidar", "height", "normals", "diff"];
 
 /** Everything about the view that the hash carries. */
-interface ViewHash {
+export interface ViewHash {
   mode: ViewMode;
   /** Draw the links between consecutively recorded points. */
   lines: boolean;
@@ -33,7 +33,7 @@ interface ViewHash {
   lod1: boolean;
 }
 
-const DEFAULT_VIEW: ViewHash = { mode: "map", lines: false, lod1: true };
+export const DEFAULT_VIEW: ViewHash = { mode: "map", lines: false, lod1: true };
 
 function segmentsOf(hash: string): string[] {
   return hash.replace(/^#/, "").split("&").filter(Boolean);
@@ -52,6 +52,18 @@ export function parseView(hash: string): ViewHash {
     lines: segments.includes("lines=1") ? true : DEFAULT_VIEW.lines,
     lod1: segments.includes("lod1=0") ? false : DEFAULT_VIEW.lod1,
   };
+}
+
+/**
+ * The view a hash asks for, reduced to what can actually be shown. A LiDAR
+ * colouring needs a building to read, so a hash that names no element falls
+ * back to the plain map rather than opening an empty cloud whose own switch is
+ * disabled.
+ */
+export function effectiveView(hash: string): ViewHash {
+  const view = parseView(hash);
+  if (viewState(view.mode).lidar && !hashRef(hash)) return { ...view, mode: "map" };
+  return view;
 }
 
 /** The hash for a reference and a view, without the leading `#`. */
@@ -87,6 +99,8 @@ export function viewState(mode: ViewMode): {
       return { photos: false, lidar: true, colour: "height" };
     case "normals":
       return { photos: false, lidar: true, colour: "normal" };
+    case "diff":
+      return { photos: false, lidar: true, colour: "diff" };
     default:
       return { photos: false, lidar: false, colour: null };
   }
@@ -96,5 +110,8 @@ export function viewState(mode: ViewMode): {
 export function viewMode(photos: boolean, lidar: boolean, colour: LidarColourMode): ViewMode {
   if (photos) return "photos";
   if (!lidar) return "map";
-  return colour === "height" ? "height" : colour === "normal" ? "normals" : "lidar";
+  if (colour === "height") return "height";
+  if (colour === "normal") return "normals";
+  if (colour === "diff") return "diff";
+  return "lidar";
 }
