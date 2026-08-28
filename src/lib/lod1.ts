@@ -113,6 +113,11 @@ function formatMeters(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
 
+/** Keep suggested height tags practical rather than implying survey precision. */
+function formatSuggestedHeight(value: number): string {
+  return String(Math.round(value * 2) / 2);
+}
+
 function compare(
   key: string,
   value: string,
@@ -153,7 +158,7 @@ export function suggestionsFor(
   if (height !== undefined) {
     const suggestion = compare(
       "height",
-      formatMeters(height),
+      formatSuggestedHeight(height),
       tags,
       note(
         `LOD1 ridge height (roof median ${median !== undefined ? `${formatMeters(median)} m` : "n/a"})`,
@@ -170,7 +175,7 @@ export function suggestionsFor(
   if (plausibleRoof) {
     const suggestion = compare(
       "roof:height",
-      formatMeters(roof),
+      formatSuggestedHeight(roof),
       tags,
       note("LOD1 ridge minus eaves"),
       match.confident,

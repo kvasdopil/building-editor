@@ -64,11 +64,11 @@ That downloads the published shapefiles, reads the MultiPatch solids and their D
 
 Selecting a building matches it against the LOD1 block with the greatest overlap and offers:
 
-| tag               | from                                                            |
-| ----------------- | --------------------------------------------------------------- |
-| `height`          | ridge minus ground — what OSM's `height` means                  |
-| `roof:height`     | ridge minus eaves, skipped when implausible                     |
-| `building:levels` | estimated from the facade height at the building's level height |
+| tag               | from                                                             |
+| ----------------- | ---------------------------------------------------------------- |
+| `height`          | ridge minus ground, rounded to the nearest 0.5 m                 |
+| `roof:height`     | ridge minus eaves, rounded to 0.5 m and skipped when implausible |
+| `building:levels` | estimated from the facade height at the building's level height  |
 
 The matched generalized footprint is drawn as a light-gray outline on the map, beneath the selected
 OSM outline. While it is visible, dragging an OSM footprint node within nine screen pixels of a LOD1
