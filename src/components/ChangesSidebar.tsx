@@ -191,175 +191,182 @@ export function ChangesSidebar({
     <aside
       id="changes-sidebar"
       aria-labelledby="changes-title"
-      className="absolute inset-y-0 left-0 z-40 flex w-full max-w-sm flex-col border-r border-slate-200 bg-white shadow-2xl"
+      className="absolute inset-y-0 left-0 z-40 flex w-full max-w-md flex-col border-r border-slate-200 bg-white shadow-2xl"
     >
-      <header className="flex items-start justify-between gap-4 border-b border-slate-200 px-4 py-3">
-        <div>
-          <h2 id="changes-title" className="text-lg font-semibold text-slate-900">
+      <header className="flex items-center gap-2 border-b border-slate-200 px-3 py-1.5">
+        <div className="min-w-0">
+          <h2 id="changes-title" className="truncate text-sm font-semibold text-slate-900">
             Pending changes
           </h2>
-          <p className="text-xs text-slate-500">
-            {entries.length} {entries.length === 1 ? "property" : "properties"} across {entityCount}{" "}
-            OSM {entityCount === 1 ? "entity" : "entities"}
+          <p className="truncate text-[11px] text-slate-500">
+            {entries.length} {entries.length === 1 ? "property" : "properties"}
+            <span aria-hidden> · </span>
+            {entityCount} OSM {entityCount === 1 ? "entity" : "entities"}
           </p>
         </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setConfirmTarget({ all: true })}
-            className="rounded-md px-2.5 py-1.5 text-sm font-semibold text-rose-700 hover:bg-rose-50"
-          >
-            Revert all
-          </button>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {entries.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setConfirmTarget({ all: true })}
+              className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-50"
+            >
+              Revert all
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
             aria-label="Close changes sidebar"
-            className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+            className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
           >
-            <FiX className="h-5 w-5" aria-hidden />
+            <FiX className="h-4 w-4" aria-hidden />
           </button>
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-3">
-        <ul className="space-y-3">
-          {groups.map((group) => {
-            const selected = group.entity === selectedId;
-            return (
-              <li
-                key={group.entity}
-                className={`overflow-hidden rounded-lg border bg-white ${
-                  selected ? "border-violet-400 ring-2 ring-violet-200" : "border-slate-200"
+      <div className="flex-1 overflow-y-auto">
+        {groups.length === 0 && (
+          <p className="px-4 py-1.5 text-[11px] text-slate-500">Nothing is pending any more.</p>
+        )}
+        {groups.map((group) => {
+          const selected = group.entity === selectedId;
+          return (
+            <section key={group.entity} className="border-b border-slate-200 last:border-0">
+              <div
+                className={`flex items-stretch border-b ${
+                  selected ? "border-violet-200 bg-violet-50" : "border-slate-200 bg-slate-50"
                 }`}
               >
-                <div
-                  className={`flex items-stretch border-b ${
-                    selected ? "border-violet-200 bg-violet-100" : "border-slate-200 bg-slate-50"
+                <a
+                  href={`#${group.entity}`}
+                  onClick={(event) => {
+                    if (
+                      event.button !== 0 ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    onClose();
+                    // Real OSM ids follow their ordinary hash link. A newly
+                    // drawn part has no upstream id for the hash resolver, so
+                    // select that local entity directly as well.
+                    if (group.entity in createdParts) {
+                      event.preventDefault();
+                      onNavigate(group.entity);
+                    }
+                  }}
+                  aria-current={selected ? "location" : undefined}
+                  className="group flex min-w-0 flex-1 items-center gap-1.5 px-4 py-1 text-[11px] transition-colors hover:bg-violet-50"
+                >
+                  <span className="truncate font-mono font-medium text-violet-700 decoration-violet-300 underline-offset-2 group-hover:text-violet-900 group-hover:underline">
+                    {group.entity}
+                  </span>
+                  <span className="shrink-0 text-slate-400" aria-hidden>
+                    ·
+                  </span>
+                  <span className="shrink-0 text-slate-500">
+                    {group.changes.length} {group.changes.length === 1 ? "change" : "changes"}
+                  </span>
+                  <FiArrowRight
+                    className="ml-auto h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700"
+                    aria-hidden
+                  />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setConfirmTarget({ entity: group.entity })}
+                  aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
+                  title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
+                  className={`border-l px-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 ${
+                    selected ? "border-violet-200" : "border-slate-200"
                   }`}
                 >
-                  <a
-                    href={`#${group.entity}`}
-                    onClick={(event) => {
-                      if (
-                        event.button !== 0 ||
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey
-                      )
-                        return;
-                      onClose();
-                      // Real OSM ids follow their ordinary hash link. A newly
-                      // drawn part has no upstream id for the hash resolver, so
-                      // select that local entity directly as well.
-                      if (group.entity in createdParts) {
-                        event.preventDefault();
-                        onNavigate(group.entity);
-                      }
-                    }}
-                    aria-current={selected ? "location" : undefined}
-                    className="group flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 transition-colors hover:bg-violet-50"
-                  >
-                    <span className="truncate font-mono text-xs font-semibold text-violet-700">
-                      {group.entity}
-                    </span>
-                    <FiArrowRight
-                      className="ml-auto h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700"
-                      aria-hidden
-                    />
-                  </a>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmTarget({ entity: group.entity })}
-                    aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                    title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                    className="border-l border-slate-200 px-3 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-700"
-                  >
-                    <FiTrash2 className="h-4 w-4" aria-hidden />
-                  </button>
-                </div>
-                <table className="w-full table-fixed text-xs">
-                  <tbody>
-                    {group.changes.map((change) => (
-                      <tr
-                        key={change.property}
-                        className="group border-b border-slate-100 align-top last:border-0"
+                  <FiTrash2 className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+              <table className="w-full table-fixed text-xs">
+                <tbody>
+                  {group.changes.map((change) => (
+                    <tr
+                      key={change.property}
+                      className="group border-b border-slate-100 align-top last:border-0"
+                    >
+                      <th
+                        scope="row"
+                        className="w-2/5 px-4 py-1.5 text-left font-medium break-words text-slate-500"
+                        title={change.property}
                       >
-                        <th
-                          scope="row"
-                          className="w-2/5 px-3 py-1.5 text-left font-medium break-words text-slate-500"
-                          title={change.property}
-                        >
-                          {change.property}
-                        </th>
-                        <td className="px-3 py-1.5 break-words text-slate-900">
-                          <span className="flex flex-wrap items-center gap-1.5">
-                            <Value value={change.original} muted />
-                            <span className="text-slate-400" aria-hidden>
-                              →
-                            </span>
-                            <span
-                              className="rounded bg-amber-100 px-1 font-semibold text-amber-900"
-                              title={`Pending — OSM has ${change.original ?? "no value"}`}
-                            >
-                              {change.pending === "" ? (
-                                <span className="italic">not set</span>
-                              ) : (
-                                change.pending
-                              )}
-                            </span>
-                            {change.editable && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setEditing({
-                                    entity: group.entity,
-                                    property: change.property,
-                                    value: change.pending,
-                                    original: change.pending,
-                                  })
-                                }
-                                aria-label={`Edit ${change.property}`}
-                                title={`Edit ${change.property}`}
-                                className="text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:text-violet-700 focus:opacity-100"
-                              >
-                                <FiEdit2 className="h-3.5 w-3.5" aria-hidden />
-                              </button>
+                        {change.property}
+                      </th>
+                      <td className="px-4 py-1.5 break-words text-slate-900">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <Value value={change.original} muted />
+                          <span className="text-slate-400" aria-hidden>
+                            →
+                          </span>
+                          <span
+                            className="rounded bg-amber-100 px-1 font-semibold text-amber-900"
+                            title={`Pending — OSM has ${change.original ?? "no value"}`}
+                          >
+                            {change.pending === "" ? (
+                              <span className="italic">not set</span>
+                            ) : (
+                              change.pending
                             )}
+                          </span>
+                          {change.editable && (
                             <button
                               type="button"
-                              disabled={change.locked !== null}
-                              onClick={() => onRemoveProperty(group.entity, change.property)}
-                              aria-label={`Remove ${change.property} from the changeset`}
-                              title={
-                                change.locked
-                                  ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
-                                  : change.original === undefined
-                                    ? `Drop ${change.property} from the changeset`
-                                    : `Revert to ${change.original}`
+                              onClick={() =>
+                                setEditing({
+                                  entity: group.entity,
+                                  property: change.property,
+                                  value: change.pending,
+                                  original: change.pending,
+                                })
                               }
-                              className={
-                                change.locked !== null
-                                  ? "cursor-not-allowed text-slate-200"
-                                  : "text-slate-400 transition-colors hover:text-rose-600"
-                              }
+                              aria-label={`Edit ${change.property}`}
+                              title={`Edit ${change.property}`}
+                              className="text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:text-violet-700 focus:opacity-100"
                             >
-                              <FiXCircle className="h-4 w-4" aria-hidden />
+                              <FiEdit2 className="h-3.5 w-3.5" aria-hidden />
                             </button>
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </li>
-            );
-          })}
-        </ul>
+                          )}
+                          <button
+                            type="button"
+                            disabled={change.locked !== null}
+                            onClick={() => onRemoveProperty(group.entity, change.property)}
+                            aria-label={`Remove ${change.property} from the changeset`}
+                            title={
+                              change.locked
+                                ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
+                                : change.original === undefined
+                                  ? `Drop ${change.property} from the changeset`
+                                  : `Revert to ${change.original}`
+                            }
+                            className={
+                              change.locked !== null
+                                ? "cursor-not-allowed text-slate-200"
+                                : "text-slate-400 transition-colors hover:text-rose-600"
+                            }
+                          >
+                            <FiXCircle className="h-4 w-4" aria-hidden />
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          );
+        })}
       </div>
 
-      <footer className="border-t border-slate-200 bg-slate-50 px-4 py-3">
+      <footer className="border-t border-slate-200 bg-slate-50 px-3 py-2">
         <button
           type="button"
           onClick={onSubmit}
@@ -372,7 +379,7 @@ export function ChangesSidebar({
         >
           Review &amp; submit to OSM
         </button>
-        <p className="mt-1.5 text-center text-[11px] text-slate-500">
+        <p className="mt-1 text-center text-[11px] text-slate-500">
           Runs the pre-upload checks and shows the changeset before anything is sent.
         </p>
       </footer>
