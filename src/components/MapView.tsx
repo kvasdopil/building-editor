@@ -40,6 +40,7 @@ import {
   padBounds,
   toFootprints,
 } from "@/lib/geometry";
+import { buildHash, hashRef, parseView, viewMode, viewState, writeHash } from "@/lib/map-hash";
 import { useSelectionHash } from "@/lib/use-selection-hash";
 import {
   applyGeometryEdits,
@@ -79,7 +80,7 @@ import {
 } from "@/lib/roofs";
 import { sliceBuilding } from "@/lib/slice";
 import type { LidarCloud } from "@/lib/lidar";
-import { LidarMapLayer } from "@/lib/lidar-map-layer";
+import { type LidarColourMode, LidarMapLayer } from "@/lib/lidar-map-layer";
 import { type Lod1Match, lod1TilesFor, matchLod1 } from "@/lib/lod1";
 
 const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
@@ -116,6 +117,48 @@ const BUILDING_COLORS = {
 } as const;
 
 type ColorMode = "map" | "photo";
+
+/**
+ * What sits under the editor overlays. Only one can be shown at a time — the
+ * imagery and the point cloud are both "evidence" layers that replace the
+ * basemap — so they are one switch rather than two toggles that cancel.
+ */
+type MapUnderlay = "map" | "photos" | "lidar";
+
+const MAP_UNDERLAYS: {
+  underlay: MapUnderlay;
+  label: string;
+  title: string;
+  needsSelection?: boolean;
+}[] = [
+  { underlay: "map", label: "Map", title: "The ordinary basemap" },
+  { underlay: "photos", label: "Photos", title: "Satellite imagery under the boundaries" },
+  {
+    underlay: "lidar",
+    label: "LiDAR",
+    title: "The selected building's laser point cloud, seen from straight above",
+    needsSelection: true,
+  },
+];
+
+/** The three things a LiDAR dot's colour can stand for, in toolbar order. */
+const LIDAR_COLOUR_MODES: { mode: LidarColourMode; label: string; title: string }[] = [
+  {
+    mode: "colour",
+    label: "Color",
+    title: "Colour each point from the survey's orthophoto sample",
+  },
+  {
+    mode: "height",
+    label: "Height",
+    title: "Colour each point by height, violet lowest to red highest over the points in view",
+  },
+  {
+    mode: "normal",
+    label: "Normal",
+    title: "Colour each link by its angle from horizontal, violet flat to red vertical",
+  },
+];
 
 function buildingColor(mode: ColorMode): ExpressionSpecification {
   return [
@@ -1180,6 +1223,15 @@ export function MapView() {
   });
   const [photos, setPhotos] = useState(false);
   const [lidar, setLidar] = useState(false);
+  const [lidarColourMode, setLidarColourMode] = useState<LidarColourMode>("colour");
+  const [lidarLines, setLidarLines] = useState(false);
+
+  const mapUnderlay: MapUnderlay = photos ? "photos" : lidar ? "lidar" : "map";
+  const setMapUnderlay = useCallback((underlay: MapUnderlay) => {
+    setPhotos(underlay === "photos");
+    setLidar(underlay === "lidar");
+    if (underlay !== "photos") setPhotoAdjustActive(false);
+  }, []);
   const [lod1Visible, setLod1Visible] = useState(true);
   const [photoAdjustActive, setPhotoAdjustActive] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
@@ -1660,6 +1712,38 @@ export function MapView() {
 
   // The selected element lives in the URL hash, so a building can be linked to.
   useSelectionHash(selection?.selected.id ?? null, mapReady, searchById);
+
+  // The view lives there too. It is applied after mount rather than as initial
+  // state because the server cannot see the hash, so rendering it directly
+  // would not match what the server sent. Until this has run, the effect below
+  // must not write, or it would replace the incoming hash with the defaults.
+  const viewRestored = useRef(false);
+  useEffect(() => {
+    const view = parseView(window.location.hash);
+    setLod1Visible(view.lod1);
+    setLidarLines(view.lines);
+    // A LiDAR view needs a building. Honour it when the hash also carries a
+    // reference — the selection is on its way — and otherwise fall back to the
+    // plain map rather than showing an empty cloud that cannot be switched off.
+    const wanted = viewState(view.mode);
+    const selectable = Boolean(hashRef(window.location.hash));
+    setPhotos(wanted.photos);
+    setLidar(wanted.lidar && selectable);
+    if (wanted.colour) setLidarColourMode(wanted.colour);
+    viewRestored.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!viewRestored.current) return;
+    const mode = viewMode(photos, lidar, lidarColourMode);
+    writeHash(
+      buildHash(hashRef(window.location.hash), {
+        mode,
+        lines: lidarLines,
+        lod1: lod1Visible,
+      }),
+    );
+  }, [lidar, lidarColourMode, lidarLines, lod1Visible, photos]);
 
   /** Switch between an already loaded part and its parent without another request. */
   const selectLoadedEntity = useCallback((entityId: string) => {
@@ -3380,9 +3464,14 @@ export function MapView() {
   // A cloud belongs to the building that requested it. Clear it immediately
   // on selection changes so an asynchronous 3D lookup cannot leave the
   // previous building's points under the new footprint.
+  const hadSelection = useRef(false);
   useEffect(() => {
     lidarLayerRef.current?.setCloud(null);
-    if (!selectionBuildingId) setLidar(false);
+    // Only a selection that goes away closes LiDAR. On the first run there is
+    // no previous selection to have gone, and the hash may have just asked for
+    // a cloud whose building is still being fetched.
+    if (!selectionBuildingId && hadSelection.current) setLidar(false);
+    hadSelection.current = Boolean(selectionBuildingId);
   }, [selectionBuildingId]);
 
   useEffect(() => {
@@ -3392,6 +3481,14 @@ export function MapView() {
     map.setLayoutProperty("lidar-background", "visibility", lidar ? "visible" : "none");
     layer.setVisible(lidar);
   }, [lidar, mapReady]);
+
+  useEffect(() => {
+    lidarLayerRef.current?.setColourMode(lidarColourMode);
+  }, [lidarColourMode, mapReady]);
+
+  useEffect(() => {
+    lidarLayerRef.current?.setLinksVisible(lidarLines);
+  }, [lidarLines, mapReady]);
 
   // Photo and LiDAR modes hide every vector-basemap layer and keep only editor
   // boundaries over their visual evidence. The provider style has many layers
@@ -3485,89 +3582,124 @@ export function MapView() {
       </div>
 
       <div
-        className={`absolute top-3 z-30 flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md ${
+        className={`absolute top-3 z-30 flex flex-col items-stretch gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md ${
           selection ? "right-[29rem]" : "right-3"
         }`}
       >
-        <label className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm font-medium text-slate-800 select-none">
-          <input
-            type="checkbox"
-            checked={photos}
-            onChange={(event) => {
-              setPhotos(event.target.checked);
-              if (event.target.checked) setLidar(false);
-              if (!event.target.checked) setPhotoAdjustActive(false);
-            }}
-            className="h-4 w-4 accent-sky-600"
-          />
-          Photos
-        </label>
-        <label
-          className={`flex items-center gap-2 px-2 py-1 text-sm font-medium select-none ${
-            selection ? "cursor-pointer text-slate-800" : "cursor-not-allowed text-slate-400"
-          }`}
-        >
-          <input
-            type="checkbox"
-            checked={lidar}
-            disabled={!selection}
-            onChange={(event) => {
-              setLidar(event.target.checked);
-              if (event.target.checked) {
-                setPhotos(false);
-                setPhotoAdjustActive(false);
-              }
-            }}
-            className="h-4 w-4 accent-sky-600"
-          />
-          LiDAR
-        </label>
-        <button
-          type="button"
-          onClick={() => setLod1Visible((visible) => !visible)}
-          disabled={!lod1Match}
-          aria-label={lod1Visible ? "Hide LOD1 outline" : "Show LOD1 outline"}
-          aria-pressed={lod1Visible && Boolean(lod1Match)}
-          title={lod1Match ? "Toggle the matched LOD1 outline" : "No matching LOD1 outline"}
-          className={`rounded-md px-2 py-1 text-sm font-medium transition-colors ${
-            !lod1Match
-              ? "cursor-not-allowed text-slate-400"
-              : lod1Visible
-                ? "bg-slate-200 text-slate-900"
-                : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-          }`}
-        >
-          LOD1
-        </button>
-        {photos && (
+        <div className="flex items-center gap-1">
+          {/* One underlay at a time, so the three read as positions of a single
+              switch rather than as toggles that silently cancel each other. */}
+          <div className="flex items-center gap-0.5 rounded-md bg-slate-100 p-0.5">
+            {MAP_UNDERLAYS.map(({ underlay, label, title, needsSelection }) => {
+              const disabled = needsSelection && !selection;
+              return (
+                <button
+                  key={underlay}
+                  type="button"
+                  disabled={disabled}
+                  title={disabled ? "Select a building first" : title}
+                  aria-pressed={mapUnderlay === underlay}
+                  onClick={() => setMapUnderlay(underlay)}
+                  className={`rounded px-2.5 py-0.5 text-sm font-medium transition-colors ${
+                    disabled
+                      ? "cursor-not-allowed text-slate-300"
+                      : mapUnderlay === underlay
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-500 hover:text-slate-900"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
-            onClick={() => {
-              cancelAddNode();
-              cancelAddPartDrawing();
-              cancelHoleDrawing();
-              cancelSliceDrawing();
-              setPhotoAdjustActive((active) => !active);
-            }}
-            aria-label="Adjust photo position"
-            aria-pressed={photoAdjustActive}
-            title={photoAdjustActive ? "Stop adjusting photos" : "Adjust photo position"}
-            className={`rounded-md p-1.5 transition-colors ${
-              photoAdjustActive
-                ? "bg-violet-700 text-white"
-                : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+            onClick={() => setLod1Visible((visible) => !visible)}
+            disabled={!lod1Match}
+            aria-label={lod1Visible ? "Hide LOD1 outline" : "Show LOD1 outline"}
+            aria-pressed={lod1Visible && Boolean(lod1Match)}
+            title={lod1Match ? "Toggle the matched LOD1 outline" : "No matching LOD1 outline"}
+            className={`rounded-md px-2 py-1 text-sm font-medium transition-colors ${
+              !lod1Match
+                ? "cursor-not-allowed text-slate-400"
+                : lod1Visible
+                  ? "bg-slate-200 text-slate-900"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
             }`}
           >
-            <FiMove className="h-4 w-4" aria-hidden />
+            LOD1
           </button>
+        </div>
+        {/* Whatever the chosen underlay itself needs, kept off the first row so
+            the switch stays in one place as its options come and go. */}
+        {(photos || lidar) && (
+          <div className="flex items-center gap-1 border-t border-slate-100 pt-1">
+            {photos && (
+              <button
+                type="button"
+                onClick={() => {
+                  cancelAddNode();
+                  cancelAddPartDrawing();
+                  cancelHoleDrawing();
+                  cancelSliceDrawing();
+                  setPhotoAdjustActive((active) => !active);
+                }}
+                aria-label="Adjust photo position"
+                aria-pressed={photoAdjustActive}
+                title={photoAdjustActive ? "Stop adjusting photos" : "Adjust photo position"}
+                className={`rounded-md p-1.5 transition-colors ${
+                  photoAdjustActive
+                    ? "bg-violet-700 text-white"
+                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                }`}
+              >
+                <FiMove className="h-4 w-4" aria-hidden />
+              </button>
+            )}
+            {lidar && (
+              <>
+                <div className="flex items-center gap-0.5 rounded-md bg-slate-100 p-0.5">
+                  {LIDAR_COLOUR_MODES.map(({ mode, label, title }) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      title={title}
+                      aria-pressed={lidarColourMode === mode}
+                      onClick={() => setLidarColourMode(mode)}
+                      className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                        lidarColourMode === mode
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <label
+                  title="Draw the links between points recorded one after the other"
+                  className="flex cursor-pointer items-center gap-1.5 px-1 text-xs font-medium text-slate-800 select-none"
+                >
+                  <input
+                    type="checkbox"
+                    checked={lidarLines}
+                    onChange={(event) => setLidarLines(event.target.checked)}
+                    className="h-3.5 w-3.5 accent-sky-600"
+                  />
+                  Lines
+                </label>
+              </>
+            )}
+          </div>
         )}
       </div>
 
       {live && (
         <div
-          className={`absolute top-16 z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
-            selection ? "right-[29rem]" : "right-3"
-          }`}
+          className={`absolute z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
+            photos || lidar ? "top-[5.75rem]" : "top-16"
+          } ${selection ? "right-[29rem]" : "right-3"}`}
         >
           <p className="mb-1.5 text-[10px] font-semibold tracking-wide text-slate-500 uppercase">
             Building colors

@@ -7,6 +7,12 @@
       "runtimeArgs": ["dev"],
       "port": 3003,
       "autoPort": true
+    },
+    {
+      "name": "dev-3033",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["dev", "-p", "3033"],
+      "port": 3033
     }
   ]
 }

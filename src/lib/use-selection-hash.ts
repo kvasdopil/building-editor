@@ -1,10 +1,13 @@
 import { useEffect, useRef } from "react";
+import { buildHash, hashRef, parseView, writeHash } from "./map-hash";
 import { type OsmRef, osmRefId, parseOsmRef } from "./osm/ref";
 
 /**
  * Keeps the URL hash and the selected element in step, so a building can be
  * linked to: `/#way/42764754` opens the app on that building, and selecting one
- * puts its id in the address bar.
+ * puts its id in the address bar. The hash also carries the view (see
+ * `map-hash.ts`); this hook owns only the reference segment and rebuilds the
+ * rest from whatever is already there.
  *
  * Writes use `replaceState`: a selection is map state rather than a page, and
  * clicking around a neighborhood should not fill the back button with buildings.
@@ -46,14 +49,12 @@ export function useSelectionHash(
     const wanted = selectedId === null ? null : osmRefId(selectedId);
     if (wanted) {
       resolving.current = false;
-      if (window.location.hash.slice(1) !== wanted) {
-        window.history.replaceState(null, "", `#${wanted}`);
-      }
+      writeHash(buildHash(wanted, parseView(window.location.hash)));
       return;
     }
-    // Deselected: drop the hash, unless it is a deep link still being resolved
-    // or a local part that never wrote one.
-    if (resolving.current || selectedId !== null || !window.location.hash) return;
-    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    // Deselected: drop the reference, unless it is a deep link still being
+    // resolved or a local part that never wrote one. Any view stays.
+    if (resolving.current || selectedId !== null || !hashRef(window.location.hash)) return;
+    writeHash(buildHash("", parseView(window.location.hash)));
   }, [selectedId]);
 }

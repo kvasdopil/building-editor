@@ -460,6 +460,57 @@ its Web Mercator X/Y and source colour into the map shader; Z is deliberately ab
 camera perspective, terrain alignment, roof-distance recolouring, or vertical displacement. The
 ordinary map pitch remains locked to zero, and footprint boundaries stay above the dots.
 
+The same layer joins each point to the next one in storage order with a faint line, skipping any
+pair further apart than 20 m or belonging to different surveys. A tile keeps its points in the
+order the scanner produced them, so the links are not a nearest-neighbour graph: they draw the
+recording order itself, and make the acquisition structure of each survey visible. The imported
+Stockholm tiles retain it — links run in two families about 30 degrees apart in runs of roughly
+25-30 points, mixed evenly over the whole tile, at a median step of 0.9 m. The national Skog tiles
+do not: COPC stores its points in octree order, so the links there are short, near-random chains
+with only a weak directional bias. The distinction matters when reading the cloud, because a
+"stripe" in Skog data is an artefact of the file layout, not of the flight.
+
+The basemap, the imagery and the point cloud are three positions of one **Map / Photos / LiDAR**
+switch rather than independent toggles, because each replaces the one below it; `LiDAR` is
+unavailable without a selection. Whatever the chosen underlay needs sits on a second toolbar row
+rather than beside the switch, so the switch keeps its place as its options come and go: `Photos`
+puts the four-way alignment button there, and `LiDAR` a **Color / Height / Normal** selector plus a
+**Lines** checkbox, which draws the links between consecutively recorded points; it starts off, so
+the mode opens on the bare dots.
+
+The whole view is in the URL hash alongside the selection, as `&`-separated segments — for example
+`#way/42764754&normals&lines=1&lod1=0`. The segment that parses as an OSM reference is the
+selection; `photos`, `lidar`, `height` and `normals` name the underlay together with its colouring,
+since those read as one choice; `lines=1` and `lod1=0` carry the two toggles away from their
+defaults. Only non-defaults are written, so an ordinary link stays `#way/42764754`. The view is
+applied after mount rather than as initial state, because the server never sees the hash and
+rendering it directly would not match what was sent. A LiDAR mode is honoured only when the hash
+also names an element, so a cloud is never shown for a building that will never arrive.
+
+`Color` is the survey's own orthophoto sample. `Height` replaces it with a rainbow ramp — violet at
+the lowest point, through blue, green and yellow, to red at the highest. The ramp is fitted to the
+heights of the points inside the current viewport, refitted when a movement settles rather than per
+frame, so zooming into a courtyard spreads the full sweep over its few metres instead of over the
+tallest roof in the padded cloud. Points and links share the ramp, so a link crossing a roof edge
+shows the step as a colour break.
+
+`Normal` runs the same ramp over the angle each link makes with the horizontal, from violet lying
+flat to red standing vertical, over a fixed 0 to 90 degree range. It is the raw inclination of the
+step from one stored point to the next — nothing is fitted, smoothed or thresholded — so a wall or a
+tree trunk shows as a red thread wherever the beam crossed it. The angle is carried per point rather
+than per link, because points and links share one vertex buffer: a point takes the angle of the link
+arriving at it, which makes a drawn link exact at its far end and a blend toward the previous link's
+angle at its near end. On the Stockholm tile the medians run water 0.7, bridge deck 2.0, ground 2.9,
+building 10.2 and mixed roof-and-vegetation 11.7 degrees, with 11 per cent of all links steeper than
+75 degrees.
+
+Because it is per link, this reports the tilt along the beam's own bearing and not the tilt of the
+surface: a link running level across a pitched roof reports no slope, so one roof plane can read two
+ways depending on which way the scanner happened to be sweeping. Recovering the surface itself would
+need a second, differently-oriented link, which the sweep structure does not readily give.
+
+Height reaches the map only as colour in every mode; position stays flat XY throughout.
+
 Both sources are read where available. Occupied one-meter municipal coverage cells and their
 immediate neighbors suppress national returns, so dense data wins over its actual coverage while
 Skog fills a municipal scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
