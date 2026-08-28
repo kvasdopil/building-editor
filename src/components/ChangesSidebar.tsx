@@ -47,9 +47,11 @@ function changeEntries(
           ? { original: "part outline", pending: "part sliced" }
           : override.kind === "add-part"
             ? { original: "building outline", pending: "outline expanded" }
-            : override.kind === "glue"
-              ? { original: "shared wall", pending: "corner shared" }
-              : { original: "footprint", pending: "footprint reshaped" };
+            : override.kind === "add-node"
+              ? { original: "footprint", pending: "node added" }
+              : override.kind === "glue"
+                ? { original: "shared wall", pending: "corner shared" }
+                : { original: "footprint", pending: "footprint reshaped" };
     return {
       entity,
       property: "geometry",

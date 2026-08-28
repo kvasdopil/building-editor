@@ -29,6 +29,12 @@ Every vertex of an edited or created footprint is resolved against the nodes alr
 
 The result: slicing a building in two adds two nodes, not eight, and an unchanged wall keeps every node id it had.
 
+**A node inserted and dragged in one Add node gesture is still new.** Its temporary edge coordinate
+is only the start of the interaction, not an OSM node origin, so the geometry override records no
+`from`/`to` move for it. Submission resolves its released coordinate through the normal exact-match,
+near-match, and new-node rules. Coincident walls that received the insertion therefore share the same
+new node, while the upload never attempts to modify a nonexistent node at the pressed coordinate.
+
 ### Moving or merging a node
 
 **A freely dragged corner moves its node; it never replaces it.** Position alone cannot tell a moved vertex
@@ -139,7 +145,7 @@ Every modify carries the `version` read from the API, so a stale edit is rejecte
 A way holds exactly one ring, so anything with holes becomes a `type=multipolygon` relation:
 
 - Cutting a hole in an existing way **converts** it: the way stays as the untagged `outer` member and the tags move to the new relation, which is what the multipolygon wiki prescribes ("outer ways must be left untagged") and what JOSM's _create multipolygon_ does.
-- Cutting a hole through a building with parts plans geometry changes for the outline and every intersected part. Parts that contain the loop become multipolygons too; parts crossed by the loop retain the boolean-subtracted notched outline. Coincident hole and intersection vertices resolve through the normal node-reuse pass, so the affected elements share nodes rather than uploading stacked copies.
+- Cutting a contained hole or applying a boundary-crossing mask to a building with parts plans geometry changes for the outline and every intersected part. Elements that contain the loop become multipolygons; elements crossed by it retain the boolean-subtracted notched outline or resulting polygon set. Coincident hole and intersection vertices resolve through the normal node-reuse pass, so the affected elements share nodes rather than uploading stacked copies.
 - A created part with holes becomes new ways plus a new relation.
 - Existing relation geometry is written through its member ways, never by replacing the assembled relation geometry. Parsed relation features retain every loaded member way's coordinates, node ids, direction, version and tags. Existing boundary nodes may move, and new vertices may be inserted between consecutive surviving nodes of either a closed member or one of several open members that assemble a ring. The relation and its member list remain unchanged unless its tags also changed. Removing or reordering an existing boundary node is unsupported because the owning member path can no longer be inferred safely; it is an error, not a guess.
 

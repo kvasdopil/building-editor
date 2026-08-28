@@ -4,15 +4,7 @@ import intersect from "@turf/intersect";
 import { featureCollection, polygon } from "@turf/helpers";
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import type { BuildingProperties, LngLat } from "./buildings";
-import {
-  closeRing,
-  closestPointOnSegment,
-  openRing,
-  orientRing,
-  pointInRing,
-  segmentsIntersect,
-  signedRingArea,
-} from "./geometry";
+import { closeRing, closestPointOnSegment, openRing, segmentsIntersect } from "./geometry";
 import { normalizeOsmTags } from "./osm/parse";
 import { metersBetween } from "./osm/precision";
 import { drawnId } from "./osm/ref";
@@ -33,6 +25,38 @@ export interface LocalBacktrackRepair {
   at: LngLat;
 }
 
+export interface PlanarPoint {
+  x: number;
+  y: number;
+}
+
+/** Closest point on the circle where the two endpoint rays meet at 90 degrees. */
+export function nearestRightAnglePoint(
+  previous: PlanarPoint,
+  next: PlanarPoint,
+  pointer: PlanarPoint,
+  tolerance: number,
+): (PlanarPoint & { distance: number }) | null {
+  const center = { x: (previous.x + next.x) / 2, y: (previous.y + next.y) / 2 };
+  const radius = Math.hypot(previous.x - next.x, previous.y - next.y) / 2;
+  const dx = pointer.x - center.x;
+  const dy = pointer.y - center.y;
+  const fromCenter = Math.hypot(dx, dy);
+  if (radius < 1 || fromCenter < 1e-6) return null;
+  const candidate = {
+    x: center.x + (dx / fromCenter) * radius,
+    y: center.y + (dy / fromCenter) * radius,
+  };
+  const distance = Math.hypot(pointer.x - candidate.x, pointer.y - candidate.y);
+  if (
+    distance > tolerance ||
+    Math.hypot(candidate.x - previous.x, candidate.y - previous.y) < 1 ||
+    Math.hypot(candidate.x - next.x, candidate.y - next.y) < 1
+  )
+    return null;
+  return { ...candidate, distance };
+}
+
 /** An existing OSM node dragged from one position to another. */
 export interface NodeMove {
   /** Where the node sits in OSM, which is what identifies it. */
@@ -42,7 +66,7 @@ export interface NodeMove {
 
 interface GeometryOverride {
   geometry: EditableGeometry;
-  kind: "hole" | "slice" | "add-part" | "glue" | "reshape";
+  kind: "hole" | "slice" | "add-part" | "add-node" | "glue" | "reshape";
   /**
    * Which vertices of this element were dragged. The edited geometry alone
    * cannot say: a corner in a new place looks exactly like a new corner, and an
@@ -503,63 +527,27 @@ export function repairGeometryBacktracks(geometry: EditableGeometry): EditableGe
   return rebuildGeometry(geometry, polygons);
 }
 
-function containsPoint(rings: LngLat[][], point: LngLat): boolean {
-  return pointInRing(point, rings[0]) && !rings.slice(1).some((hole) => pointInRing(point, hole));
-}
-
 const BOOLEAN_AREA_EPSILON_M2 = 1e-6;
 
 /**
- * Add a valid interior ring to polygonal geometry. The loop must be simple,
- * non-trivial, and entirely inside one existing solid (not an existing hole).
+ * Subtract a simple, non-trivial mask from any solid it overlaps. A contained
+ * mask creates a hole; a boundary-crossing mask clips the subject into a notch
+ * or several polygons. The tri-state result lets the caller apply one mask to
+ * an outline and all of its parts atomically.
  */
-export function cutHole(geometry: EditableGeometry, nodes: LngLat[]): EditableGeometry | null {
-  if (!ringIsSimple(nodes)) return null;
-  const closed: LngLat[] = [...nodes, nodes[0]];
-  const hole = polygon([closed]);
-  const holeArea = area(hole);
-  if (holeArea < 0.1) return null;
-
-  const target: Feature<EditableGeometry> = { type: "Feature", properties: {}, geometry };
-  try {
-    const shared = intersect(featureCollection([target, hole]));
-    if (!shared || area(shared) / holeArea < 0.999) return null;
-  } catch {
-    return null;
-  }
-
-  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
-  const hostIndex = polygons.findIndex((rings) => containsPoint(rings as LngLat[][], nodes[0]));
-  if (hostIndex < 0) return null;
-
-  const host = polygons[hostIndex] as LngLat[][];
-  // A hole winds opposite its outer ring (GeoJSON RFC 7946).
-  const oriented = closeRing(orientRing(closed, signedRingArea(host[0]) > 0 ? "cw" : "ccw"));
-  const next = polygons.map((rings, index) =>
-    index === hostIndex ? [...rings, oriented] : rings.map((ring) => [...ring]),
-  );
-  return geometry.type === "Polygon"
-    ? { type: "Polygon", coordinates: next[0] }
-    : { type: "MultiPolygon", coordinates: next };
-}
-
-/**
- * Remove a drawn hole from any solid it overlaps. Unlike `cutHole`, this does
- * not require the complete loop to sit inside the subject: a courtyard can
- * cross several part boundaries, leaving a notch in each part it intersects.
- */
-export function subtractHoleFromGeometry(
+export function subtractMaskFromGeometry(
   geometry: EditableGeometry,
   nodes: LngLat[],
 ): { changed: boolean; geometry: EditableGeometry | null } | null {
   if (!ringIsSimple(nodes)) return null;
   const closed: LngLat[] = [...nodes, nodes[0]];
-  const hole = polygon([closed]);
+  const mask = polygon([closed]);
+  if (area(mask) < 0.1) return null;
   const subject: Feature<EditableGeometry> = { type: "Feature", properties: {}, geometry };
   try {
-    const shared = intersect(featureCollection([subject, hole]));
+    const shared = intersect(featureCollection([subject, mask]));
     if (!shared || area(shared) <= BOOLEAN_AREA_EPSILON_M2) return { changed: false, geometry };
-    const remainder = difference(featureCollection([subject, hole]));
+    const remainder = difference(featureCollection([subject, mask]));
     if (!remainder || area(remainder) <= BOOLEAN_AREA_EPSILON_M2)
       return { changed: true, geometry: null };
     return { changed: true, geometry: remainder.geometry as EditableGeometry };

@@ -18,7 +18,7 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
 ## Slices
 
 - **FT-01 Cached OSM read proxy — done.** Route handler, z16 tile grid, single-flight, three cache layers, token bucket, backoff. Verified: 10 concurrent requests for one tile made 1 upstream call (9 coalesced); a repeat request served from cache in ~10 ms; a full page reload made zero requests, IndexedDB serving every tile; off-grid zooms rejected with 400; concurrent tiles serialized ~1.05 s apart.
-- **FT-02 Live OSM building layer — done.** Render buildings and parts from proxied OSM data at z >= 16, keeping Overture for z10-15. Verified: at z >= 16 buildings render from live OSM with selection, 3D and neighbors working; `relation/34394` showed version 52 with current tags.
+- **FT-02 Live OSM building layer — done.** Render buildings and parts from proxied fixed-grid z16 OSM data at map zoom z >= 15.5; below that threshold, show only the normal basemap with no Overture overlay, legend, selection, or zoom hint. The threshold was lowered from z16 and the PMTiles overview removed on 2026-08-28 while retaining the 12-tile viewport cap. Verified at z16: buildings render from live OSM with selection, 3D and neighbors working; `relation/34394` showed version 52 with current tags.
 - **FT-02 selection performance fix (2026-08-22).** Map selection used to parse every displayed
   feature and associate every building with every part on every click, even when switching between
   siblings of one already assembled building. Selection now owns one lazy lookup per immutable
@@ -223,6 +223,29 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   drawn part. Contained loops become part holes, boundary-crossing loops become notches, every
   affected element receives a pending geometry change, and normal part-coverage rendering remains
   active because the opening exists in the source geometry.
+
+- **Boundary-crossing cut masks (2026-08-27).** Cut hole now targets the selected building even when
+  its first node is outside the footprint. The completed loop is subtracted as a mask from the
+  building outline and every intersected existing or drawn part, so an interior loop remains a hole
+  while a loop crossing the outer boundary removes the overlapping edge portion. A mask that misses
+  the outline or consumes the building or any affected part is rejected without committing a partial
+  edit. Mask vertices retain the standard nine-pixel node and twelve-pixel edge snapping against all
+  visible buildings and parts, with exact snapped coordinates stored in the draft.
+
+- **Add node mode (2026-08-27).** A selected building or part now has an explicit Add node tool.
+  Pressing an empty ring edge inserts and welds a node on mouse-down, then immediately reuses the
+  reshape drag preview until mouse-up; pressing an existing node starts its normal drag without
+  creating a duplicate. A click on another visible building or part retargets the still-active tool,
+  while a background click is inert and preserves selection. Escape exits the mode and cancels any
+  uncommitted drag preview. Newly inserted nodes carry no move metadata, so submission creates them at
+  their released position instead of trying to modify a temporary edge node that never existed in OSM.
+
+- **Right-angle node snapping (2026-08-27).** Every existing or newly inserted node drag now derives
+  perpendicular candidates from all incident ring-edge pairs. A candidate within ten screen pixels
+  snaps the node to an exact 90° corner and displays a white-cased purple square centered over the
+  dragged node and aligned to those edges. Existing-node snaps remain strongest; edge and
+  perpendicular candidates compete by pointer distance, with LOD1 used only when neither applies.
+  The gizmo is transient and is cleared on any competing snap, drag completion, or cancellation.
 
 - **FT-07 Production switch.** Only after FT-06 is proven on the dev API. Note that **sign-in** was
   pointed at production early (2026-08-19), because the OAuth application was registered there and the

@@ -810,14 +810,16 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     entry.tagChanges = tagChanges(base, tags);
     entry.notes.push(
       override.kind === "hole"
-        ? "A hole was cut."
+        ? "The footprint was cut."
         : override.kind === "slice"
           ? "The footprint was sliced."
           : override.kind === "add-part"
             ? "The building outline was expanded for a new part."
-            : override.kind === "glue"
-              ? "A new corner on one of its walls was added to this way, so the wall is shared rather than crossed."
-              : "The footprint was reshaped.",
+            : override.kind === "add-node"
+              ? "A new node was added to the footprint."
+              : override.kind === "glue"
+                ? "A new corner on one of its walls was added to this way, so the wall is shared rather than crossed."
+                : "The footprint was reshaped.",
     );
     planGeometry(ref, override.geometry, tags, { type: "way", id: osmId, version }, entry);
   }

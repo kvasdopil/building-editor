@@ -32,7 +32,7 @@ export interface BuildingProperties {
   /** A local footprint override exists. */
   geometry_modified?: boolean;
   /** Why the local geometry differs, so 3D can distinguish holes from reshaping. */
-  geometry_edit_kind?: "hole" | "slice" | "add-part" | "glue" | "reshape";
+  geometry_edit_kind?: "hole" | "slice" | "add-part" | "add-node" | "glue" | "reshape";
   "@name"?: string;
   [key: string]: unknown;
 }

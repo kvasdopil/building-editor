@@ -3,9 +3,10 @@
 ## WHAT
 
 A single-page map app: OpenStreetMap vector basemap (OpenFreeMap Liberty rendered by MapLibre;
-pan, zoom and bearing, pitch locked at 0), Overture buildings + parts rendered in contrast colors
-from zoom > 10, clickable. The basemap is flat and vector-only: provider raster relief and
-fill-extrusion building layers are removed before the editor overlays are installed.
+pan, zoom and bearing, pitch locked at 0). Below map zoom z15.5 only that normal basemap is shown;
+at z15.5 and above, live OSM buildings and parts appear in contrast colors and become selectable.
+The basemap is flat and vector-only: provider raster relief and fill-extrusion building layers are
+removed before the editor overlays are installed.
 Zoom and bearing controls sit in the visible map's bottom-right corner, shifting left when the
 building panel is open so they remain accessible.
 Selecting a building or building part opens a right-side panel with an interactive 3D extrusion
@@ -60,8 +61,7 @@ is correct, so such data legitimately shows a gap.
 A part belongs to a building when at least **50% of the part's area** falls inside the
 building outline (`src/lib/parts.ts`). Touching is not evidence of ownership: adjacent
 buildings in OSM routinely share walls and therefore vertices, so any test based on
-"a vertex lies inside" attributes a neighbour's parts to the wrong building. Overture
-needs no test at all, since its parts carry `building_id`.
+"a vertex lies inside" attributes a neighbour's parts to the wrong building.
 
 Parts replace the outline in 3D only when they cover at least **85%** of the footprint.
 Partial part coverage is common in OSM, and dropping the outline then makes most of the
@@ -108,30 +108,41 @@ same state immediately when selection changes temporarily unmount and remount th
 a closed-panel flash.
 
 Pending-change links for existing OSM ways and relations resolve the entity through the cached
-element route, fit its geometry without landing below z16, and select it once its live tile data
-arrives. There is no general-purpose ID search control on the map.
+element route, fit its geometry without landing below the z15.5 live-data threshold, and select it
+once its live tile data arrives. There is no general-purpose ID search control on the map.
 
 ## Cutting footprint holes
 
-At live-OSM zoom, the top **Cut hole** tool starts a geometry draft. The first click must fall
-inside a live building and fixes the target element; every click then adds the next vertex, shown
-as a small square, and the evolving loop is drawn over the map. Clicking the first square or
-pressing Enter closes the loop once it has at least three vertices. The loop must be simple,
-non-trivial, and fully contained by one solid area of the target building without overlapping an
-existing hole.
+At live-OSM zoom, the top **Cut hole** tool starts a geometry draft. When a building or one of its
+parts is selected, its parent building is the target and the first vertex may be placed anywhere,
+including outside the footprint. Without a selection, the first click must fall inside a live
+building or snap to its boundary and fixes that target. Every click then adds the next vertex, shown
+as a small square, and the evolving loop is drawn over the map. Clicking the first square or pressing
+Enter closes the loop once it has at least three vertices. The loop must be simple, non-trivial, and
+overlap some solid area of the target building.
+
+Every mask vertex uses the same boundary snapping as the other geometry tools. Any visible building
+or part node takes priority within nine screen pixels; otherwise an edge attracts within twelve
+pixels. The preview distinguishes node and edge snaps, and a click stores the exact existing node
+coordinate or projected edge coordinate. Before the target is fixed, an unselected building may
+also be acquired by snapping the first vertex to its boundary. Once selected, the subtraction target
+does not change when a mask vertex snaps to a different visible building or part.
 
 Escape, pressing **Cut hole** again, opening the changes sidebar, or leaving live-OSM zoom cancels
-the whole draft and commits nothing. Successful completion adds an interior ring as a local
-geometry override to the building. The same loop is boolean-subtracted from every associated part
-whose solid area it intersects, including locally drawn parts. A loop wholly inside a part creates an
-inner ring; a loop crossing a part boundary leaves the corresponding notch. The operation is rejected
-atomically if a boolean subtraction fails or would consume an entire part. Successful completion
-refreshes the live map, selection outline, 3D building and context, marks the building and affected
-parts purple, and adds their `geometry` entries to the changes sidebar. Geometry overrides persist in
-IndexedDB until reverted or uploaded. The 3D extrusion removes both caps inside the loop and renders
-the resulting inner vertical faces with a distinct, two-sided wall material so the opening reads from
-every camera direction. Normal part-coverage rendering remains active because the actual part
-geometries now carry the opening instead of relying on an outline-only rendering exception.
+the whole draft and commits nothing. The completed loop is a boolean subtraction mask: when wholly
+inside the building it adds an interior ring, while a boundary-crossing mask clips the overlapped
+portion from the outer footprint and may leave a notch or multiple polygons. The same mask is
+boolean-subtracted from every associated part whose solid area it intersects, including locally
+drawn parts. A mask wholly inside a part creates an inner ring; one crossing a part boundary leaves
+the corresponding notch. The operation is rejected atomically if the mask misses the building, a
+boolean subtraction fails, or it would consume the whole building or an entire part. Successful
+completion refreshes the live map, selection outline, 3D building and context, marks the building
+and affected parts purple, and adds their `geometry` entries to the changes sidebar. Geometry
+overrides persist in IndexedDB until reverted or uploaded. The 3D extrusion removes both caps inside
+the loop and renders the resulting inner vertical faces with a distinct, two-sided wall material so
+the opening reads from every camera direction. Normal part-coverage rendering remains active because
+the actual part geometries now carry the opening instead of relying on an outline-only rendering
+exception.
 
 ## Slicing buildings into parts
 
@@ -491,11 +502,10 @@ Slice carries a negative placeholder id (`way/-1`) that nothing upstream can res
 the hash untouched. The same grammar the ID
 search accepted is understood: `way/123`, `w123`, `r123` and pasted openstreetmap.org URLs.
 
-Selection and the inspector are **live OSM only**, at z >= 16. Both building outlines and
-`building:part` elements can be selected, including through ID search. The Overture overview is a
-snapshot that cannot be edited and whose fields are not OSM tags (`is_underground`,
-`has_parts`, `@geometry_source`), so clicking it below that zoom shows a hint instead of
-opening the panel. Every vertex on the selected element's outer and inner footprint rings is shown
+Selection and the inspector are **live OSM only**, at map zoom z >= 15.5. Both building outlines and
+`building:part` elements can be selected, including through ID search. Dropping below that threshold
+clears selection and leaves only the normal basemap: there is no building overlay, building legend,
+selection highlight, or zoom hint. Every vertex on the selected element's outer and inner footprint rings is shown
 as a small black dot, except a node with its own OSM tags, which is amber; the repeated closing
 coordinate in GeoJSON produces only one dot. Inside its
 nine-pixel interaction target, a node becomes a larger purple dot with a white halo and the pointer
@@ -512,11 +522,50 @@ snap target: existing nodes take priority within nine pixels and edges attract w
 The dragged node's own position and incident edges are excluded. Snapping onto another node merges
 the edited rings onto that existing node, collapsing an adjacent duplicate; snapping onto an edge
 inserts the node into every coincident loaded ring, including a part's parent outline. Releasing
-without moving changes nothing. Double-clicking an empty position on a selected outer or inner ring
-inserts a node at the nearest point on that segment and into every coincident loaded ring;
-double-clicking near an existing node does not add a duplicate. Node reshapes and hole cuts remain
-compatible with parts in 3D: once parts cover the edited outline, they replace it normally, and a
-hole cut has already subtracted the opening from every underlying part.
+without moving changes nothing.
+
+Every pair of footprint edges incident to the dragged coordinate also supplies a perpendicular snap
+constraint, including distinct pairs from shared nodes used by several loaded rings. In screen-space,
+the valid positions form the circle whose diameter joins the two fixed neighboring vertices; the
+closest point on that circle is offered when it lies within ten pixels of the pointer. Existing node
+snaps retain priority. A right-angle candidate competes with an edge candidate by distance, and LOD1
+is considered only when neither geometry candidate applies. While the perpendicular snap is active,
+a white-cased purple square gizmo is centered directly over the dragged node, aligned to its two
+incident edges, and rendered above the node handle. It disappears immediately when another snap
+wins, the pointer leaves tolerance, the drag commits, or the drag is cancelled. The released
+coordinate is rounded through the normal OSM grid and uses the same move-versus-insertion metadata as
+any other drag.
+
+Double-clicking an empty position on a selected outer or inner ring inserts a node at the nearest
+point on that segment and into every coincident loaded ring; double-clicking near an existing node
+does not add a duplicate. Node reshapes and hole cuts remain compatible with parts in 3D: once parts
+cover the edited outline, they replace it normally, and a hole cut has already subtracted the opening
+from every underlying part.
+
+### Add node mode
+
+At live-OSM zoom, **Add node** is enabled when a building outline or `building:part` is selected and
+targets that selected element. Pressing the primary pointer within eight screen pixels of an empty
+outer or inner ring edge inserts a node at the nearest projected edge coordinate, welds the same
+coordinate into every coincident loaded building or part wall, and starts a drag in the same pointer
+gesture. The inserted node and every welded copy preview continuously; releasing without pointer
+movement still commits the insertion at its initial edge coordinate.
+
+An existing selected node retains its nine-pixel priority over an edge. Pressing it starts the normal
+shared-node drag and creates nothing, so a click at an existing node can never stack a duplicate.
+Clicking another visible building outline or part away from the selected target's nodes and edges
+selects it and retargets Add node without leaving the mode. Clicking the map background is inert and
+cannot accidentally clear the current selection. Existing and newly inserted nodes use the normal
+visible-boundary, right-angle and LOD1 snap behavior while dragging. Escape exits Add node mode; if a
+new-node drag is still in progress, the effect cleanup discards its uncommitted preview and restores
+map panning.
+
+A node inserted and moved within one gesture remains an insertion in the pending geometry metadata,
+not a move from its temporary edge coordinate. Existing-node drags continue to record their original
+OSM coordinate so submission modifies that node rather than replacing it. Add node mode stays active
+after a completed insertion or a map-click selection of another editable element, but exits when the
+selection changes through another interaction, live-OSM zoom is left, another geometry tool is
+chosen, photo alignment starts, or the changes sidebar opens.
 
 ## 3D context
 
@@ -561,10 +610,10 @@ near-black line so it stays distinct from all building colors on both basemaps.
 
 ## Data sources
 
-Two sources, deliberately split (see [ADR 0001](../../adr/0001-live-osm-data-for-editing.md)):
+The map has two zoom-dependent states (see [ADR 0001](../../adr/0001-live-osm-data-for-editing.md)):
 
-- **Overture PMTiles** — wide-area overview at z10-15. Global, free, no rate limits. Never an edit target: it lags OSM by weeks and its geometry carries no OSM node identity, so edits cannot be round-tripped. Release pinned in `src/lib/overture.ts`. Tile features are clipped at tile borders, so fragments of one id are merged with `@turf/union` on selection.
-- **Live OSM API** — everything editable, at z >= 16, always through the cached proxy required by [ADR 0002](../../adr/0002-cached-rate-limited-osm-proxy.md).
+- **Normal basemap** — geographic context below z15.5, without a separate building overlay or edit targets.
+- **Live OSM API** — everything editable, at map zoom z >= 15.5, using fixed-grid z16 tiles and always through the cached proxy required by [ADR 0002](../../adr/0002-cached-rate-limited-osm-proxy.md).
 
 Two local reference datasets sit beside them, imported to the same z16 grid and served from disk:
 Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)) and the 2023 laser
@@ -575,4 +624,4 @@ Mapterhorn z13 terrain is read through the app's fixed-grid `/api/terrain` route
 3D preview. It defines ground elevation only and is never an edit target or a source of OSM height
 tags.
 
-Height and color logic follows OSM tags once FT-03 of [EP-001](../../plans/epics/EP-001-osm-editing/index.md) lands; until then it reads Overture property names.
+Height and color logic follows OSM tags as delivered in FT-03 of [EP-001](../../plans/epics/EP-001-osm-editing/index.md).

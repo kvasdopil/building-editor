@@ -16,7 +16,7 @@ Related documents:
 3. **Three cache layers.** Client IndexedDB (pans and reloads cost nothing), server in-memory LRU, server persistent store. Empty results are cached too, or blank countryside is re-queried forever.
 4. **Single-flight.** Concurrent requests for the same key collapse into one upstream fetch.
 5. **Hard budget.** Token bucket: one upstream request in flight, minimum ~1 s spacing, bounded queue. Exponential backoff honoring `Retry-After` on 429/504, plus a circuit breaker that serves stale data rather than retrying.
-6. **Fetch on intent only.** Only at z >= 16, only on debounced map idle, only for uncached tiles. No speculative prefetch.
+6. **Fetch on intent only.** Only at map zoom z >= 15.5, only on debounced map idle, only for uncached fixed-grid z16 tiles. No speculative prefetch. The half-step threshold keeps a typical viewport within the 12-tile client cap while exposing live data sooner.
 7. **Identify the client.** A descriptive `User-Agent` with contact info on every upstream call, per OSM and Overpass usage policy.
 8. **Stale-while-revalidate.** Cached tiles are served immediately; refresh is bounded per tile. A local edit invalidates its own tile.
 

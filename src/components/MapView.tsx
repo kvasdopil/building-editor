@@ -2,7 +2,6 @@
 
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from "geojson";
 import {
-  addProtocol,
   AttributionControl,
   type ExpressionSpecification,
   type FilterSpecification,
@@ -12,13 +11,12 @@ import {
   type MapMouseEvent,
   MercatorCoordinate,
   NavigationControl,
-  removeProtocol,
   setWorkerUrl,
   type StyleSpecification,
 } from "maplibre-gl";
-import { Protocol } from "pmtiles";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiMove } from "react-icons/fi";
+import { PiExcludeBold, PiKnifeBold, PiPlusCircleBold, PiSelectionPlusBold } from "react-icons/pi";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
 import { ChangesSidebar } from "./ChangesSidebar";
@@ -46,7 +44,6 @@ import { useSelectionHash } from "@/lib/use-selection-hash";
 import {
   applyGeometryEdits,
   createPartFeature,
-  cutHole,
   type CreatedPartMap,
   type EditableGeometry,
   geometryHasVertex,
@@ -55,10 +52,11 @@ import {
   insertGeometryVertex,
   mergeSharedGeometryVertices,
   moveSharedGeometryVertex,
+  nearestRightAnglePoint,
   type NodeMove,
   recordNodeMove,
   removeGeometryRingNode,
-  subtractHoleFromGeometry,
+  subtractMaskFromGeometry,
   weldNewVertices,
   weldVerticesIntoGeometries,
 } from "@/lib/geometry-edits";
@@ -69,7 +67,6 @@ import { NODE_REUSE_METERS } from "@/lib/osm/nodes";
 import type { IssueFix } from "@/lib/osm/issues";
 import { coordinateKey, roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
-import { OSM_TILE_ZOOM } from "@/lib/osm/tiles";
 import { PART_ROOF_KEYS } from "@/lib/part-tags";
 import {
   edgeNormalRoofDirection,
@@ -80,13 +77,11 @@ import {
   roofFrameElement,
   type Point2,
 } from "@/lib/roofs";
-import { BUILDINGS_PMTILES_URL } from "@/lib/overture";
 import { sliceBuilding } from "@/lib/slice";
 import type { LidarCloud } from "@/lib/lidar";
 import { LidarMapLayer } from "@/lib/lidar-map-layer";
 import { type Lod1Match, lod1TilesFor, matchLod1 } from "@/lib/lod1";
 
-const MIN_BUILDING_ZOOM = 10;
 const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 
 interface PhotoOffset {
@@ -100,11 +95,12 @@ interface BasemapLayerState {
 }
 
 /**
- * At and above this zoom the map switches from the Overture overview snapshot
- * to live OSM data, which is the only source that shows recent edits and the
- * only one we can edit against (ADR 0001).
+ * At and above this zoom the map adds live editable OSM footprints over the
+ * normal basemap (ADR 0001). Below it, only the basemap is shown.
  */
-const LIVE_ZOOM = OSM_TILE_ZOOM;
+// Keep the fixed cache grid at z16, but reveal its live data half a zoom level
+// earlier. At z15.5 a typical viewport still fits the loader's 12-tile cap.
+const LIVE_ZOOM = 15.5;
 
 /**
  * Pending local edits render purple. Otherwise buildings and parts are colored
@@ -181,9 +177,10 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
 interface HoleDraft {
   targetId: string | null;
   nodes: LngLat[];
+  snap: BoundarySnap | null;
 }
 
-const EMPTY_HOLE_DRAFT: HoleDraft = { targetId: null, nodes: [] };
+const EMPTY_HOLE_DRAFT: HoleDraft = { targetId: null, nodes: [], snap: null };
 
 interface SliceDraft {
   targetId: string | null;
@@ -532,6 +529,21 @@ function polygonalGeometries(collection: FeatureCollection): GeometryByEntity {
   return geometries;
 }
 
+function collectionWithGeometries(
+  collection: FeatureCollection,
+  geometries: GeometryByEntity,
+): FeatureCollection {
+  return {
+    ...collection,
+    features: collection.features.map((feature) => {
+      const id = feature.properties?.id;
+      return typeof id === "string" && geometries[id]
+        ? { ...feature, geometry: geometries[id] }
+        : feature;
+    }),
+  };
+}
+
 function selectionWithGeometries(
   selection: BuildingSelection,
   geometries: GeometryByEntity,
@@ -571,10 +583,46 @@ interface NodeDrag {
   originalCoordinates: LngLat;
   /** Where the vertex sits right now; absent until the pointer has moved. */
   coordinates: LngLat | null;
+  /** New vertices are insertions, never moves of an existing OSM node. */
+  created: boolean;
   originalGeometries: GeometryByEntity;
   geometries: GeometryByEntity;
-  snap: BoundarySnap | null;
+  snap: NodeDragSnap | null;
+  rightAngleConstraints: RightAngleConstraint[];
+  baseGluedEntities: Set<string>;
   gluedEntities: Set<string>;
+}
+
+interface RightAngleConstraint {
+  previous: LngLat;
+  next: LngLat;
+}
+
+function rightAngleConstraints(
+  geometries: GeometryByEntity,
+  coordinates: LngLat,
+): RightAngleConstraint[] {
+  const constraints = new Map<string, RightAngleConstraint>();
+  for (const geometry of Object.values(geometries)) {
+    const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+    for (const polygon of polygons) {
+      for (const ring of polygon) {
+        const nodes = openRing(ring as LngLat[]);
+        for (const [index, node] of nodes.entries()) {
+          if (node[0] !== coordinates[0] || node[1] !== coordinates[1]) continue;
+          const previous = nodes[(index - 1 + nodes.length) % nodes.length];
+          const next = nodes[(index + 1) % nodes.length];
+          if (!previous || !next) continue;
+          const keys = [
+            coordinateKey(roundToOsmGrid(previous)),
+            coordinateKey(roundToOsmGrid(next)),
+          ].sort();
+          constraints.set(keys.join("|"), { previous, next });
+        }
+      }
+    }
+  }
+  return [...constraints.values()];
 }
 
 interface SelectionSegment {
@@ -641,6 +689,95 @@ interface BoundarySnap {
   coordinates: LngLat;
   distance: number;
   kind: "edge" | "node";
+}
+
+const RIGHT_ANGLE_SNAP_TARGET = "right-angle";
+
+interface RightAngleSnap {
+  targetId: typeof RIGHT_ANGLE_SNAP_TARGET;
+  coordinates: LngLat;
+  distance: number;
+  kind: "right-angle";
+  constraint: RightAngleConstraint;
+}
+
+type NodeDragSnap = BoundarySnap | RightAngleSnap;
+
+function nearestRightAngleSnap(
+  map: MaplibreMap,
+  constraints: RightAngleConstraint[],
+  click: { x: number; y: number },
+  tolerance = 10,
+): RightAngleSnap | null {
+  let nearest: RightAngleSnap | null = null;
+  for (const constraint of constraints) {
+    const previous = map.project(constraint.previous);
+    const next = map.project(constraint.next);
+    const candidate = nearestRightAnglePoint(previous, next, click, tolerance);
+    if (!candidate || (nearest && candidate.distance >= nearest.distance)) continue;
+    const lngLat = map.unproject([candidate.x, candidate.y]);
+    nearest = {
+      targetId: RIGHT_ANGLE_SNAP_TARGET,
+      coordinates: roundToOsmGrid([lngLat.lng, lngLat.lat]),
+      distance: candidate.distance,
+      kind: "right-angle",
+      constraint,
+    };
+  }
+  return nearest;
+}
+
+function rightAngleGizmo(map: MaplibreMap, snap: RightAngleSnap): FeatureCollection {
+  const vertex = map.project(snap.coordinates);
+  const previous = map.project(snap.constraint.previous);
+  const next = map.project(snap.constraint.next);
+  const previousLength = Math.hypot(previous.x - vertex.x, previous.y - vertex.y);
+  const nextLength = Math.hypot(next.x - vertex.x, next.y - vertex.y);
+  const halfSize = Math.min(5, previousLength * 0.2, nextLength * 0.2);
+  if (halfSize < 2) return EMPTY;
+  const previousUnit = {
+    x: (previous.x - vertex.x) / previousLength,
+    y: (previous.y - vertex.y) / previousLength,
+  };
+  const nextUnit = {
+    x: (next.x - vertex.x) / nextLength,
+    y: (next.y - vertex.y) / nextLength,
+  };
+  const screenPoints = [
+    {
+      x: vertex.x + (previousUnit.x + nextUnit.x) * halfSize,
+      y: vertex.y + (previousUnit.y + nextUnit.y) * halfSize,
+    },
+    {
+      x: vertex.x + (previousUnit.x - nextUnit.x) * halfSize,
+      y: vertex.y + (previousUnit.y - nextUnit.y) * halfSize,
+    },
+    {
+      x: vertex.x + (-previousUnit.x - nextUnit.x) * halfSize,
+      y: vertex.y + (-previousUnit.y - nextUnit.y) * halfSize,
+    },
+    {
+      x: vertex.x + (-previousUnit.x + nextUnit.x) * halfSize,
+      y: vertex.y + (-previousUnit.y + nextUnit.y) * halfSize,
+    },
+  ];
+  screenPoints.push(screenPoints[0]);
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "LineString",
+          coordinates: screenPoints.map((point) => {
+            const lngLat = map.unproject([point.x, point.y]);
+            return [lngLat.lng, lngLat.lat];
+          }),
+        },
+      },
+    ],
+  };
 }
 
 interface ProjectedBoundaryNode {
@@ -828,33 +965,20 @@ interface FootprintLayerOptions {
   /** Layer id prefix; `-fill` and `-line` are appended. */
   id: string;
   source: string;
-  sourceLayer?: string;
   /** Draw building parts rather than outlines: fainter, dashed. */
   part?: boolean;
-  /** Live layers take over from the Overture overview at LIVE_ZOOM. */
-  live?: boolean;
 }
 
-/**
- * The fill + line pair for one class of footprint. Overture separates buildings
- * from parts by source layer; the live source is one collection, so it filters
- * on the normalized `role` instead.
- */
+/** The fill + line pair for one class of live OSM footprint. */
 function footprintLayers({
   id,
   source,
-  sourceLayer,
   part = false,
-  live = false,
 }: FootprintLayerOptions): LayerSpecification[] {
-  const zoom = live ? { minzoom: LIVE_ZOOM } : { minzoom: MIN_BUILDING_ZOOM, maxzoom: LIVE_ZOOM };
   const shared = {
     source,
-    ...(sourceLayer ? { "source-layer": sourceLayer } : {}),
-    ...(live
-      ? { filter: [part ? "==" : "!=", ["get", "role"], "part"] as FilterSpecification }
-      : {}),
-    ...zoom,
+    filter: [part ? "==" : "!=", ["get", "role"], "part"] as FilterSpecification,
+    minzoom: LIVE_ZOOM,
   };
   return [
     {
@@ -881,16 +1005,12 @@ function editorStyle(): StyleSpecification {
   return {
     version: 8,
     sources: {
-      overture: {
-        type: "vector",
-        url: `pmtiles://${BUILDINGS_PMTILES_URL}`,
-        attribution: "Buildings © Overture Maps Foundation",
-      },
       live: { type: "geojson", data: EMPTY, attribution: "© OpenStreetMap contributors" },
       lod1: { type: "geojson", data: EMPTY },
       selection: { type: "geojson", data: EMPTY },
       "selection-nodes": { type: "geojson", data: EMPTY },
       "selection-node-hover": { type: "geojson", data: EMPTY },
+      "right-angle-gizmo": { type: "geojson", data: EMPTY },
       "roof-direction": { type: "geojson", data: EMPTY },
       "validation-location": { type: "geojson", data: EMPTY },
     },
@@ -901,15 +1021,8 @@ function editorStyle(): StyleSpecification {
         layout: { visibility: "none" },
         paint: { "background-color": "#0b1020" },
       },
-      ...footprintLayers({ id: "building", source: "overture", sourceLayer: "building" }),
-      ...footprintLayers({
-        id: "part",
-        source: "overture",
-        sourceLayer: "building_part",
-        part: true,
-      }),
-      ...footprintLayers({ id: "live-building", source: "live", live: true }),
-      ...footprintLayers({ id: "live-part", source: "live", live: true, part: true }),
+      ...footprintLayers({ id: "live-building", source: "live" }),
+      ...footprintLayers({ id: "live-part", source: "live", part: true }),
       {
         id: "lod1-outline",
         type: "line",
@@ -946,6 +1059,25 @@ function editorStyle(): StyleSpecification {
           "circle-radius": 5,
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 2,
+        },
+      },
+      {
+        id: "right-angle-gizmo-casing",
+        type: "line",
+        source: "right-angle-gizmo",
+        paint: {
+          "line-color": "#ffffff",
+          "line-width": 5,
+          "line-opacity": 0.95,
+        },
+      },
+      {
+        id: "right-angle-gizmo",
+        type: "line",
+        source: "right-angle-gizmo",
+        paint: {
+          "line-color": "#7c3aed",
+          "line-width": 2.5,
         },
       },
       {
@@ -1018,7 +1150,7 @@ function syncPhotoMap(main: MaplibreMap, photos: MaplibreMap, offset: PhotoOffse
   });
 }
 
-/** Main screen: MapLibre map with Overture buildings and the 3D side panel. */
+/** Main screen: MapLibre map with live OSM buildings and the 3D side panel. */
 export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const photoContainerRef = useRef<HTMLDivElement>(null);
@@ -1055,9 +1187,9 @@ export function MapView() {
   const [cutHoleActive, setCutHoleActive] = useState(false);
   const [sliceActive, setSliceActive] = useState(false);
   const [addPartActive, setAddPartActive] = useState(false);
+  const [addNodeActive, setAddNodeActive] = useState(false);
   const [geometryEdits, setGeometryEdits] = useState<GeometryEditMap>({});
   const [createdParts, setCreatedParts] = useState<CreatedPartMap>({});
-  const [zoomedIn, setZoomedIn] = useState(true);
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
   const lod1Match = useLod1(selection);
   const selectionBuildingId = selection?.building.id ?? null;
@@ -1070,6 +1202,8 @@ export function MapView() {
   const cutHoleActiveRef = useRef(cutHoleActive);
   const sliceActiveRef = useRef(sliceActive);
   const addPartActiveRef = useRef(addPartActive);
+  const addNodeActiveRef = useRef(addNodeActive);
+  const addNodeTargetRef = useRef<string | null>(null);
   const photoAdjustActiveRef = useRef(photoAdjustActive);
   const suppressSelectionClickRef = useRef(false);
   const holeDraftRef = useRef<HoleDraft>(EMPTY_HOLE_DRAFT);
@@ -1085,6 +1219,7 @@ export function MapView() {
   cutHoleActiveRef.current = cutHoleActive;
   sliceActiveRef.current = sliceActive;
   addPartActiveRef.current = addPartActive;
+  addNodeActiveRef.current = addNodeActive;
   photoAdjustActiveRef.current = photoAdjustActive;
   selectionRef.current = selection;
   geometryEditsRef.current = geometryEdits;
@@ -1130,9 +1265,6 @@ export function MapView() {
     installDevRafShim();
     // Bundlers can mangle MapLibre's worker URL; serve it from /public instead.
     setWorkerUrl("/maplibre-gl-worker.mjs");
-    const protocol = new Protocol();
-    addProtocol("pmtiles", protocol.tile);
-
     const instance = new MaplibreMap({
       container,
       style: BASEMAP_STYLE_URL,
@@ -1162,8 +1294,9 @@ export function MapView() {
 
     const onZoom = () => {
       const zoom = instance.getZoom();
-      setZoomedIn(zoom > MIN_BUILDING_ZOOM);
-      setLive(zoom >= LIVE_ZOOM);
+      const nextLive = zoom >= LIVE_ZOOM;
+      setLive(nextLive);
+      if (!nextLive) setSelection(null);
     };
     instance.on("zoom", onZoom);
     onZoom();
@@ -1222,11 +1355,8 @@ export function MapView() {
         photoAdjustActiveRef.current
       )
         return;
-      // Selection is live-OSM only: the Overture overview is a snapshot we
-      // cannot edit, and its fields are not OSM tags (ADR 0001).
+      // Below live-OSM zoom the map is deliberately just the normal basemap.
       if (instance.getZoom() < LIVE_ZOOM) {
-        const overview = instance.queryRenderedFeatures(event.point, { layers: ["building-fill"] });
-        if (overview.length > 0) setNotice("Zoom in for OSM data");
         setSelection(null);
         return;
       }
@@ -1238,7 +1368,11 @@ export function MapView() {
       const hit = hits.find((feature) => feature.properties.role === "part") ?? hits[0];
       const id = hit?.properties.id;
       const next = typeof id === "string" ? selectFromOsm(displayedFeaturesRef.current, id) : null;
-      if (next) setSelectionBearing(instance.getBearing());
+      if (addNodeActiveRef.current && !next) return;
+      if (next) {
+        setSelectionBearing(instance.getBearing());
+        if (addNodeActiveRef.current) addNodeTargetRef.current = next.selected.id;
+      }
       setSelection(next);
     });
 
@@ -1277,7 +1411,7 @@ export function MapView() {
         if (layer.id !== "lidar-background") instance.addLayer(layer);
       }
 
-      for (const layer of ["building-fill", "live-building-fill", "live-part-fill"]) {
+      for (const layer of ["live-building-fill", "live-part-fill"]) {
         instance.on("mouseenter", layer, setCursor("pointer"));
         instance.on("mouseleave", layer, setCursor(""));
       }
@@ -1331,7 +1465,6 @@ export function MapView() {
       basemapLayersRef.current = [];
       setMapReady(false);
       instance.remove();
-      removeProtocol("pmtiles");
     };
   }, []);
 
@@ -1540,7 +1673,7 @@ export function MapView() {
   const updateHoleDraft = useCallback((draft: HoleDraft) => {
     holeDraftRef.current = draft;
     const source = mapRef.current?.getSource<GeoJSONSource>("hole-draft");
-    void source?.setData(draftFeatures(draft.nodes, true));
+    void source?.setData(draftFeatures(draft.nodes, true, draft.snap));
   }, []);
 
   const cancelHoleDrawing = useCallback(() => {
@@ -1944,7 +2077,7 @@ export function MapView() {
     const { targetId, nodes } = holeDraftRef.current;
     if (!map || !targetId) return;
     if (nodes.length < 3) {
-      setNotice("A hole needs at least 3 nodes");
+      setNotice("A cutting mask needs at least 3 nodes");
       return;
     }
 
@@ -1959,11 +2092,20 @@ export function MapView() {
       return;
     }
     const targetSelection = selectFromOsm(displayedFeaturesRef.current, targetId);
-    const geometry = cutHole(feature.geometry, nodes);
-    if (!geometry) {
-      setNotice("The hole must be a simple loop fully inside the building");
+    const buildingCut = subtractMaskFromGeometry(feature.geometry, nodes);
+    if (!buildingCut) {
+      setNotice("The cutting mask must be a simple, non-trivial loop");
       return;
     }
+    if (!buildingCut.changed) {
+      setNotice("The cutting mask must overlap the selected building");
+      return;
+    }
+    if (!buildingCut.geometry) {
+      setNotice("The cutting mask would remove the entire building");
+      return;
+    }
+    const geometry = buildingCut.geometry;
     if (!targetSelection) {
       setNotice("Could not find the target building and its parts");
       return;
@@ -1971,14 +2113,14 @@ export function MapView() {
 
     const partCuts = new Map<string, EditableGeometry>();
     for (const part of targetSelection.parts) {
-      const cut = subtractHoleFromGeometry(geometryOf(part), nodes);
+      const cut = subtractMaskFromGeometry(geometryOf(part), nodes);
       if (!cut) {
-        setNotice(`Could not cut the hole through ${part.id}`);
+        setNotice(`Could not apply the cutting mask to ${part.id}`);
         return;
       }
       if (!cut.changed) continue;
       if (!cut.geometry) {
-        setNotice(`The hole would remove all of ${part.id}`);
+        setNotice(`The cutting mask would remove all of ${part.id}`);
         return;
       }
       partCuts.set(part.id, cut.geometry);
@@ -2026,8 +2168,8 @@ export function MapView() {
     setCutHoleActive(false);
     setNotice(
       partCuts.size === 0
-        ? "Hole added"
-        : `Hole added to the building and ${partCuts.size} underlying ${partCuts.size === 1 ? "part" : "parts"}`,
+        ? "Building footprint cut"
+        : `Building footprint and ${partCuts.size} underlying ${partCuts.size === 1 ? "part" : "parts"} cut`,
     );
   }, [refreshDisplayedFeatures, updateHoleDraft]);
 
@@ -2218,25 +2360,37 @@ export function MapView() {
     [clearTransferredRoofTags, refreshDisplayedFeatures, updateAddPartDraft],
   );
 
+  const cancelAddNode = useCallback(() => {
+    addNodeActiveRef.current = false;
+    addNodeTargetRef.current = null;
+    setAddNodeActive(false);
+  }, []);
+
   const toggleCutHole = useCallback(() => {
     if (cutHoleActiveRef.current) {
       cancelHoleDrawing();
       return;
     }
+    cancelAddNode();
     cancelAddPartDrawing();
     cancelSliceDrawing();
     setPhotoAdjustActive(false);
     setChangesOpen(false);
     updateHoleDraft(EMPTY_HOLE_DRAFT);
     setCutHoleActive(true);
-    setNotice("Click inside a building to place the first node");
-  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateHoleDraft]);
+    setNotice(
+      selectionRef.current
+        ? "Draw a cutting mask for the selected building"
+        : "Start inside a building, then draw its cutting mask",
+    );
+  }, [cancelAddNode, cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateHoleDraft]);
 
   const toggleSlice = useCallback(() => {
     if (sliceActiveRef.current) {
       cancelSliceDrawing();
       return;
     }
+    cancelAddNode();
     cancelAddPartDrawing();
     cancelHoleDrawing();
     setPhotoAdjustActive(false);
@@ -2245,7 +2399,13 @@ export function MapView() {
     updateSliceDraft(EMPTY_SLICE_DRAFT);
     setSliceActive(true);
     setNotice("Start on an outline or part edge for an open slice, or inside for a loop");
-  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateSliceDraft]);
+  }, [
+    cancelAddNode,
+    cancelAddPartDrawing,
+    cancelHoleDrawing,
+    cancelSliceDrawing,
+    updateSliceDraft,
+  ]);
 
   const toggleAddPart = useCallback(() => {
     if (addPartActiveRef.current) {
@@ -2257,6 +2417,7 @@ export function MapView() {
       setNotice("Select a building outline before adding a part");
       return;
     }
+    cancelAddNode();
     cancelHoleDrawing();
     cancelSliceDrawing();
     setPhotoAdjustActive(false);
@@ -2270,7 +2431,34 @@ export function MapView() {
     updateAddPartDraft({ targetId: selected.building.id, nodes: [], snap: null });
     setAddPartActive(true);
     setNotice("Start on the selected building outline, draw outside, then return to the outline");
-  }, [cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing, updateAddPartDraft]);
+  }, [
+    cancelAddNode,
+    cancelAddPartDrawing,
+    cancelHoleDrawing,
+    cancelSliceDrawing,
+    updateAddPartDraft,
+  ]);
+
+  const toggleAddNode = useCallback(() => {
+    if (addNodeActiveRef.current) {
+      cancelAddNode();
+      return;
+    }
+    const selected = selectionRef.current;
+    if (!selected) {
+      setNotice("Select a building or part before adding nodes");
+      return;
+    }
+    cancelAddPartDrawing();
+    cancelHoleDrawing();
+    cancelSliceDrawing();
+    setPhotoAdjustActive(false);
+    setChangesOpen(false);
+    addNodeTargetRef.current = selected.selected.id;
+    addNodeActiveRef.current = true;
+    setAddNodeActive(true);
+    setNotice("Drag an existing node, or press and drag an edge to add one");
+  }, [cancelAddNode, cancelAddPartDrawing, cancelHoleDrawing, cancelSliceDrawing]);
 
   useEffect(() => {
     if (!cutHoleActive || !mapReady) return;
@@ -2278,9 +2466,47 @@ export function MapView() {
     if (!map) return;
     const canvas = map.getCanvas();
     canvas.style.cursor = "crosshair";
+    let pendingPoint: { x: number; y: number } | null = null;
+    let mouseMoveFrame = 0;
+
+    const updateSnapAt = (point: { x: number; y: number }) => {
+      const draft = holeDraftRef.current;
+      const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, point);
+      if (!draft.snap && !snap) return;
+      if (
+        draft.snap &&
+        snap &&
+        draft.snap.kind === snap.kind &&
+        draft.snap.targetId === snap.targetId &&
+        draft.snap.coordinates[0] === snap.coordinates[0] &&
+        draft.snap.coordinates[1] === snap.coordinates[1]
+      )
+        return;
+      updateHoleDraft({ ...draft, snap });
+    };
+
+    const onMouseMove = (event: MapMouseEvent) => {
+      pendingPoint = { x: event.point.x, y: event.point.y };
+      if (mouseMoveFrame) return;
+      mouseMoveFrame = window.requestAnimationFrame(() => {
+        mouseMoveFrame = 0;
+        const point = pendingPoint;
+        pendingPoint = null;
+        if (point) updateSnapAt(point);
+      });
+    };
+
+    const cancelPendingMouseMove = () => {
+      pendingPoint = null;
+      if (mouseMoveFrame) {
+        window.cancelAnimationFrame(mouseMoveFrame);
+        mouseMoveFrame = 0;
+      }
+    };
 
     const onClick = (event: MapMouseEvent) => {
-      const point: LngLat = [event.lngLat.lng, event.lngLat.lat];
+      cancelPendingMouseMove();
+      const rawPoint: LngLat = [event.lngLat.lng, event.lngLat.lat];
       const draft = holeDraftRef.current;
 
       if (draft.nodes.length > 0) {
@@ -2292,22 +2518,39 @@ export function MapView() {
       }
 
       if (!draft.targetId) {
-        const hit = map.queryRenderedFeatures(event.point, { layers: ["live-building-fill"] })[0];
-        const id = hit?.properties.id;
+        const selectedId = selectionRef.current?.building.id;
+        const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+        const hit =
+          selectedId || snap
+            ? undefined
+            : map.queryRenderedFeatures(event.point, { layers: ["live-building-fill"] })[0];
+        const id = selectedId ?? snap?.targetId ?? hit?.properties.id;
         if (typeof id !== "string") {
-          setNotice("Start the hole inside a live OSM building");
+          setNotice("Select a building first, or start the cut inside one");
           return;
         }
-        updateHoleDraft({ targetId: id, nodes: [point] });
+        const targetSelection =
+          selectionRef.current?.building.id === id
+            ? selectionRef.current
+            : selectFromOsm(displayedFeaturesRef.current, id);
+        if (!targetSelection) {
+          setNotice("Could not find the target building");
+          return;
+        }
+        updateHoleDraft({
+          targetId: targetSelection.building.id,
+          nodes: [snap?.coordinates ?? rawPoint],
+          snap: null,
+        });
         return;
       }
 
-      const target = selectFromOsm(displayedFeaturesRef.current, draft.targetId)?.building;
-      if (!target || !pointInsideBuilding(point, target)) {
-        setNotice("Every node must stay inside the same building");
-        return;
-      }
-      updateHoleDraft({ ...draft, nodes: [...draft.nodes, point] });
+      const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+      updateHoleDraft({
+        ...draft,
+        nodes: [...draft.nodes, snap?.coordinates ?? rawPoint],
+        snap: null,
+      });
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2320,9 +2563,12 @@ export function MapView() {
       }
     };
 
+    map.on("mousemove", onMouseMove);
     map.on("click", onClick);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      cancelPendingMouseMove();
+      map.off("mousemove", onMouseMove);
       map.off("click", onClick);
       window.removeEventListener("keydown", onKeyDown);
       canvas.style.cursor = "";
@@ -2712,6 +2958,21 @@ export function MapView() {
       cancelAddPartDrawing();
   }, [addPartActive, cancelAddPartDrawing, live, selection]);
 
+  useEffect(() => {
+    if (!addNodeActive) return;
+    if (!live || selection?.selected.id !== addNodeTargetRef.current) {
+      cancelAddNode();
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancelAddNode();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [addNodeActive, cancelAddNode, live, selection]);
+
   // Selected footprint dots are direct handles. The draft follows the pointer;
   // releasing it records one persistent geometry override and refreshes 3D.
   useEffect(() => {
@@ -2720,10 +2981,8 @@ export function MapView() {
     const canvas = map.getCanvas();
     const referenceNodes = lod1Visible ? lod1Nodes(lod1Match) : [];
     let drag: NodeDrag | null = null;
-    let nodeHovered = false;
 
     const setNodeHover = (handle: SelectionNodeHandle | null) => {
-      nodeHovered = handle !== null;
       if (mapRef.current !== map) return;
       const source = map.getSource<GeoJSONSource>("selection-node-hover");
       void source?.setData(
@@ -2742,6 +3001,12 @@ export function MapView() {
       );
     };
 
+    const setRightAngleGizmo = (snap: RightAngleSnap | null) => {
+      if (mapRef.current !== map) return;
+      const source = map.getSource<GeoJSONSource>("right-angle-gizmo");
+      void source?.setData(snap ? rightAngleGizmo(map, snap) : EMPTY);
+    };
+
     const preview = (geometries: GeometryByEntity) => {
       const draftSelection = selectionWithGeometries(selection, geometries);
       const outlineSource = map.getSource<GeoJSONSource>("selection");
@@ -2749,15 +3014,7 @@ export function MapView() {
       void outlineSource?.setData(draftSelection.outline);
       void nodeSource?.setData(selectionNodeFeatures(draftSelection));
 
-      const displayed: FeatureCollection = {
-        ...displayedFeaturesRef.current,
-        features: displayedFeaturesRef.current.features.map((feature) => {
-          const id = feature.properties?.id;
-          return typeof id === "string" && geometries[id]
-            ? { ...feature, geometry: geometries[id] }
-            : feature;
-        }),
-      };
+      const displayed = collectionWithGeometries(displayedFeaturesRef.current, geometries);
       const liveSource = map.getSource<GeoJSONSource>("live");
       void liveSource?.setData(displayed);
     };
@@ -2778,6 +3035,7 @@ export function MapView() {
        * creating one beside it and orphaning the original. */
       move?: NodeMove,
       gluedEntities = new Set<string>(),
+      defaultKind: "reshape" | "add-node" = "reshape",
     ) => {
       const targetId = selection.selected.id;
       const nextGeometryEdits: GeometryEditMap = { ...geometryEditsRef.current };
@@ -2790,7 +3048,7 @@ export function MapView() {
           const previous = nextGeometryEdits[entity];
           nextGeometryEdits[entity] = {
             geometry,
-            kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : "reshape"),
+            kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : defaultKind),
             movedNodes: move
               ? recordNodeMove(previous?.movedNodes, move.from, move.to)
               : previous?.movedNodes,
@@ -2810,16 +3068,30 @@ export function MapView() {
     const onDragMove = (event: MapMouseEvent) => {
       if (!drag) return;
       const activeDrag = drag;
-      const boundarySnap = nearestBuildingBoundary(
+      const snapCollection = activeDrag.created
+        ? collectionWithGeometries(displayedFeaturesRef.current, activeDrag.originalGeometries)
+        : displayedFeaturesRef.current;
+      const boundaryCandidate = nearestBuildingBoundary(
         map,
-        displayedFeaturesRef.current,
+        snapCollection,
         event.point,
         12,
         undefined,
         activeDrag.originalCoordinates,
       );
-      const referenceNode = boundarySnap ? null : nearestLod1Node(map, referenceNodes, event.point);
-      const snap = boundarySnap ?? referenceNode;
+      const perpendicularCandidate =
+        boundaryCandidate?.kind === "node"
+          ? null
+          : nearestRightAngleSnap(map, activeDrag.rightAngleConstraints, event.point);
+      const geometrySnap =
+        perpendicularCandidate &&
+        (!boundaryCandidate || perpendicularCandidate.distance < boundaryCandidate.distance)
+          ? perpendicularCandidate
+          : boundaryCandidate;
+      const referenceNode = geometrySnap ? null : nearestLod1Node(map, referenceNodes, event.point);
+      const snap = geometrySnap ?? referenceNode;
+      const boundarySnap = snap?.kind === "node" || snap?.kind === "edge" ? snap : null;
+      const perpendicularSnap = snap?.kind === "right-angle" ? snap : null;
       const coordinates = roundToOsmGrid(snap?.coordinates ?? [event.lngLat.lng, event.lngLat.lat]);
       let geometries = Object.fromEntries(
         Object.entries(activeDrag.originalGeometries).map(([entity, geometry]) => [
@@ -2829,7 +3101,7 @@ export function MapView() {
             : moveSharedGeometryVertex(geometry, activeDrag.originalCoordinates, coordinates),
         ]),
       );
-      const gluedEntities = new Set<string>();
+      const gluedEntities = new Set(activeDrag.baseGluedEntities);
       if (boundarySnap?.kind === "edge") {
         const candidates = {
           ...polygonalGeometries(displayedFeaturesRef.current),
@@ -2847,6 +3119,7 @@ export function MapView() {
       }
       drag = { ...activeDrag, geometries, coordinates, snap, gluedEntities };
       preview(geometries);
+      setRightAngleGizmo(perpendicularSnap);
       setNodeHover({
         polygonIndex: activeDrag.polygonIndex,
         ringIndex: activeDrag.ringIndex,
@@ -2861,6 +3134,7 @@ export function MapView() {
       drag = null;
       map.off("mousemove", onDragMove);
       map.dragPan.enable();
+      setRightAngleGizmo(null);
       canvas.style.cursor = "pointer";
       const coordinates = finished.coordinates;
       if (!coordinates) return;
@@ -2873,15 +3147,17 @@ export function MapView() {
       }, 0);
 
       const affected = Object.keys(finished.geometries).length;
-      const action =
-        finished.snap?.kind === "node" && finished.snap.targetId !== LOD1_SNAP_TARGET
+      const action = finished.created
+        ? "added"
+        : finished.snap?.kind === "node" && finished.snap.targetId !== LOD1_SNAP_TARGET
           ? "merged"
           : "moved";
       commitGeometries(
         finished.geometries,
         affected === 1 ? `Node ${action}` : `Node ${action} across ${affected} footprints`,
-        { from: finished.originalCoordinates, to: coordinates },
+        finished.created ? undefined : { from: finished.originalCoordinates, to: coordinates },
         finished.gluedEntities,
+        finished.created ? "add-node" : "reshape",
       );
     };
 
@@ -2895,29 +3171,81 @@ export function MapView() {
       )
         return;
       const handle = nearestSelectionNode(map, selection, event.point);
-      if (!handle) return;
+      let nextDrag: NodeDrag | null = null;
+      let dragHandle = handle;
+      if (handle) {
+        const selectedGeometry = currentGeometry();
+        const originalGeometries = geometriesSharingVertex(
+          displayedFeaturesRef.current,
+          handle.coordinates,
+        );
+        if (!originalGeometries[selection.selected.id]) {
+          originalGeometries[selection.selected.id] = selectedGeometry;
+        }
+        nextDrag = {
+          polygonIndex: handle.polygonIndex,
+          ringIndex: handle.ringIndex,
+          vertexIndex: handle.vertexIndex,
+          originalCoordinates: handle.coordinates,
+          coordinates: null,
+          created: false,
+          originalGeometries,
+          geometries: originalGeometries,
+          snap: null,
+          rightAngleConstraints: rightAngleConstraints(originalGeometries, handle.coordinates),
+          baseGluedEntities: new Set(),
+          gluedEntities: new Set(),
+        };
+      } else if (addNodeActiveRef.current) {
+        const segment = nearestSelectionSegment(map, selection, event.point);
+        if (!segment) return;
+        const geometry = insertGeometryVertex(
+          currentGeometry(),
+          segment.polygonIndex,
+          segment.ringIndex,
+          segment.segmentIndex,
+          segment.coordinates,
+        );
+        if (!geometry) return;
+        const candidates = {
+          ...polygonalGeometries(displayedFeaturesRef.current),
+          [selection.selected.id]: geometry,
+        };
+        const welded = weldVerticesIntoGeometries({
+          candidates,
+          points: [segment.coordinates],
+          tolerance: NODE_REUSE_METERS,
+        });
+        const originalGeometries = { ...welded, [selection.selected.id]: geometry };
+        const baseGluedEntities = new Set(
+          Object.keys(welded).filter((entity) => entity !== selection.selected.id),
+        );
+        dragHandle = {
+          polygonIndex: segment.polygonIndex,
+          ringIndex: segment.ringIndex,
+          vertexIndex: segment.segmentIndex + 1,
+          coordinates: segment.coordinates,
+        };
+        nextDrag = {
+          ...dragHandle,
+          originalCoordinates: segment.coordinates,
+          coordinates: segment.coordinates,
+          created: true,
+          originalGeometries,
+          geometries: originalGeometries,
+          snap: null,
+          rightAngleConstraints: rightAngleConstraints(originalGeometries, segment.coordinates),
+          baseGluedEntities,
+          gluedEntities: baseGluedEntities,
+        };
+        preview(originalGeometries);
+      }
+      if (!nextDrag || !dragHandle) return;
 
       event.preventDefault();
-      const selectedGeometry = currentGeometry();
-      const originalGeometries = geometriesSharingVertex(
-        displayedFeaturesRef.current,
-        handle.coordinates,
-      );
-      if (!originalGeometries[selection.selected.id]) {
-        originalGeometries[selection.selected.id] = selectedGeometry;
-      }
-      drag = {
-        polygonIndex: handle.polygonIndex,
-        ringIndex: handle.ringIndex,
-        vertexIndex: handle.vertexIndex,
-        originalCoordinates: handle.coordinates,
-        coordinates: null,
-        originalGeometries,
-        geometries: originalGeometries,
-        snap: null,
-        gluedEntities: new Set(),
-      };
-      setNodeHover(handle);
+      drag = nextDrag;
+      setRightAngleGizmo(null);
+      setNodeHover(dragHandle);
       map.dragPan.disable();
       canvas.style.cursor = "grabbing";
       map.on("mousemove", onDragMove);
@@ -2929,6 +3257,7 @@ export function MapView() {
         cutHoleActiveRef.current ||
         sliceActiveRef.current ||
         addPartActiveRef.current ||
+        addNodeActiveRef.current ||
         photoAdjustActiveRef.current
       )
         return;
@@ -2952,6 +3281,9 @@ export function MapView() {
         tolerance: NODE_REUSE_METERS,
       });
       const geometries = { ...welded, [selection.selected.id]: geometry };
+      const gluedEntities = new Set(
+        Object.keys(welded).filter((entity) => entity !== selection.selected.id),
+      );
       event.preventDefault();
       commitGeometries(
         geometries,
@@ -2959,7 +3291,8 @@ export function MapView() {
           ? "Node added"
           : `Node added to ${Object.keys(geometries).length} shared footprints`,
         undefined,
-        new Set(Object.keys(welded)),
+        gluedEntities,
+        "add-node",
       );
     };
 
@@ -2972,11 +3305,21 @@ export function MapView() {
         photoAdjustActiveRef.current
       )
         return;
-      const wasHovered = nodeHovered;
       const handle = nearestSelectionNode(map, selection, event.point);
+      const segment =
+        !handle && addNodeActiveRef.current
+          ? nearestSelectionSegment(map, selection, event.point)
+          : null;
+      const selectableFootprint =
+        addNodeActiveRef.current &&
+        map.queryRenderedFeatures(event.point, {
+          layers: ["live-building-fill", "live-part-fill"],
+        }).length > 0;
       setNodeHover(handle);
       if (handle) canvas.style.cursor = "pointer";
-      else if (wasHovered) canvas.style.cursor = "";
+      else if (segment) canvas.style.cursor = "crosshair";
+      else if (selectableFootprint) canvas.style.cursor = "pointer";
+      else canvas.style.cursor = "";
     };
 
     const clearNodeHover = () => {
@@ -2997,6 +3340,7 @@ export function MapView() {
       canvas.removeEventListener("mouseleave", clearNodeHover);
       window.removeEventListener("mouseup", finishDrag);
       setNodeHover(null);
+      setRightAngleGizmo(null);
       if (drag) {
         map.dragPan.enable();
         const liveSource = map.getSource<GeoJSONSource>("live");
@@ -3009,6 +3353,7 @@ export function MapView() {
       canvas.style.cursor = "";
     };
   }, [
+    addNodeActive,
     addPartActive,
     cutHoleActive,
     lod1Match,
@@ -3059,7 +3404,7 @@ export function MapView() {
       map.setLayoutProperty(layer.id, "visibility", evidenceMode ? "none" : layer.visibility);
     }
     const color = buildingColor(evidenceMode ? "photo" : "map");
-    for (const prefix of ["", "live-"]) {
+    for (const prefix of ["live-"]) {
       map.setPaintProperty(`${prefix}building-fill`, "fill-opacity", evidenceMode ? 0 : 0.35);
       map.setPaintProperty(`${prefix}part-fill`, "fill-opacity", evidenceMode ? 0 : 0.25);
       map.setPaintProperty(`${prefix}building-line`, "line-color", color);
@@ -3198,6 +3543,7 @@ export function MapView() {
           <button
             type="button"
             onClick={() => {
+              cancelAddNode();
               cancelAddPartDrawing();
               cancelHoleDrawing();
               cancelSliceDrawing();
@@ -3217,7 +3563,7 @@ export function MapView() {
         )}
       </div>
 
-      {zoomedIn && (
+      {live && (
         <div
           className={`absolute top-16 z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
             selection ? "right-[29rem]" : "right-3"
@@ -3240,22 +3586,16 @@ export function MapView() {
             ))}
           </ul>
           <p className="mt-2 border-t border-slate-100 pt-1.5 text-[11px] text-slate-500">
-            {live ? (
-              <>
-                Live OSM · {loaderStatus.tiles} tiles
-                {loaderStatus.pending > 0 && " · loading…"}
-                {loaderStatus.failed > 0 && ` · ${loaderStatus.failed} failed`}
-              </>
-            ) : (
-              "Overture overview · zoom in to inspect OSM"
-            )}
+            Live OSM · {loaderStatus.tiles} tiles
+            {loaderStatus.pending > 0 && " · loading…"}
+            {loaderStatus.failed > 0 && ` · ${loaderStatus.failed} failed`}
           </p>
         </div>
       )}
 
-      {(!zoomedIn || notice) && (
+      {notice && (
         <div className="pointer-events-none absolute top-16 left-1/2 z-30 -translate-x-1/2 rounded-full bg-slate-900/75 px-4 py-1.5 text-sm text-white shadow">
-          {zoomedIn ? notice : "Zoom in to see buildings"}
+          {notice}
         </div>
       )}
 
@@ -3264,6 +3604,7 @@ export function MapView() {
           <button
             type="button"
             onClick={() => {
+              cancelAddNode();
               cancelAddPartDrawing();
               cancelHoleDrawing();
               cancelSliceDrawing();
@@ -3279,60 +3620,120 @@ export function MapView() {
           >
             {changeCount} {changeCount === 1 ? "change" : "changes"}
           </button>
-          <button
-            type="button"
-            onClick={toggleCutHole}
-            disabled={!live && !cutHoleActive}
-            aria-pressed={cutHoleActive}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold shadow-md transition-colors ${
-              cutHoleActive
-                ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
-                : live
-                  ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
-                  : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-            }`}
-          >
-            Cut hole
-          </button>
-          <button
-            type="button"
-            onClick={toggleSlice}
-            disabled={!live && !sliceActive}
-            aria-pressed={sliceActive}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold shadow-md transition-colors ${
-              sliceActive
-                ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
-                : live
-                  ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
-                  : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-            }`}
-          >
-            Slice
-          </button>
-          <button
-            type="button"
-            onClick={toggleAddPart}
-            disabled={
-              !addPartActive &&
-              (!live || !selection || selection.selected.id !== selection.building.id)
-            }
-            aria-pressed={addPartActive}
-            className={`rounded-lg border px-3 py-2 text-sm font-semibold shadow-md transition-colors ${
-              addPartActive
-                ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
-                : live && selection?.selected.id === selection?.building.id
-                  ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
-                  : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-            }`}
-          >
-            Add part
-          </button>
+          <span className="group relative flex">
+            <button
+              type="button"
+              onClick={toggleCutHole}
+              disabled={!live && !cutHoleActive}
+              aria-label="Cut hole"
+              aria-describedby="cut-hole-tooltip"
+              aria-pressed={cutHoleActive}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+                cutHoleActive
+                  ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
+                  : live
+                    ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+              }`}
+            >
+              <PiExcludeBold className="h-5 w-5" aria-hidden />
+            </button>
+            <span
+              id="cut-hole-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute top-full left-1/2 z-40 mt-2 -translate-x-1/2 rounded-md bg-slate-900 px-2 py-1 text-xs font-medium whitespace-nowrap text-white opacity-0 shadow-md transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+            >
+              Cut hole
+            </span>
+          </span>
+          <span className="group relative flex">
+            <button
+              type="button"
+              onClick={toggleSlice}
+              disabled={!live && !sliceActive}
+              aria-label="Slice"
+              aria-describedby="slice-tooltip"
+              aria-pressed={sliceActive}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+                sliceActive
+                  ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
+                  : live
+                    ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+              }`}
+            >
+              <PiKnifeBold className="h-5 w-5" aria-hidden />
+            </button>
+            <span
+              id="slice-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute top-full left-1/2 z-40 mt-2 -translate-x-1/2 rounded-md bg-slate-900 px-2 py-1 text-xs font-medium whitespace-nowrap text-white opacity-0 shadow-md transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+            >
+              Slice
+            </span>
+          </span>
+          <span className="group relative flex">
+            <button
+              type="button"
+              onClick={toggleAddPart}
+              disabled={
+                !addPartActive &&
+                (!live || !selection || selection.selected.id !== selection.building.id)
+              }
+              aria-label="Add part"
+              aria-describedby="add-part-tooltip"
+              aria-pressed={addPartActive}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+                addPartActive
+                  ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
+                  : live && selection?.selected.id === selection?.building.id
+                    ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+              }`}
+            >
+              <PiSelectionPlusBold className="h-5 w-5" aria-hidden />
+            </button>
+            <span
+              id="add-part-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute top-full left-1/2 z-40 mt-2 -translate-x-1/2 rounded-md bg-slate-900 px-2 py-1 text-xs font-medium whitespace-nowrap text-white opacity-0 shadow-md transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+            >
+              Add part
+            </span>
+          </span>
+          <span className="group relative flex">
+            <button
+              type="button"
+              onClick={toggleAddNode}
+              disabled={!addNodeActive && (!live || !selection)}
+              aria-label="Add node"
+              aria-describedby="add-node-tooltip"
+              aria-pressed={addNodeActive}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+                addNodeActive
+                  ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
+                  : live && selection
+                    ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+              }`}
+            >
+              <PiPlusCircleBold className="h-5 w-5" aria-hidden />
+            </button>
+            <span
+              id="add-node-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute top-full left-1/2 z-40 mt-2 -translate-x-1/2 rounded-md bg-slate-900 px-2 py-1 text-xs font-medium whitespace-nowrap text-white opacity-0 shadow-md transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+            >
+              Add node
+            </span>
+          </span>
         </div>
       )}
 
       {cutHoleActive && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
-          Click to add nodes · first node or Enter closes · Esc cancels
+          Draw a mask inside or across the selected footprint · first node or Enter closes · Esc
+          cancels
         </div>
       )}
 
@@ -3345,6 +3746,12 @@ export function MapView() {
       {addPartActive && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
           Outline → exterior nodes → outline · Esc cancels
+        </div>
+      )}
+
+      {addNodeActive && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
+          Drag a node, or press and drag an edge to add one · Esc exits
         </div>
       )}
 
