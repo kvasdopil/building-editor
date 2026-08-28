@@ -239,7 +239,9 @@ so there is no partial state to reconcile.
 - **The changeset is closed whether the upload succeeded or not.** One left open holds for an hour and
   would collect the next edit made from anywhere.
 - **Failures are reported in OSM's own words.** A version conflict answers with e.g. "Version mismatch:
-  Provided 3, server had: 4 of Way 123" — nothing we could write is more useful than that.
+  Provided 3, server had: 4 of Way 123" — nothing we could write is more useful than that. When the
+  response names the stale node, way, or relation, **Show** closes the review and uses the normal
+  element lookup to select and fly to the current server version.
 - **`diffResult` is read for the placeholder → real id mapping** and shown, but local state is not
   rewritten from it: the affected tiles are refetched past every cache instead (`?fresh=1`), so the map
   shows what OSM now holds rather than our guess at it.
