@@ -431,7 +431,7 @@ export function SubmitDialog({
         ? "Checking your OpenStreetMap session…"
         : auth.status !== "signed-in"
           ? "Sign in to OpenStreetMap to upload."
-          : auth.uploadRefusal;
+          : null;
   const readyMessage = auth.production
     ? `Uploads to ${auth.host} are public and attributed to ${auth.user?.name ?? "this account"}.`
     : `Uploading to ${auth.host}.`;

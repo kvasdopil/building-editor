@@ -1,5 +1,5 @@
 import { type ChangesetPlan, toChangesetXml, toOsmChangeXml } from "./changeset";
-import { CLIENT_ID, isProductionHost, OAUTH_BASE } from "./oauth";
+import { OAUTH_BASE } from "./oauth";
 import { USER_AGENT } from "./limiter";
 
 /**
@@ -11,25 +11,6 @@ import { USER_AGENT } from "./limiter";
  * from the same function — the only difference being the changeset id, which does
  * not exist until the first call returns.
  */
-
-/**
- * Writing to the real OSM takes a deliberate setting, not merely pointing
- * `OSM_OAUTH_BASE` at it. A misconfigured host must fail closed: an accidental
- * upload to the public map cannot be taken back, only reverted in a second
- * changeset that stays in the history.
- */
-function productionWritesAllowed(): boolean {
-  return process.env.OSM_ALLOW_PRODUCTION_WRITES === "true";
-}
-
-export function uploadRefusal(): string | null {
-  if (!CLIENT_ID) return "OSM sign-in is not configured.";
-  const host = new URL(OAUTH_BASE).host;
-  if (isProductionHost(host) && !productionWritesAllowed()) {
-    return `Uploading to ${host} is the public map. Set OSM_ALLOW_PRODUCTION_WRITES=true to allow it, or point OSM_OAUTH_BASE at the development API.`;
-  }
-  return null;
-}
 
 interface DiffEntry {
   type: "node" | "way" | "relation";
@@ -50,7 +31,7 @@ export class UploadError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly kind: "conflict" | "auth" | "refused" | "upstream",
+    readonly kind: "conflict" | "auth" | "upstream",
   ) {
     super(message);
   }
@@ -117,9 +98,6 @@ export async function uploadChangeset(input: {
   plan: ChangesetPlan;
   tags: Record<string, string>;
 }): Promise<UploadResult> {
-  const refusal = uploadRefusal();
-  if (refusal) throw new UploadError(refusal, 403, "refused");
-
   const created = await call("/api/0.6/changeset/create", input.accessToken, {
     method: "PUT",
     body: toChangesetXml(input.tags),

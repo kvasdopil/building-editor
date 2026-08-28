@@ -166,8 +166,8 @@ A purple **X changes** button opens the pending-change sidebar; **Review & submi
 foot builds the changeset and opens the review dialog, which is also where you sign in. **Upload**
 sends it: create changeset, upload, close, all through this app's own routes because the token is in an
 httpOnly cookie. It is enabled only with a signed-in account, zero errors and a comment; writing to the
-real OSM additionally needs `OSM_ALLOW_PRODUCTION_WRITES=true` and a confirmation, since an accidental
-upload can only be reverted, never erased. Once a changeset lands, the pending changes are dropped and
+real OSM additionally asks for a confirmation, since an accidental upload can only be reverted, never
+erased. Once a changeset lands, the pending changes are dropped and
 the submitted comment is cleared, and the affected tiles are refetched past every cache, so the map
 shows what OSM now holds. The next review regenerates its description from its new changes. The rules
 behind all of it live in [the submission spec](memory/spec/domain/osm-submission.md).

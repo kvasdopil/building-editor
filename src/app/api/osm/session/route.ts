@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { uploadRefusal } from "@/lib/osm/upload";
 import {
   CLIENT_ID,
   clearSession,
@@ -18,8 +17,7 @@ import {
  *
  * The client id and the authorize endpoint are served from here rather than baked
  * into the bundle, so they stay runtime configuration (see src/lib/osm/oauth.ts).
- * The host is reported so the UI can name which OSM an account belongs to —
- * writes go to the development API until FT-07.
+ * The host is reported so the UI can name which OSM an account belongs to.
  */
 export async function GET() {
   const session = await readSession();
@@ -31,11 +29,8 @@ export async function GET() {
     scope: SCOPE,
     host,
     // The UI has to be able to say so: an account on the real map is not the same
-    // thing as one on a test server, and this app is being taught to write.
+    // thing as one on a test server, and an upload from here is a public edit.
     production: isProductionHost(host),
-    // Why an upload cannot be attempted, so the button can explain itself before
-    // it is pressed rather than after.
-    uploadRefusal: uploadRefusal(),
   };
   if (!session) {
     return NextResponse.json(

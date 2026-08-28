@@ -14,7 +14,7 @@ Related documents:
 
 The flow runs end to end: review, sign in, upload. What is _not_ automatic is the decision to write —
 the Upload button is gated on a signed-in account, zero errors, a comment, and, for a production host,
-an explicit setting plus a confirmation.
+a confirmation.
 
 ## What a changeset must carry
 
@@ -245,11 +245,12 @@ so there is no partial state to reconcile.
   shows what OSM now holds rather than our guess at it.
 - **Pending changes are dropped once the changeset lands.** Keeping them would re-propose an edit that
   has already been made, and a drawn part would keep its placeholder id forever.
-- **Writing to the real OSM needs its own setting.** `OSM_ALLOW_PRODUCTION_WRITES=true` is required when
-  the host is production; pointing `OSM_OAUTH_BASE` at the real map is deliberately not enough. An
-  accidental upload cannot be taken back, only reverted in a second changeset that stays in the
-  history. The submit dialog also asks for confirmation before writing to a production host, naming the
-  account, the host and the element count.
+- **A signed-in account is the whole permission to write.** This is an authoring tool: an account that
+  granted `write_api` may upload to whichever host `OSM_OAUTH_BASE` names, real map included. No
+  deployment-level setting stands between the two. What remains is a confirmation before writing to a
+  production host, naming the account, the host and the element count — an accidental upload cannot be
+  taken back, only reverted in a second changeset that stays in the history, so the last step before
+  one is deliberate.
 
 ## Pre-upload checks
 
