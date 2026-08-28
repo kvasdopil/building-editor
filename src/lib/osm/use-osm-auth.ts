@@ -36,8 +36,6 @@ export interface OsmAuth {
   host: string;
   /** True when that host is the real OSM, so the UI can say so plainly. */
   production: boolean;
-  /** Why an upload would be refused by the server, or null when it would not. */
-  uploadRefusal: string | null;
   error: string | null;
   signIn: () => void;
   signOut: () => void;
@@ -56,7 +54,6 @@ interface AuthConfig {
   host: string;
   /** True when this is the real OSM rather than a test server. */
   production: boolean;
-  uploadRefusal: string | null;
 }
 
 const PKCE_KEY = "osm-oauth-pkce";
@@ -249,9 +246,6 @@ export function useOsmAuth(): OsmAuth {
     user,
     host: config?.host ?? "openstreetmap.org",
     production: config?.production ?? true,
-    // `null` from the server means nothing is refused; only a missing config means
-    // the answer has not arrived. `??` would conflate the two.
-    uploadRefusal: config ? config.uploadRefusal : "Checking your OpenStreetMap session…",
     error,
     signIn,
     signOut,

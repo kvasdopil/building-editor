@@ -23,8 +23,7 @@ const BREAKER_COOLDOWN_MS = 60_000;
  * in touch before anyone resorts to blocking.
  */
 export const USER_AGENT =
-  process.env.OSM_USER_AGENT ??
-  "building-editor/0.1 (+https://github.com/kvasdopil/building-editor)";
+  process.env.OSM_USER_AGENT ?? "building-editor/0.1 (+https://buildings.sillygoose.se)";
 
 interface LimiterStats {
   upstreamRequests: number;

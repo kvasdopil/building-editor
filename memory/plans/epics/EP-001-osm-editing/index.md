@@ -92,12 +92,15 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   `finally`, all server-side. `diffResult` is parsed for the placeholder → real id mapping; on success
   the pending changes are dropped and the affected tiles refetched past every cache (`?fresh=1`), so
   the map shows what OSM holds. Upload is gated on a signed-in account, no errors and a comment; a
-  production host additionally needs `OSM_ALLOW_PRODUCTION_WRITES=true` and a confirmation naming the
-  account and element count. Verified without writing: the rendered document carries
-  `changeset="<id>"` on every element, the create body carries `comment`, `created_by` and `source`, a
-  realistic `diffResult` parses to the right mapping, an unauthenticated upload is refused 401, and the
-  refusal is reported to the UI before the button is pressed. Still unverified: an actual changeset
-  landing, and 409 conflict handling against a real stale version.
+  production host additionally asks for a confirmation naming the account and element count. Verified
+  without writing: the rendered document carries `changeset="<id>"` on every element, the create body
+  carries `comment`, `created_by` and `source`, a realistic `diffResult` parses to the right mapping,
+  and an unauthenticated upload is refused 401. Still unverified: an actual changeset landing, and 409
+  conflict handling against a real stale version.
+
+  The deployment-level `OSM_ALLOW_PRODUCTION_WRITES` setting described below was removed on 2026-08-28.
+  This is an authoring tool: an account that signed in and granted `write_api` may upload, and the
+  production confirmation is the only step left between review and the real map.
 
   Two fixes after first contact: the hook reported "Sign-in is still loading" to a signed-in user
   because `config?.uploadRefusal ?? fallback` conflated the server's `null` ("nothing refused") with a

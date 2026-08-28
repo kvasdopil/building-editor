@@ -52,6 +52,12 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+/** The stale OSM element named by an upload version-conflict response. */
+function versionMismatchEntity(message: string): string | null {
+  const match = message.match(/\bversion mismatch\b[\s\S]*?\b(node|way|relation)\s+(\d+)\b/i);
+  return match ? `${match[1].toLowerCase()}/${match[2]}` : null;
+}
+
 type AddressTags = Record<string, string>;
 
 /** Street-address lines for the parent buildings touched by modify entries. */
@@ -431,10 +437,11 @@ export function SubmitDialog({
         ? "Checking your OpenStreetMap session…"
         : auth.status !== "signed-in"
           ? "Sign in to OpenStreetMap to upload."
-          : auth.uploadRefusal;
+          : null;
   const readyMessage = auth.production
     ? `Uploads to ${auth.host} are public and attributed to ${auth.user?.name ?? "this account"}.`
     : `Uploading to ${auth.host}.`;
+  const conflictedEntity = uploadError ? versionMismatchEntity(uploadError) : null;
 
   const copyXml = () => {
     void navigator.clipboard?.writeText(xml).then(() => {
@@ -571,12 +578,25 @@ export function SubmitDialog({
         ) : (
           <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
             {uploadError && (
-              <p className="flex gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-900">
+              <div className="flex gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-900">
                 <FiXCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" aria-hidden />
-                <span>
-                  <strong className="font-semibold">Nothing was uploaded.</strong> {uploadError}
-                </span>
-              </p>
+                <div className="min-w-0">
+                  <p>
+                    <strong className="font-semibold">Nothing was uploaded.</strong> {uploadError}
+                  </p>
+                  {conflictedEntity && (
+                    <button
+                      type="button"
+                      onClick={() => navigate(conflictedEntity)}
+                      aria-label={`Show ${conflictedEntity} on map`}
+                      className="mt-2 flex items-center gap-1 rounded bg-white/80 px-2 py-1 font-semibold text-rose-800 shadow-sm ring-1 ring-rose-200 hover:bg-white"
+                    >
+                      <FiMapPin className="h-3 w-3" aria-hidden />
+                      Show
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
 
             <Account auth={auth} />

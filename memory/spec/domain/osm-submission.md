@@ -14,7 +14,7 @@ Related documents:
 
 The flow runs end to end: review, sign in, upload. What is _not_ automatic is the decision to write —
 the Upload button is gated on a signed-in account, zero errors, a comment, and, for a production host,
-an explicit setting plus a confirmation.
+a confirmation.
 
 ## What a changeset must carry
 
@@ -239,17 +239,20 @@ so there is no partial state to reconcile.
 - **The changeset is closed whether the upload succeeded or not.** One left open holds for an hour and
   would collect the next edit made from anywhere.
 - **Failures are reported in OSM's own words.** A version conflict answers with e.g. "Version mismatch:
-  Provided 3, server had: 4 of Way 123" — nothing we could write is more useful than that.
+  Provided 3, server had: 4 of Way 123" — nothing we could write is more useful than that. When the
+  response names the stale node, way, or relation, **Show** closes the review and uses the normal
+  element lookup to select and fly to the current server version.
 - **`diffResult` is read for the placeholder → real id mapping** and shown, but local state is not
   rewritten from it: the affected tiles are refetched past every cache instead (`?fresh=1`), so the map
   shows what OSM now holds rather than our guess at it.
 - **Pending changes are dropped once the changeset lands.** Keeping them would re-propose an edit that
   has already been made, and a drawn part would keep its placeholder id forever.
-- **Writing to the real OSM needs its own setting.** `OSM_ALLOW_PRODUCTION_WRITES=true` is required when
-  the host is production; pointing `OSM_OAUTH_BASE` at the real map is deliberately not enough. An
-  accidental upload cannot be taken back, only reverted in a second changeset that stays in the
-  history. The submit dialog also asks for confirmation before writing to a production host, naming the
-  account, the host and the element count.
+- **A signed-in account is the whole permission to write.** This is an authoring tool: an account that
+  granted `write_api` may upload to whichever host `OSM_OAUTH_BASE` names, real map included. No
+  deployment-level setting stands between the two. What remains is a confirmation before writing to a
+  production host, naming the account, the host and the element count — an accidental upload cannot be
+  taken back, only reverted in a second changeset that stays in the history, so the last step before
+  one is deliberate.
 
 ## Pre-upload checks
 

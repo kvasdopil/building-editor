@@ -64,11 +64,11 @@ That downloads the published shapefiles, reads the MultiPatch solids and their D
 
 Selecting a building matches it against the LOD1 block with the greatest overlap and offers:
 
-| tag               | from                                                            |
-| ----------------- | --------------------------------------------------------------- |
-| `height`          | ridge minus ground — what OSM's `height` means                  |
-| `roof:height`     | ridge minus eaves, skipped when implausible                     |
-| `building:levels` | estimated from the facade height at the building's level height |
+| tag               | from                                                             |
+| ----------------- | ---------------------------------------------------------------- |
+| `height`          | ridge minus ground, rounded to the nearest 0.5 m                 |
+| `roof:height`     | ridge minus eaves, rounded to 0.5 m and skipped when implausible |
+| `building:levels` | estimated from the facade height at the building's level height  |
 
 The matched generalized footprint is drawn as a light-gray outline on the map, beneath the selected
 OSM outline. While it is visible, dragging an OSM footprint node within nine screen pixels of a LOD1
@@ -166,8 +166,8 @@ A purple **X changes** button opens the pending-change sidebar; **Review & submi
 foot builds the changeset and opens the review dialog, which is also where you sign in. **Upload**
 sends it: create changeset, upload, close, all through this app's own routes because the token is in an
 httpOnly cookie. It is enabled only with a signed-in account, zero errors and a comment; writing to the
-real OSM additionally needs `OSM_ALLOW_PRODUCTION_WRITES=true` and a confirmation, since an accidental
-upload can only be reverted, never erased. Once a changeset lands, the pending changes are dropped and
+real OSM additionally asks for a confirmation, since an accidental upload can only be reverted, never
+erased. Once a changeset lands, the pending changes are dropped and
 the submitted comment is cleared, and the affected tiles are refetched past every cache, so the map
 shows what OSM now holds. The next review regenerates its description from its new changes. The rules
 behind all of it live in [the submission spec](memory/spec/domain/osm-submission.md).
@@ -274,6 +274,14 @@ yarn dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+## Production deployment
+
+Production runs on the Vercel project `silly-goose-tech/building-editor` at
+`buildings.sillygoose.se`. Its secrets are Vercel environment variables, `.env` and `.env.*` are
+ignored for deployments as well as for git, and the deployed filesystem is not storage — the disk
+caches degrade to per-instance memory. The rules, and what that degradation costs, live in
+[the production deployment spec](memory/spec/operations/production-deployment.md).
 
 ## Scripts
 

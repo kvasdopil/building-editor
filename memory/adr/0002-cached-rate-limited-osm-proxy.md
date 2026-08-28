@@ -20,6 +20,12 @@ Related documents:
 7. **Identify the client.** A descriptive `User-Agent` with contact info on every upstream call, per OSM and Overpass usage policy.
 8. **Stale-while-revalidate.** Cached tiles are served immediately; refresh is bounded per tile. A local edit invalidates its own tile.
 
+Repository-local disk writes are best-effort at runtime. Read-only or ephemeral hosts retain the
+in-memory layer instead of failing an otherwise successful upstream request. Such a fallback does not
+satisfy the persistent-store or global hard-budget decisions across horizontally scaled instances;
+production serverless hosting therefore needs a shared durable cache and distributed limiter before
+those guarantees can be claimed.
+
 ## Why
 
 - Overpass advertises **2 slots per IP** and its fair-use policy explicitly discourages backing interactive applications. Per-pan queries would exhaust it immediately.
@@ -31,3 +37,5 @@ Related documents:
 - The app gains a server component and is no longer a purely static build.
 - Users may see data that is minutes old; acceptable for reads, and edits always re-read their target before upload.
 - More moving parts (limiter, cache, invalidation) than direct fetching, justified entirely by the ban risk.
+- A read-only serverless deployment can run with per-instance memory only, but loses persistence and
+  cross-instance coordination until backed by a shared store.
