@@ -275,6 +275,29 @@ yarn dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+## Production deployment
+
+The production Vercel project is `silly-goose-tech/building-editor`, connected to this repository,
+with `buildings.sillygoose.se` as its custom domain. Configure these as Vercel Production environment
+variables rather than committing either local env file:
+
+- `NEXT_PUBLIC_CESIUM_TOKEN` — a browser-visible Cesium ion token restricted to asset `2275207` and
+  the production origin.
+- `OSM_CLIENT_ID`, `OSM_CLIENT_SECRET`, and `OSM_OAUTH_BASE` — server-side OSM OAuth configuration;
+  the registered callback must be `https://buildings.sillygoose.se/oauth/callback`.
+- `GEOTORGET_LOGIN` and `GEOTORGET_PASSWORD` — server-side national laser-data credentials.
+
+Keep `.env` and `.env.*` in `.vercelignore` as well as `.gitignore`. Local CLI deployments otherwise
+can upload an untracked env file as private deployment source and let Next.js read it during the
+remote build.
+
+DNS for `sillygoose.se` is delegated to Google Cloud DNS, so the record pointing the custom domain at
+Vercel is changed there — with `gcloud` or in the Cloud Console — rather than at the registrar.
+
+Vercel's deployed project directory is not persistent writable storage. The OSM and Skog disk caches
+therefore degrade to their per-instance in-memory layers. A shared durable cache and limiter are
+required before relying on the ADR 0002 global upstream-request guarantees under horizontal scaling.
+
 ## Scripts
 
 ```bash

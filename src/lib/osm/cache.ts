@@ -107,12 +107,16 @@ export async function writeCachedTile<T>(cacheKey: CacheKey, data: T): Promise<C
   touchMemory(cacheKey.join("/"), entry);
 
   const target = diskPath(cacheKey);
-  await mkdir(path.dirname(target), { recursive: true });
-  // Write then rename, so a crash mid-write cannot leave a torn cache file.
-  const temporary = `${target}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify(entry), "utf8");
-  await rename(temporary, target);
-  state.stats.writes++;
+  try {
+    await mkdir(path.dirname(target), { recursive: true });
+    // Write then rename, so a crash mid-write cannot leave a torn cache file.
+    const temporary = `${target}.${process.pid}.tmp`;
+    await writeFile(temporary, JSON.stringify(entry), "utf8");
+    await rename(temporary, target);
+    state.stats.writes++;
+  } catch {
+    // Read-only and ephemeral hosts still retain the in-memory cache above.
+  }
   return entry;
 }
 
