@@ -503,6 +503,39 @@ function recolourPointCloud(
   }
 }
 
+/**
+ * Mapterhorn elevation under each laser point, kept for as long as the cloud
+ * and the terrain both live.
+ *
+ * Sampling it is four raster lookups and a bilinear blend, paid for every point
+ * that no building covers — which in an ordinary view is most of them. It also
+ * cannot change: a fixed point over a fixed terrain has one elevation. Editing
+ * a height re-runs the difference pass on every frame of the drag, so computing
+ * this once instead of per frame is the difference between a smooth drag and a
+ * juddering one.
+ */
+const terrainUnderCloud = new WeakMap<LidarCloud, WeakMap<TerrainModel, Float32Array>>();
+
+function terrainUnderPoints(cloud: LidarCloud, terrain: TerrainModel): Float32Array {
+  let byTerrain = terrainUnderCloud.get(cloud);
+  if (!byTerrain) {
+    byTerrain = new WeakMap();
+    terrainUnderCloud.set(cloud, byTerrain);
+  }
+  const cached = byTerrain.get(terrain);
+  if (cached) return cached;
+
+  const elevations = new Float32Array(cloud.count);
+  for (let i = 0; i < cloud.count; i++) {
+    // Plain allocation here: this runs once per cloud, not once per frame, and
+    // the raster sampling dwarfs it.
+    // NaN marks a point past the edge of the loaded tiles, which stays unknown.
+    elevations[i] = terrainElevation(terrain, cloudPoint(cloud, i)) ?? Number.NaN;
+  }
+  byTerrain.set(terrain, elevations);
+  return elevations;
+}
+
 /** One modelled building, ready to be asked its roof height at a point. */
 interface ModelledBuilding {
   profile: RoofProfile;
@@ -520,23 +553,40 @@ interface ModelledBuilding {
  */
 const MODEL_INDEX_CELL_M = 25;
 
+const NO_BUILDINGS: ModelledBuilding[] = [];
+
 class BuildingIndex {
-  private cells = new Map<string, ModelledBuilding[]>();
-  private west = 0;
-  private south = 0;
-  private cosLat = 1;
+  // A flat array addressed by row * columns + column. This is looked up once
+  // per laser point, so it avoids both the string key and the Map hash that an
+  // earlier version paid half a million times per rebuild.
+  private cells: (ModelledBuilding[] | undefined)[];
+  private columns: number;
+  private rows: number;
+  private west: number;
+  private south: number;
+  private cosLat: number;
 
   constructor(buildings: ModelledBuilding[], bounds: Bounds) {
-    [this.west, this.south] = [bounds[0], bounds[1]];
-    this.cosLat = Math.cos((((bounds[1] + bounds[3]) / 2) * Math.PI) / 180);
+    const [west, south, east, north] = bounds;
+    this.west = west;
+    this.south = south;
+    this.cosLat = Math.cos((((south + north) / 2) * Math.PI) / 180);
+    this.columns = Math.max(1, this.column(east) + 1);
+    this.rows = Math.max(1, this.row(north) + 1);
+    this.cells = Array.from({ length: this.columns * this.rows });
+
     for (const building of buildings) {
-      const [west, south, east, north] = building.profile.bounds;
-      for (let row = this.row(south); row <= this.row(north); row++) {
-        for (let column = this.column(west); column <= this.column(east); column++) {
-          const key = `${column}/${row}`;
-          const cell = this.cells.get(key);
+      const [bWest, bSouth, bEast, bNorth] = building.profile.bounds;
+      const firstRow = Math.max(0, this.row(bSouth));
+      const lastRow = Math.min(this.rows - 1, this.row(bNorth));
+      const firstColumn = Math.max(0, this.column(bWest));
+      const lastColumn = Math.min(this.columns - 1, this.column(bEast));
+      for (let row = firstRow; row <= lastRow; row++) {
+        for (let column = firstColumn; column <= lastColumn; column++) {
+          const at = row * this.columns + column;
+          const cell = this.cells[at];
           if (cell) cell.push(building);
-          else this.cells.set(key, [building]);
+          else this.cells[at] = [building];
         }
       }
     }
@@ -552,8 +602,12 @@ class BuildingIndex {
     return Math.floor(((latitude - this.south) * EARTH_METERS_PER_DEG_LAT) / MODEL_INDEX_CELL_M);
   }
 
-  at(point: LngLat): ModelledBuilding[] {
-    return this.cells.get(`${this.column(point[0])}/${this.row(point[1])}`) ?? [];
+  at(longitude: number, latitude: number): ModelledBuilding[] {
+    const column = this.column(longitude);
+    if (column < 0 || column >= this.columns) return NO_BUILDINGS;
+    const row = this.row(latitude);
+    if (row < 0 || row >= this.rows) return NO_BUILDINGS;
+    return this.cells[row * this.columns + column] ?? NO_BUILDINGS;
   }
 }
 
@@ -594,12 +648,18 @@ export function roofDifferences(
     ground: ground(entity),
   }));
   const index = new BuildingIndex(modelled, cloudBounds(cloud));
+  const under = terrain ? terrainUnderPoints(cloud, terrain) : null;
+  // One tuple reused for every point. The polygon tests read it and keep no
+  // reference, and allocating half a million short-lived pairs is a measurable
+  // share of a drag frame.
+  const point: LngLat = [0, 0];
 
   for (let i = 0; i < cloud.count; i++) {
-    const point = cloudPoint(cloud, i);
+    point[0] = cloud.lon[i];
+    point[1] = cloud.lat[i];
 
     let surface: number | null = null;
-    for (const building of index.at(point)) {
+    for (const building of index.at(point[0], point[1])) {
       if (!pointInBounds(point, building.profile.bounds)) continue;
       const top = building.profile.topAt(point);
       if (top === null) continue;
@@ -610,8 +670,8 @@ export function roofDifferences(
     }
     if (surface === null) {
       // Open ground: the model here is the terrain the buildings stand on.
-      const elevation = terrain ? terrainElevation(terrain, point) : alignment.datum;
-      if (elevation === null) continue;
+      const elevation = under ? under[i] : alignment.datum;
+      if (Number.isNaN(elevation)) continue;
       surface = elevation - alignment.datum;
     }
 
@@ -741,8 +801,16 @@ function buildTerrainSurface(model: TerrainModel, projector: Projector): THREE.M
 export function buildScene(
   selection: BuildingSelection,
   terrain: TerrainModel | null = null,
+  /**
+   * Local origin to project against. Every rebuild of the same building passes
+   * the one the first build chose, because the origin is only a reference for
+   * the scene's own coordinates and letting it follow the footprint centre
+   * would shift every laser point each time a corner was dragged — forcing the
+   * whole position buffer to be rewritten for an edit that never moved a point.
+   */
+  fixedOrigin?: LngLat,
 ): BuildingScene {
-  const origin = footprintCenter(selection.building);
+  const origin = fixedOrigin ?? footprintCenter(selection.building);
   const projector = makeProjector(origin);
   const groundOffset = (building: BuildingElement) =>
     terrain ? minimumTerrainElevation(terrain, building) - terrain.referenceZ : 0;

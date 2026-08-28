@@ -560,11 +560,41 @@ drops inside the modelled solid. A horizontally misplaced building therefore sho
 where its roof returns fall on unmodelled terrain, beside a blue one where the modelled solid stands
 over nothing but ground.
 
+Because the comparison spans the whole view, editing one building's height recolours only that
+building's own footprint: everything else on screen is measured against terrain or against a
+neighbour, and neither moves when a height changes. It reads as less alive than it did when the
+selected element was the only thing coloured, but nothing else has anything to say about the edit.
+
 The value is carried as a `(difference, known)` pair because a shader cannot be handed a missing
 value and NaN through a vertex attribute is not portable enough to rely on. Only points beyond the
-terrain tiles are left unknown, and those render grey. The difference depends on the terrain
-alignment and on which part is selected, both of which settle after the points arrive, so it is
-published separately from the cloud and refreshed wherever either changes.
+terrain tiles are left unknown, and those render grey.
+
+### Editing has to stay interactive
+
+Dragging a height or a corner re-runs the 3D scene once per frame, so everything that frame touches
+is on the critical path. Four things keep it there.
+
+The scene keeps the local origin the first build chose for as long as the same building is selected,
+instead of recomputing it from the footprint centre. The origin is only a reference for the scene's
+own coordinates, and letting it follow the centre shifted every laser point whenever a corner moved,
+forcing the whole position buffer to be rewritten for an edit that never moved a point. With it
+held, a laser point's position depends only on the origin and the terrain alignment — neither of
+which an edit changes — so a rebuild keeps its positions and takes only new colours.
+
+Height differences are computed only while the map is actually drawing them. They cost more than the
+rest of a rebuild put together, and every other view ignores them.
+
+Mapterhorn elevation under each laser point is sampled once per cloud and terrain and kept, keyed on
+both so it is released with them. It cannot change, and it is four raster lookups and a bilinear
+blend for every point no building covers — most of them, in an ordinary view.
+
+The footprint index the difference pass searches is a flat array addressed by row and column rather
+than a map of `"column/row"` strings. It is consulted once per laser point, so the string and its
+hash were being built half a million times per pass; the coordinate handed to the polygon tests is
+one reused pair for the same reason.
+
+Together these take a drag frame over a 400,000 point cloud with sixty neighbouring buildings from
+about 140 ms to 8 ms, or 33 ms with the difference view open.
 
 Height reaches the map only as colour in every mode; position stays flat XY throughout.
 

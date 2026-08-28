@@ -3973,6 +3973,7 @@ export function MapView() {
         onEditTag={editEntityTag}
         onLidarCloudChange={onLidarCloudChange}
         onLidarDifferences={onLidarDifferences}
+        wantLidarDifferences={lidar && lidarColourMode === "diff"}
         onSelectEntity={selectLoadedEntity}
         onClose={() => setSelection(null)}
       />

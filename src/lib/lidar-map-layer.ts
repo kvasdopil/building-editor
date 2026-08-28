@@ -193,6 +193,10 @@ export class LidarMapLayer implements CustomLayerInterface {
     this.positions = new Float32Array(this.pointCount * 2);
     this.colours = cloud?.colours ?? new Float32Array();
     this.heights = cloud?.z ?? new Float32Array();
+    // Differences are measured against a particular cloud, so a new one leaves
+    // them behind rather than colouring these points with the last building's
+    // numbers until fresh ones arrive.
+    this.differences = new Float32Array();
     this.lonLat = cloud ? { lon: cloud.lon, lat: cloud.lat } : null;
 
     if (cloud) {

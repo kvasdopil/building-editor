@@ -50,6 +50,7 @@ export function BuildingPanel({
   onEditTag,
   onLidarCloudChange,
   onLidarDifferences,
+  wantLidarDifferences,
   onSelectEntity,
   onClose,
 }: {
@@ -60,6 +61,7 @@ export function BuildingPanel({
   onEditTag: (entity: string, key: string, value: string, currentValue?: string) => void;
   onLidarCloudChange?: (buildingId: string, cloud: LidarCloud | null) => void;
   onLidarDifferences?: (buildingId: string, differences: Float32Array | null) => void;
+  wantLidarDifferences?: boolean;
   onSelectEntity: (entityId: string) => void;
   onClose: () => void;
 }) {
@@ -248,6 +250,7 @@ export function BuildingPanel({
           onCloudStatus={setCloudStatus}
           onCloudChange={onLidarCloudChange}
           onCloudDifferences={onLidarDifferences}
+          wantDifferences={wantLidarDifferences}
           onTerrainStatus={setTerrainStatus}
         />
       </div>

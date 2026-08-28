@@ -66,6 +66,8 @@ export interface CameraView {
 interface SceneRuntime {
   buildingId: string;
   updateSelection(selection: BuildingSelection): void;
+  /** Recompute the height differences, for when the map starts showing them. */
+  publishDifferences(): void;
 }
 
 function disposeRoot(root: THREE.Object3D): void {
@@ -127,6 +129,7 @@ export function Building3D({
   onCloudStatus,
   onCloudChange,
   onCloudDifferences,
+  wantDifferences = false,
   onTerrainStatus,
 }: {
   selection: BuildingSelection;
@@ -142,6 +145,12 @@ export function Building3D({
    * which part is selected, both of which settle after the points arrive.
    */
   onCloudDifferences?: (buildingId: string, differences: Float32Array | null) => void;
+  /**
+   * Whether anything is actually showing the differences. Computing them costs
+   * more than the rest of a rebuild put together, and a height drag rebuilds on
+   * every frame, so they are only worked out while the map is drawing them.
+   */
+  wantDifferences?: boolean;
   onTerrainStatus?: (status: TerrainStatus) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -160,9 +169,17 @@ export function Building3D({
    * three-quarter view — the Google pane follows it too, since it mirrors this
    * camera.
    */
+  const wantDifferencesRef = useRef(wantDifferences);
+  wantDifferencesRef.current = wantDifferences;
   const orbitRef = useRef<CameraView | null>(null);
   /** Map bearing behind the last render, to tell a map rotation from a reselect. */
   const bearingRef = useRef(initialHeading);
+
+  // Turning the difference view on has to produce them once; while it is off
+  // nothing has been computing them.
+  useEffect(() => {
+    if (wantDifferences) runtimeRef.current?.publishDifferences();
+  }, [wantDifferences]);
 
   useEffect(() => {
     let active = true;
@@ -201,6 +218,7 @@ export function Building3D({
     // selected part, so it is published from every place any of those settle
     // rather than once when the points arrive.
     const publishDifferences = () => {
+      if (!wantDifferencesRef.current) return;
       onCloudDifferences?.(id, cloud ? roofDifferences(cloud, activeSelection, terrain) : null);
     };
 
@@ -213,9 +231,6 @@ export function Building3D({
       if (cloudPoints) scene.add(cloudPoints);
       publishDifferences();
     };
-    // A cached cloud is already in the scene and never reaches the rebuild
-    // above, so the opening state is published here.
-    publishDifferences();
 
     // Rebuilding changes terrain and neighbor base elevations, but never the
     // selected building's zero: its lowest Mapterhorn sample is the scene datum.
@@ -241,13 +256,29 @@ export function Building3D({
       const rebuildPointCloud =
         forcePointCloud || pointCloudProfileChanged(activeSelection, nextSelection);
       const previous = built.root;
+      const previousOrigin = built.origin;
       activeSelection = nextSelection;
-      const next = buildScene(activeSelection, terrain);
+      const next = buildScene(activeSelection, terrain, previousOrigin);
       scene.remove(previous);
       built = next;
       scene.add(next.root);
       disposeRoot(previous);
-      if (cloud && rebuildPointCloud) replacePointCloud();
+      if (!cloud || !rebuildPointCloud) return;
+      // A point's position depends on the footprint centre it is projected
+      // from and on the terrain alignment, and on nothing else. Editing a
+      // height moves neither, so the buffers can keep their positions and only
+      // take new colours — a third of the cost of rebuilding them.
+      const moved =
+        forcePointCloud ||
+        !cloudPoints ||
+        next.origin[0] !== previousOrigin[0] ||
+        next.origin[1] !== previousOrigin[1];
+      if (moved) {
+        replacePointCloud();
+      } else if (cloudPoints) {
+        updatePointCloudSelection(cloudPoints, cloud, activeSelection, terrain);
+        publishDifferences();
+      }
     };
 
     let pendingSelection: BuildingSelection | null = null;
@@ -256,6 +287,7 @@ export function Building3D({
       updateSelection(nextSelection) {
         if (nextSelection !== activeSelection) pendingSelection = nextSelection;
       },
+      publishDifferences,
     };
     runtimeRef.current = runtime;
 
@@ -312,8 +344,13 @@ export function Building3D({
       cloudRef.current = { id, cloud: loaded };
       cloud = loaded;
       if (disposed) return;
-      // Cached points were already added to the initial scene.
-      if (cloudPoints) return;
+      // Cached points were already added to the initial scene, so only the
+      // differences are outstanding — and they have to follow the cloud, which
+      // resets them as it arrives.
+      if (cloudPoints) {
+        publishDifferences();
+        return;
+      }
       replacePointCloud();
     };
     void addLidar();
