@@ -100,8 +100,8 @@ Ground is a low percentile of the ground-class returns within 2 m of the outline
 walls actually stand in, following OSM's convention of measuring from the building's lowest ground
 point. Neither the cloud's level for its whole 200 m box nor a wider skirt will do: the first put a
 waterfront house 4 m above its own ground, and the second read a shed on the Kastellet cliff 3 m too
-tall by measuring from the shoreline six metres away. Against 256 tagged buildings in Hammarby
-Sjöstad the laser reads `height` to 1.00 m mean absolute error and `roof:height` to 0.82 m, both
+tall by measuring from the shoreline six metres away. Against 260 tagged buildings in Hammarby
+Sjöstad the laser reads `height` to 1.12 m mean absolute error and `roof:height` to 0.89 m, both
 closer than LOD1 manages on the same buildings (1.58 m and 1.55 m). In the dense old town, where
 narrow streets leave few ground returns, LOD1 is still the better source (2.53 m against 3.26 m).
 
@@ -123,7 +123,7 @@ regardless was measured: `roof:height` improves to 0.78 m but `height` degrades 
 half-metre downward bias, since the bulk of the roof outvotes the ridge line that `height` actually
 names. Choosing the _shape_ by the error was measured twice more and lost both times.
 
-`roof:shape` is a judgement rather than a measurement — it agrees with 68 of 112 tagged roofs — so it
+`roof:shape` is a judgement rather than a measurement — it agrees with 70 of 112 tagged roofs — so it
 is always offered muted and never claims the confidence the heights do. It is decided per wall: whether the roof falls over that wall, runs along
 it as a gable end, or climbs away from it as the high side of a single pitch. Reading the walls
 rather than the roof as a whole is what makes a courtyard block legible, since its wings point every

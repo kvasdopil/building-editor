@@ -35,8 +35,21 @@ import { type GridFrame, type SurfaceGrid, WINDOW_CELLS, lonLatToGrid } from "./
  * Free of map and DOM dependencies, like the grid it reads.
  */
 
-/** Advice needs at least this many fitted cells (~15 m²) under the element. */
-const MIN_CELLS = 60;
+/**
+ * Advice needs at least this many fitted cells (~10 m²) under the element.
+ * A small outbuilding barely clears it: the 0.4 m edge margin erodes a 6 x 4 m
+ * footprint to about sixty cells, and a slightly smaller one to fewer. The
+ * error reported beside every suggestion is the better guard against a thin
+ * reading than a high floor is, because it says how thin.
+ */
+const MIN_CELLS = 40;
+
+/**
+ * Raw maxima are only a better ridge than the fitted heights when there are
+ * enough of them for a high percentile to mean something. Below this the
+ * smoothed heights are steadier, even though they erode the ridge a little.
+ */
+const MIN_PEAK_CELLS = 60;
 
 /** Cells steeper than this carry the shape vote. */
 const SLOPED_CELL_RAD = (8 * Math.PI) / 180;
@@ -736,7 +749,7 @@ export function roofAdviceFor(
   // Ridge and eaves from raw per-cell maxima: the smoothed fit erodes a
   // ridge by up to a metre, while a high percentile of the maxima rides just
   // under the chimneys.
-  const sorted = [...(cells.peaks.length >= MIN_CELLS ? cells.peaks : cells.heights)].sort(
+  const sorted = [...(cells.peaks.length >= MIN_PEAK_CELLS ? cells.peaks : cells.heights)].sort(
     (a, b) => a - b,
   );
   const ridge = percentile(sorted, 0.99);

@@ -40,7 +40,7 @@ Hammarby Sjöstad, where roof tags are well maintained:
 yarn advice --bbox 18.0842,59.2978,18.1119,59.3083 --no-parts
 ```
 
-256 buildings with a tagged height, 112 with a tagged shape. Any change to `src/lib/surface-grid.ts`
+260 buildings with a tagged height, 112 with a tagged shape. Any change to `src/lib/surface-grid.ts`
 or `src/lib/roof-advice.ts` is judged against it. A flat neighbourhood will not catch a ground-datum
 regression, so check a steep one too — Kastellholmen and the old town, where LOD1 still reads height
 better than the laser does.
