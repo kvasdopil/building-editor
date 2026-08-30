@@ -173,7 +173,7 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   an edge inserts the shared node into every coincident ring, including the parent outline; a drag
   onto an existing node rewrites edited node lists to that node rather than stacking coordinates.
   Double-click insertion runs the same local weld pass, so adding a corner to a part's shared wall
-  also changes its outline. Nodes with their own OSM tags render amber. Verification: `yarn lint`
+  also changes its outline. Nodes with their own OSM tags were marked apart from plain corners (restyled 2026-08-30, below). Verification: `yarn lint`
   and `yarn tsc --noEmit` pass; interactive map verification remains to be performed in the user-run
   development server.
 
@@ -261,6 +261,16 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   `building:levels` per building, with match confidence. Verified against way/204715520 (74%
   coverage, three values offered) and the merged Luma Park block (advice correctly marked
   unreliable).
+
+- **Entrance and tagged node marks (2026-08-30).** The selected element's vertices now carry a role
+  rather than a tagged flag. An entrance node (`entrance=*`, or the deprecated `building=entrance`)
+  is drawn as a black disc with Font Awesome's `fa-arrow-right` in white on top of it, any other
+  node with tags of its own as a white dot with a black outline, and an untagged corner stays the
+  small black dot. A coordinate shared by several ways takes the entrance mark if any of them tags
+  it as one. Verification: `yarn lint`, `yarn format` and `tsc --noEmit` pass; the glyph and the
+  three dot styles were checked in a standalone canvas harness reproducing the layer paint values,
+  which is how the arrow was sized to 9 px inside the 14 px disc. Interactive map verification
+  remains to be performed in the user-run development server.
 
 ## Verification notes
 

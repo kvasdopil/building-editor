@@ -289,6 +289,36 @@ function crossImage(size: number) {
   return { width: size, height: size, data };
 }
 
+/**
+ * Font Awesome's `fa-arrow-right`, the filled glyph `FaArrowRight` renders. It
+ * is drawn in a 448 x 512 box where the mark itself spans x 0..441 and y
+ * 45..467.
+ */
+const ARROW_RIGHT_PATH =
+  "M190.5 66.9l22.2-22.2c9.4-9.4 24.6-9.4 33.9 0L441 239c9.4 9.4 9.4 24.6 0 33.9L246.6 467.3c-9.4 9.4-24.6 9.4-33.9 0l-22.2-22.2c-9.5-9.5-9.3-25 .4-34.3L311.4 296H24c-13.3 0-24-10.7-24-24v-32c0-13.3 10.7-24 24-24h287.4L190.9 101.2c-9.8-9.3-10-24.8-.4-34.3z";
+const ARROW_RIGHT_WIDTH = 441;
+const ARROW_RIGHT_TOP = 44.7;
+const ARROW_RIGHT_HEIGHT = 422.6;
+
+/**
+ * The white arrow that sits inside an entrance dot. The glyph's bounding box is
+ * fitted to the icon and centred, so how much of the entrance disc the arrow
+ * fills is exactly `size` against the disc's diameter.
+ */
+function entranceArrowImage(size: number, pixelRatio: number): ImageData | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = size * pixelRatio;
+  canvas.height = size * pixelRatio;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  const scale = (size * pixelRatio) / ARROW_RIGHT_WIDTH;
+  context.scale(scale, scale);
+  context.translate(0, (ARROW_RIGHT_WIDTH - ARROW_RIGHT_HEIGHT) / 2 - ARROW_RIGHT_TOP);
+  context.fillStyle = "#ffffff";
+  context.fill(new Path2D(ARROW_RIGHT_PATH));
+  return context.getImageData(0, 0, canvas.width, canvas.height);
+}
+
 /** Hollow purple square with a white halo, used when reusing a footprint vertex. */
 function hollowSquareImage(size: number) {
   const data = new Uint8Array(size * size * 4);
@@ -424,25 +454,39 @@ function draftFeatures(
   return { type: "FeatureCollection", features };
 }
 
+/**
+ * How a footprint vertex is drawn. An entrance is the one node kind a mapper
+ * reads as a place rather than a corner, so it gets its own mark; everything
+ * else only says whether the node carries tags of its own.
+ */
+type SelectionNodeRole = "entrance" | "tagged" | "plain";
+
+/** `entrance=*` marks a door; `building=entrance` is the deprecated spelling. */
+function selectionNodeRole(tags: Record<string, string> | undefined): SelectionNodeRole {
+  if (!tags || Object.keys(tags).length === 0) return "plain";
+  return tags.entrance || tags.building === "entrance" ? "entrance" : "tagged";
+}
+
 /** One point per footprint vertex, without GeoJSON's repeated closing coordinate. */
 function selectionNodeFeatures(selection: BuildingSelection | null): FeatureCollection {
   if (!selection) return EMPTY;
-  const taggedCoordinates = new Set<string>();
+  const roles = new Map<string, SelectionNodeRole>();
+  const noteRole = (coordinates: LngLat | undefined, tags: Record<string, string> | undefined) => {
+    const role = selectionNodeRole(tags);
+    if (!coordinates || role === "plain") return;
+    const key = coordinateKey(roundToOsmGrid(coordinates));
+    // A corner shared by several ways keeps the louder mark of the two.
+    if (role === "entrance" || !roles.has(key)) roles.set(key, role);
+  };
   const properties = selection.selected.properties;
   const nodeIds = Array.isArray(properties.node_ids) ? (properties.node_ids as number[]) : [];
   const nodeTags = (properties.node_tags ?? {}) as Record<string, Record<string, string>>;
   const outer = selection.selected.polygons[0]?.outer ?? [];
-  nodeIds.forEach((id, index) => {
-    if (Object.keys(nodeTags[id] ?? {}).length > 0 && outer[index]) {
-      taggedCoordinates.add(coordinateKey(roundToOsmGrid(outer[index])));
-    }
-  });
+  nodeIds.forEach((id, index) => noteRole(outer[index], nodeTags[id]));
   for (const member of relationMemberWays(properties.member_ways)) {
-    member.nodes.forEach((id, index) => {
-      if (Object.keys(member.node_tags?.[id] ?? {}).length > 0 && member.coordinates[index]) {
-        taggedCoordinates.add(coordinateKey(roundToOsmGrid(member.coordinates[index])));
-      }
-    });
+    member.nodes.forEach((id, index) =>
+      noteRole(member.coordinates[index], member.node_tags?.[id]),
+    );
   }
   const features: Feature<Point>[] = selection.selected.polygons.flatMap(
     (footprint, polygonIndex) =>
@@ -453,7 +497,7 @@ function selectionNodeFeatures(selection: BuildingSelection | null): FeatureColl
             polygonIndex,
             ringIndex,
             vertexIndex,
-            tagged: taggedCoordinates.has(coordinateKey(roundToOsmGrid(coordinates))),
+            role: roles.get(coordinateKey(roundToOsmGrid(coordinates))) ?? "plain",
           },
           geometry: { type: "Point", coordinates },
         })),
@@ -1107,8 +1151,23 @@ function editorStyle(): StyleSpecification {
         type: "circle",
         source: "selection-nodes",
         paint: {
-          "circle-color": ["case", ["==", ["get", "tagged"], true], "#f59e0b", "#000000"],
-          "circle-radius": 3,
+          "circle-color": ["match", ["get", "role"], "tagged", "#ffffff", "#000000"],
+          "circle-radius": ["match", ["get", "role"], "entrance", 7, "tagged", 4, 3],
+          "circle-stroke-color": "#000000",
+          "circle-stroke-width": ["match", ["get", "role"], "tagged", 1.5, 0],
+        },
+      },
+      {
+        // Rides on the entrance disc drawn just below, so the arrow must not be
+        // dropped for collisions the way a label would be.
+        id: "selection-node-entrances",
+        type: "symbol",
+        source: "selection-nodes",
+        filter: ["==", ["get", "role"], "entrance"],
+        layout: {
+          "icon-image": "entrance-arrow",
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
         },
       },
       {
@@ -1472,6 +1531,8 @@ export function MapView() {
       const overlay = editorStyle();
       for (const [id, source] of Object.entries(overlay.sources)) instance.addSource(id, source);
       instance.addImage("roof-direction-chevron", roofDirectionImage(27));
+      const entranceArrow = entranceArrowImage(9, 2);
+      if (entranceArrow) instance.addImage("entrance-arrow", entranceArrow, { pixelRatio: 2 });
       const lidarBackground = overlay.layers.find((layer) => layer.id === "lidar-background");
       if (lidarBackground) instance.addLayer(lidarBackground);
       const lidarLayer = new LidarMapLayer();

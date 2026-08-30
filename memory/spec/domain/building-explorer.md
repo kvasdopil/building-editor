@@ -681,8 +681,11 @@ Selection and the inspector are **live OSM only**, at map zoom z >= 15.5. Both b
 `building:part` elements can be selected, including through ID search. Dropping below that threshold
 clears selection and leaves only the normal basemap: there is no building overlay, building legend,
 selection highlight, or zoom hint. Every vertex on the selected element's outer and inner footprint rings is shown
-as a small black dot, except a node with its own OSM tags, which is amber; the repeated closing
-coordinate in GeoJSON produces only one dot. Inside its
+as a small black dot. A node carrying OSM tags of its own is drawn instead as a white dot with a
+black outline, and an entrance (`entrance=*`, or the deprecated `building=entrance`) as a larger
+black disc holding a white forward arrow, because a door is a place on the wall rather than a corner.
+A coordinate shared by several ways takes the entrance mark if any of them tags it as one; the
+repeated closing coordinate in GeoJSON produces only one dot. Inside its
 nine-pixel interaction target, a node becomes a larger purple dot with a white halo and the pointer
 cursor, and that highlight follows the node while it is dragged. Dragging previews the new footprint
 continuously and stores one pending geometry change on release, updating the map and 3D view.
