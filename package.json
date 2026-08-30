@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "advice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/roof-advice.mjs",
     "lint": "oxlint .",
     "lint:format": "oxfmt . --check",
     "lint:knip": "knip",

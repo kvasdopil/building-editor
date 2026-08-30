@@ -81,6 +81,56 @@ Advice appears as a button on the row: green **+** when OSM has no value, amber 
 
 LOD1 footprints are generalized, so coverage is reported both ways. When one LOD1 block spans several OSM buildings its heights describe the whole block, not the selected building — those suggestions are drawn muted and the panel says so.
 
+## Roof advice from the laser
+
+Where LOD1 stops, the point cloud carries on. The selected building's Surface raster (below) is read
+for the same dimension tags, so advice reaches the places the city's model does not: **every
+`building:part`**, which LOD1 has no equivalent of at all; **`roof:shape`**, which it does not model;
+and any building whose LOD1 block spans several structures. LOD1 keeps the row wherever it has a
+confident opinion, and the laser fills in the rest — the tooltip on each button names which source
+it came from.
+
+| tag           | from                                                                     |
+| ------------- | ------------------------------------------------------------------------ |
+| `height`      | the 99th percentile of raw cell maxima, above this building's own ground |
+| `roof:height` | that ridge minus the eaves, read from the roof's own low cells           |
+| `roof:shape`  | what the roof does where it meets each wall of the outline               |
+
+Ground is a low percentile of the ground-class returns within 2 m of the outline — the ground the
+walls actually stand in, following OSM's convention of measuring from the building's lowest ground
+point. Neither the cloud's level for its whole 200 m box nor a wider skirt will do: the first put a
+waterfront house 4 m above its own ground, and the second read a shed on the Kastellet cliff 3 m too
+tall by measuring from the shoreline six metres away. Against 256 tagged buildings in Hammarby
+Sjöstad the laser reads `height` to 1.00 m mean absolute error and `roof:height` to 0.82 m, both
+closer than LOD1 manages on the same buildings (1.58 m and 1.55 m). In the dense old town, where
+narrow streets leave few ground returns, LOD1 is still the better source (2.53 m against 3.26 m).
+
+Beside the `roof:shape` row are **two** such measurements: what the laser recommends, and what the
+element's own tags already describe. The roof each combination implies is built as the 3D view would
+extrude it and measured against the points, so the recommendation is answerable rather than merely
+asserted — a mapper can see whether it beats what is tagged, and by how much. Pressing the
+recommendation applies all three tags at once, since they describe one roof and a height without the
+roof height it was measured with builds a different one.
+
+Two decimetres is the roof that is there; a metre means something the shape does not describe — a
+lift housing, a terrace, a wing at another height, tree canopy over a small roof.
+
+Where the modelled roof lands **within 0.5 m** of the points, the half-metre steps either side of the
+reading are searched and the closest-fitting combination is what gets offered; the percentiles only
+seed it. Beyond that the search is ignored, because a model that misses by three metres is not
+describing the building and the minimum of its error surface is a minimum of noise. Following it
+regardless was measured: `roof:height` improves to 0.78 m but `height` degrades to 1.14 m with a
+half-metre downward bias, since the bulk of the roof outvotes the ridge line that `height` actually
+names. Choosing the _shape_ by the error was measured twice more and lost both times.
+
+`roof:shape` is a judgement rather than a measurement — it agrees with 68 of 112 tagged roofs — so it
+is always offered muted and never claims the confidence the heights do. It is decided per wall: whether the roof falls over that wall, runs along
+it as a gable end, or climbs away from it as the high side of a single pitch. Reading the walls
+rather than the roof as a whole is what makes a courtyard block legible, since its wings point every
+way at once. See `src/lib/roof-advice.ts` for the readings that were measured and rejected — at two
+points per square metre the height residuals of a gable, a hip and a barrel vault differ by
+centimetres, well inside the noise from roof equipment, so elevation is the wrong thing to compare.
+
 ## Laser point cloud
 
 Stockholm's **"SBK Punktmoln - flygburen laserskanning (2023)"** is the raw survey behind those LOD1 heights: >16 points/m², classified, and coloured from the 2023 orthophoto. Import it into z16 tiles:
@@ -285,12 +335,33 @@ caches degrade to per-instance memory. The rules, and what that degradation cost
 
 ## Scripts
 
+Imported datasets live under `data/` by default. Set **`BUILDING_DATA_DIR`** to read them from
+somewhere else — a git worktree wants the checkout's copy rather than tens of megabytes of its own,
+and both the API routes and `yarn advice` honour it. Do not symlink the directory into the tree
+instead: Tailwind's source scan follows the link, resolves a path above the project root, and
+Turbopack fails every build with `FileSystemPath("").join("../../../data") leaves the filesystem
+root`.
+
 ```bash
 yarn lint        # oxlint (type-aware)
 yarn lint:full   # lint + format check + knip + jscpd
 yarn format      # oxfmt --write
 yarn build       # production build
+yarn advice      # roof measurements for a building, from the terminal
 ```
+
+`yarn advice way/123456` prints what the laser reads for one element's `height`, `roof:height` and
+`roof:shape` beside the OSM tags and the LOD1 block, and does the same for each of its
+`building:part`s; `--bbox w,s,e,n` measures every tagged building in a box and ends with the error
+against those tags, which is how the reading is calibrated, and `--png <dir>` writes each building's
+surface grid out as a picture to look at. It runs the app's own modules — Node strips the types,
+`scripts/lib/ts-hooks.mjs` resolves them — through the same limiter and `.cache` as the server, so
+no dev server is involved and a warm cache is shared with one.
+
+It measures what the side panel offers (see [Roof advice from the laser](#roof-advice-from-the-laser)),
+so a run over a well-tagged area is how those readings are calibrated. In the old town `roof:shape`
+drops to 51%: half the roofs there are `gambrel`, `mansard`, `half-hipped` or `many`, shapes this
+does not distinguish and never suggests.
 
 Data attribution: © OpenStreetMap contributors, imagery © Esri & contributors, terrain © Mapterhorn and its listed sources, LOD1 models and 2023 laser point cloud © Stockholms stad, Laserdata Skog © Lantmäteriet (CC0).
 

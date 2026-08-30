@@ -1,9 +1,10 @@
 "use client";
 
 import { type KeyboardEvent, type PointerEvent, useRef, useState } from "react";
-import { FiAlertCircle, FiEdit2, FiPlusCircle, FiXCircle } from "react-icons/fi";
+import { FiAlertCircle, FiCrosshair, FiEdit2, FiPlusCircle, FiXCircle } from "react-icons/fi";
 import { TbArrowsHorizontal, TbCompass } from "react-icons/tb";
 import type { Suggestion } from "@/lib/lod1";
+import type { RoofReading } from "@/lib/roof-advice";
 import { parseMeters } from "@/lib/osm/parse";
 import { ValueEditDialog } from "./ValueEditDialog";
 
@@ -49,6 +50,75 @@ export interface TagRow {
   suggestion?: Suggestion;
 }
 
+function missTone(miss: number): string {
+  return miss <= 0.4 ? "text-slate-500" : "text-amber-600";
+}
+
+/**
+ * The two roofs, measured the same way: the one the laser recommends and the
+ * one the element's own tags already describe, each as the mean distance from
+ * the points to that surface.
+ *
+ * A roof within a couple of decimetres is the roof that is there; a metre out
+ * means something the shape does not describe — a lift housing, a terrace, a
+ * wing at another height, tree canopy over a small roof. Showing both is what
+ * makes the recommendation answerable rather than merely asserted: a mapper
+ * can see whether it beats what is tagged, and by how much.
+ */
+function RoofFit({ laser, onApply }: { laser: RoofReading; onApply?: () => void }) {
+  const { miss, currentMiss, recommended } = laser;
+  if (miss === undefined) return null;
+  // With nothing tagged there is no roof to be closer than, and a measured one
+  // is plainly worth having.
+  const better = currentMiss === undefined || miss < currentMiss;
+  const parts = [`height ${recommended.height}`];
+  if (recommended.roofHeight) parts.push(`roof:height ${recommended.roofHeight}`);
+  if (recommended.shape) parts.push(`roof:shape ${recommended.shape}`);
+  const summary = parts.join(", ");
+
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5">
+      {currentMiss !== undefined && (
+        <span
+          title={`What this element's own tags describe sits ${currentMiss.toFixed(2)} m from the laser points, on average`}
+          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(currentMiss)}`}
+        >
+          now {currentMiss.toFixed(2)} m
+        </span>
+      )}
+      {onApply ? (
+        <button
+          type="button"
+          onClick={onApply}
+          title={`Apply the roof the laser measured — ${summary} — which sits ${miss.toFixed(2)} m from the points${
+            currentMiss === undefined
+              ? ""
+              : better
+                ? `, against ${currentMiss.toFixed(2)} m for what is tagged now`
+                : `, which is no closer than the ${currentMiss.toFixed(2)} m of what is tagged now`
+          }`}
+          className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[11px] font-medium tabular-nums transition-colors ${
+            better
+              ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+              : "border border-dashed border-slate-300 bg-white text-slate-500 hover:bg-slate-50"
+          }`}
+        >
+          <FiCrosshair className="h-3 w-3" aria-hidden />
+          {miss.toFixed(2)} m
+        </button>
+      ) : (
+        <span
+          title={`The roof this element's tags describe sits ${miss.toFixed(2)} m from the laser points, on average`}
+          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(miss)}`}
+        >
+          <FiCrosshair className="h-3 w-3" aria-hidden />
+          {miss.toFixed(2)} m
+        </span>
+      )}
+    </span>
+  );
+}
+
 function SuggestionButton({
   suggestion,
   onApply,
@@ -67,7 +137,7 @@ function SuggestionButton({
     <button
       type="button"
       onClick={onApply}
-      title={`${missing ? "Missing in OSM" : `OSM has ${suggestion.current}`} — apply LOD1 value ${suggestion.value} (${suggestion.note})`}
+      title={`${missing ? "Missing in OSM" : `OSM has ${suggestion.current}`} — apply ${suggestion.source} value ${suggestion.value} (${suggestion.note})`}
       className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium transition-colors ${tone}`}
     >
       <Icon className="h-3.5 w-3.5" aria-hidden />
@@ -397,6 +467,8 @@ export function TagRows({
   onEdit,
   onRevert,
   roofDirectionForLook,
+  laser,
+  onApplyLaserRoof,
   parentId,
   onSelectParent,
 }: {
@@ -405,6 +477,10 @@ export function TagRows({
   onEdit: (key: string, value: string) => void;
   onRevert: (key: string) => void;
   roofDirectionForLook: (bearing: number) => string;
+  /** What the laser measured for this element's roof, when it could. */
+  laser?: RoofReading | null;
+  /** Applies the whole measured roof at once; absent when it changes nothing. */
+  onApplyLaserRoof?: () => void;
   parentId?: string | null;
   onSelectParent?: () => void;
 }) {
@@ -551,6 +627,9 @@ export function TagRows({
                         suggestion={row.suggestion}
                         onApply={() => onApply(row.suggestion as Suggestion)}
                       />
+                    )}
+                    {row.key === "roof:shape" && laser && (
+                      <RoofFit laser={laser} onApply={onApplyLaserRoof} />
                     )}
                   </span>
                 </td>

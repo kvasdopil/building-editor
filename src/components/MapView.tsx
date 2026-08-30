@@ -150,7 +150,7 @@ const MAP_UNDERLAYS: {
   },
 ];
 
-/** The three things a LiDAR dot's colour can stand for, in toolbar order. */
+/** What the LiDAR view can colour, in toolbar order. */
 const LIDAR_COLOUR_MODES: { mode: LidarColourMode; label: string; title: string }[] = [
   {
     mode: "colour",
@@ -163,16 +163,18 @@ const LIDAR_COLOUR_MODES: { mode: LidarColourMode; label: string; title: string 
     title: "Colour each point by height, violet lowest to red highest over the points in view",
   },
   {
-    mode: "normal",
-    label: "Normal",
-    title: "Colour each link by its angle from horizontal, violet flat to red vertical",
-  },
-  {
     mode: "diff",
     label: "Diff",
     title:
       "Colour each point by its height against the roof modelled from OSM: " +
       "green agrees, red is above the model, violet below",
+  },
+  {
+    mode: "surface",
+    label: "Surface",
+    title:
+      "Split the outline into half-metre cells along its own axes and fill each with " +
+      "the surface it holds: hue faces, saturation slopes, brightness rises",
   },
 ];
 
@@ -3498,7 +3500,9 @@ export function MapView() {
 
   const onLidarCloudChange = useCallback((buildingId: string, cloud: LidarCloud | null) => {
     if (selectionRef.current?.building.id !== buildingId) return;
-    lidarLayerRef.current?.setCloud(cloud);
+    // The whole building's outline rides along for the grid mode's raster,
+    // whichever part is selected.
+    lidarLayerRef.current?.setCloud(cloud, selectionRef.current?.building.polygons ?? []);
   }, []);
 
   // A cloud belongs to the building that requested it. Clear it immediately

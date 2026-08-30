@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { localTilePath } from "@/lib/local-data";
 import { tileRoute } from "@/lib/tile-route";
 
 /**
@@ -12,14 +12,7 @@ import { tileRoute } from "@/lib/tile-route";
 const EMPTY = { type: "FeatureCollection", features: [] } as const;
 
 export const GET = tileRoute(async (tile) => {
-  const file = path.join(
-    process.cwd(),
-    "data",
-    "lod1",
-    String(tile.z),
-    String(tile.x),
-    `${tile.y}.json`,
-  );
+  const file = localTilePath("lod1", tile, ".json");
   try {
     const body = await readFile(file, "utf8");
     return new NextResponse(body, {

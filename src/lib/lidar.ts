@@ -72,7 +72,12 @@ function lidarTilesFor(building: BuildingElement): TileId[] {
   return tilesForBounds(cloudBounds(building));
 }
 
-function cloudBounds(building: BuildingElement): Bounds {
+/**
+ * The lon/lat box a building's cloud covers. Exported because a caller that
+ * reads tiles itself — the server-side CLI in scripts/roof-advice.mjs — has to
+ * clip to the same box as the browser does, or measure a different cloud.
+ */
+export function cloudBounds(building: BuildingElement): Bounds {
   return padBounds(elementBounds(building), CLOUD_PADDING_M);
 }
 
@@ -101,7 +106,7 @@ function median(values: number[]): number {
  * z16 tile is ~300 m across and holds far more of the city than one building's
  * 3D view ever shows.
  */
-function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | null {
+export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | null {
   const [west, south, east, north] = bounds;
   const cosLat = Math.cos((((south + north) / 2) * Math.PI) / 180);
   const area = (east - west) * METERS_PER_DEG_LAT * cosLat * ((north - south) * METERS_PER_DEG_LAT);
@@ -178,7 +183,8 @@ function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | null {
   };
 }
 
-interface LoadedTile {
+/** One decoded tile with the survey it came from, ready to merge. */
+export interface LoadedTile {
   tile: TileId;
   raw: RawTile;
   source: LidarSource;

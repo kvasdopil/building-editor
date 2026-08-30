@@ -3,7 +3,7 @@ import { parseOsmRef } from "./osm/ref";
 
 /**
  * The URL hash carries both what is selected and how the map is being looked
- * at, as `&`-separated segments: `#way/42764754&normals&lines=1&lod1=0`.
+ * at, as `&`-separated segments: `#way/42764754&surface&lines=1&lod1=0`.
  *
  * The selection is the segment that parses as an OSM reference; everything else
  * describes the view. Only settings that differ from the defaults are written,
@@ -20,9 +20,12 @@ import { parseOsmRef } from "./osm/ref";
  * point cloud under its three colourings: the underlay and the colour it is
  * drawn in are one choice to a reader, so they are one word in the URL too.
  */
-type ViewMode = "map" | "photos" | "lidar" | "height" | "normals" | "diff";
+type ViewMode = "map" | "photos" | "lidar" | "height" | "surface" | "diff";
 
-const VIEW_MODES: ViewMode[] = ["map", "photos", "lidar", "height", "normals", "diff"];
+const VIEW_MODES: ViewMode[] = ["map", "photos", "lidar", "height", "surface", "diff"];
+
+/** Hash words from before renames, still honoured in links already shared. */
+const LEGACY_VIEW_MODES: Record<string, ViewMode> = { normals: "surface", grid: "surface" };
 
 /** Everything about the view that the hash carries. */
 export interface ViewHash {
@@ -48,7 +51,10 @@ export function hashRef(hash: string): string {
 export function parseView(hash: string): ViewHash {
   const segments = segmentsOf(hash);
   return {
-    mode: VIEW_MODES.find((mode) => segments.includes(mode)) ?? DEFAULT_VIEW.mode,
+    mode:
+      VIEW_MODES.find((mode) => segments.includes(mode)) ??
+      segments.map((segment) => LEGACY_VIEW_MODES[segment]).find(Boolean) ??
+      DEFAULT_VIEW.mode,
     lines: segments.includes("lines=1") ? true : DEFAULT_VIEW.lines,
     lod1: segments.includes("lod1=0") ? false : DEFAULT_VIEW.lod1,
   };
@@ -97,8 +103,8 @@ export function viewState(mode: ViewMode): {
       return { photos: false, lidar: true, colour: "colour" };
     case "height":
       return { photos: false, lidar: true, colour: "height" };
-    case "normals":
-      return { photos: false, lidar: true, colour: "normal" };
+    case "surface":
+      return { photos: false, lidar: true, colour: "surface" };
     case "diff":
       return { photos: false, lidar: true, colour: "diff" };
     default:
@@ -111,7 +117,7 @@ export function viewMode(photos: boolean, lidar: boolean, colour: LidarColourMod
   if (photos) return "photos";
   if (!lidar) return "map";
   if (colour === "height") return "height";
-  if (colour === "normal") return "normals";
+  if (colour === "surface") return "surface";
   if (colour === "diff") return "diff";
   return "lidar";
 }

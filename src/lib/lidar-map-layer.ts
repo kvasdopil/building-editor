@@ -3,24 +3,31 @@ import {
   type CustomRenderMethodInput,
   type Map as MaplibreMap,
 } from "maplibre-gl";
+import type { Footprint } from "./buildings";
 import type { LidarCloud } from "./lidar";
+import { recommendSeparationLines } from "./separation-lines";
+import { buildSurfaceGrid, gridToLonLat, surfaceGridImage } from "./surface-grid";
 
 /**
- * What a dot's colour means. `colour` shows the survey's own orthophoto sample,
- * `height` replaces it with a rainbow ramp over the heights currently in view,
- * which reads relief and roof shape that the flat top-down view otherwise hides,
- * `normal` colours by how steeply each link rises — violet lying flat through
- * to red standing vertical — and `diff` by how far each point sits above or
- * below the roof this app models from the OSM tags.
+ * What the LiDAR view shows. `colour` shows each point in the survey's own
+ * orthophoto sample, `height` replaces that with a rainbow ramp over the
+ * heights currently in view, which reads relief and roof shape that the flat
+ * top-down view otherwise hides, and `diff` colours each point by how far it
+ * sits above or below the roof this app models from the OSM tags. `surface`
+ * sets the points aside and rasterises the outline into half-metre cells
+ * instead, each filled with all three surface readings at once: hue for the
+ * facing direction, saturation for the steepness, brightness for the height —
+ * overlaid with the recommended part-separation lines, bright where the
+ * detector would accept them and faint where they are only worth a review.
  */
-export type LidarColourMode = "colour" | "height" | "normal" | "diff";
+export type LidarColourMode = "colour" | "height" | "surface" | "diff";
 
-/** How each mode reaches the shader's `u_mode`. */
+/** How each mode reaches the shader's `u_mode`; `surface` never does. */
 const COLOUR_MODE_UNIFORM: Record<LidarColourMode, number> = {
   colour: 0,
   height: 1,
-  normal: 2,
-  diff: 3,
+  diff: 2,
+  surface: 0,
 };
 
 const MAX_MERCATOR_LATITUDE = 85.051129;
@@ -107,28 +114,6 @@ function linkNeighbours(count: number, steps: Float32Array): Uint32Array {
   return links.subarray(0, at);
 }
 
-/**
- * The angle each link makes with the horizontal, in radians from 0 to PI/2.
- *
- * This is the plain inclination of the step from the previous stored point to
- * this one: level along the ground is 0, straight up a wall is PI/2. It is
- * carried per point rather than per link because points and links share one
- * vertex buffer, so a point takes the angle of the link arriving at it and a
- * drawn link is exact at its far end and blends toward the previous link's
- * angle at its near end. Points with no link before them are left at 0.
- */
-function linkInclinations(count: number, steps: Float32Array): Float32Array {
-  const inclinations = new Float32Array(count);
-  for (let index = 1; index < count; index++) {
-    const east = steps[index * 3];
-    if (Number.isNaN(east)) continue;
-    const north = steps[index * 3 + 1];
-    const up = steps[index * 3 + 2];
-    inclinations[index] = Math.atan2(Math.abs(up), Math.hypot(east, north));
-  }
-  return inclinations;
-}
-
 function compileShader(
   gl: WebGL2RenderingContext,
   type: typeof gl.VERTEX_SHADER | typeof gl.FRAGMENT_SHADER,
@@ -165,14 +150,12 @@ export class LidarMapLayer implements CustomLayerInterface {
   private pointSizeLocation: WebGLUniformLocation | null = null;
   private isPointLocation: WebGLUniformLocation | null = null;
   private heightBuffer: WebGLBuffer | null = null;
-  private inclineBuffer: WebGLBuffer | null = null;
   private differenceBuffer: WebGLBuffer | null = null;
   private modeLocation: WebGLUniformLocation | null = null;
   private rampRangeLocation: WebGLUniformLocation | null = null;
   private positions = new Float32Array();
   private colours: Float32Array<ArrayBufferLike> = new Float32Array();
   private heights: Float32Array<ArrayBufferLike> = new Float32Array();
-  private inclinations: Float32Array<ArrayBufferLike> = new Float32Array();
   private differences: Float32Array<ArrayBufferLike> = new Float32Array();
   private links: Uint32Array<ArrayBufferLike> = new Uint32Array();
   private pointCount = 0;
@@ -183,12 +166,28 @@ export class LidarMapLayer implements CustomLayerInterface {
   /** The ends of the ramp for the current mode, over the points in view. */
   private rampRange: [number, number] = [0, 1];
   private lonLat: { lon: Float64Array; lat: Float64Array } | null = null;
+  private cloud: LidarCloud | null = null;
+  private footprint: Footprint[] = [];
+  private gridProgram: WebGLProgram | null = null;
+  private gridMatrixLocation: WebGLUniformLocation | null = null;
+  private gridVertexArray: WebGLVertexArrayObject | null = null;
+  private gridQuadBuffer: WebGLBuffer | null = null;
+  private edgeProgram: WebGLProgram | null = null;
+  private edgeMatrixLocation: WebGLUniformLocation | null = null;
+  private gridTexture: WebGLTexture | null = null;
+  private gridQuadReady = false;
+  private edgeVertexArray: WebGLVertexArrayObject | null = null;
+  private edgeBuffer: WebGLBuffer | null = null;
+  private edgeVertexCount = 0;
   private onMoveEnd = () => this.refitRamp();
   private originX = 0;
   private originY = 0;
   private localizedMatrix = new Float32Array(16);
 
-  setCloud(cloud: LidarCloud | null): void {
+  setCloud(cloud: LidarCloud | null, footprint: Footprint[] = []): void {
+    this.cloud = cloud;
+    this.footprint = footprint;
+    this.gridQuadReady = false;
     this.pointCount = cloud?.count ?? 0;
     this.positions = new Float32Array(this.pointCount * 2);
     this.colours = cloud?.colours ?? new Float32Array();
@@ -206,19 +205,17 @@ export class LidarMapLayer implements CustomLayerInterface {
         this.positions[index * 2] = x - this.originX;
         this.positions[index * 2 + 1] = y - this.originY;
       }
-      const steps = metricSteps(cloud);
-      this.links = linkNeighbours(cloud.count, steps);
-      this.inclinations = linkInclinations(cloud.count, steps);
+      this.links = linkNeighbours(cloud.count, metricSteps(cloud));
     } else {
       this.originX = 0;
       this.originY = 0;
       this.links = new Uint32Array();
-      this.inclinations = new Float32Array();
       this.differences = new Float32Array();
     }
     this.linkCount = this.links.length / 2;
 
     this.upload();
+    if (this.mode === "surface") this.ensureGrid();
     this.refitRamp();
     this.map?.triggerRepaint();
   }
@@ -254,8 +251,98 @@ export class LidarMapLayer implements CustomLayerInterface {
   setColourMode(mode: LidarColourMode): void {
     if (mode === this.mode) return;
     this.mode = mode;
+    // The raster costs a pass over the cloud, so it is built when it is first
+    // looked at rather than on every selection.
+    if (mode === "surface") this.ensureGrid();
     this.refitRamp();
     this.map?.triggerRepaint();
+  }
+
+  /** Build the outline's cell raster and hand it to the GPU, once per cloud. */
+  private ensureGrid(): void {
+    const gl = this.gl;
+    if (this.gridQuadReady || !gl || !this.cloud || this.footprint.length === 0) return;
+    const grid = buildSurfaceGrid(this.cloud, this.footprint);
+    if (!grid) return;
+
+    if (!this.gridTexture) this.gridTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.gridTexture);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      grid.columns,
+      grid.rows,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array(surfaceGridImage(grid).buffer),
+    );
+    // Nearest keeps the half-metre cells as crisp squares at any zoom.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    // Two triangles over the raster's corners, in the same origin-relative
+    // Mercator frame as the points; x, y, u, v interleaved.
+    const quad = new Float32Array(24);
+    const uv = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+    ];
+    for (const [slot, corner] of [0, 1, 2, 0, 2, 3].entries()) {
+      const [x, y] = toMercator(grid.corners[corner][0], grid.corners[corner][1]);
+      quad[slot * 4] = x - this.originX;
+      quad[slot * 4 + 1] = y - this.originY;
+      quad[slot * 4 + 2] = uv[corner][0];
+      quad[slot * 4 + 3] = uv[corner][1];
+    }
+    if (!this.gridQuadBuffer) this.gridQuadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.gridQuadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // Recommended separation lines, as thin world-space quads over the cells:
+    // bright where the detector would accept, faint where it asks for review.
+    const HALF_WIDTH_M = 0.22;
+    const STYLE = {
+      accept: [1.0, 0.0, 0.88, 0.92],
+      review: [1.0, 0.62, 0.98, 0.5],
+    } as const;
+    const vertices: number[] = [];
+    for (const line of recommendSeparationLines(grid)) {
+      if (line.recommendation === "ignore") continue;
+      const colour = STYLE[line.recommendation];
+      const rad = (line.phiDeg * Math.PI) / 180;
+      const dir = [Math.cos(rad), Math.sin(rad)];
+      const normal = [-Math.sin(rad), Math.cos(rad)];
+      const segments = line.spans.length > 0 ? line.spans : [line.extent];
+      for (const [s0, s1] of segments) {
+        if (s1 - s0 < 0.5) continue;
+        const corner = (s: number, side: number) => {
+          const u = s * dir[0] + (line.t + side * HALF_WIDTH_M) * normal[0];
+          const v = s * dir[1] + (line.t + side * HALF_WIDTH_M) * normal[1];
+          const [lon, lat] = gridToLonLat(grid.frame, u, v);
+          const [x, y] = toMercator(lon, lat);
+          return [x - this.originX, y - this.originY];
+        };
+        const a = corner(s0, -1);
+        const b = corner(s1, -1);
+        const c = corner(s1, 1);
+        const d = corner(s0, 1);
+        for (const [x, y] of [a, b, c, a, c, d]) vertices.push(x, y, ...colour);
+      }
+    }
+    this.edgeVertexCount = vertices.length / 6;
+    if (!this.edgeBuffer) this.edgeBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.edgeBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this.gridQuadReady = true;
   }
 
   /** Refit the ramp, but only while it is the thing being looked at. */
@@ -326,13 +413,13 @@ export class LidarMapLayer implements CustomLayerInterface {
       `#version 300 es
       uniform mat4 u_matrix;
       uniform float u_point_size;
-      // 0 = survey colour, 1 = height ramp, 2 = link angle, 3 = OSM difference.
+      // 0 = survey colour, 1 = height ramp, 2 = OSM difference. The surface
+      // mode draws a textured quad through its own program instead.
       uniform int u_mode;
       uniform vec2 u_ramp_range;
       in vec2 a_position;
       in vec3 a_colour;
       in float a_height;
-      in float a_incline;
       in vec2 a_difference;
       out vec3 v_colour;
 
@@ -344,7 +431,7 @@ export class LidarMapLayer implements CustomLayerInterface {
 
       // Violet at 0 through blue, green and yellow to red at 1: a full hue
       // sweep gives the eye more steps to read a value with than any two-colour
-      // ramp. Height and link angle both run through it.
+      // ramp.
       vec3 violet_to_red(float t) {
         return hue_to_rgb((1.0 - clamp(t, 0.0, 1.0)) * 270.0 / 60.0);
       }
@@ -394,7 +481,7 @@ export class LidarMapLayer implements CustomLayerInterface {
         float span = max(u_ramp_range.y - u_ramp_range.x, 0.01);
         if (u_mode == 1) {
           v_colour = srgb_to_linear(violet_to_red((a_height - u_ramp_range.x) / span));
-        } else if (u_mode == 3) {
+        } else if (u_mode == 2) {
           // Nothing modelled under this point, so there is nothing for it to
           // agree or disagree with. Grey says that, where any ramp colour would
           // claim a measurement that was never made.
@@ -403,8 +490,6 @@ export class LidarMapLayer implements CustomLayerInterface {
           } else {
             v_colour = srgb_to_linear(difference_ramp(a_difference.x, u_ramp_range.y));
           }
-        } else if (u_mode == 2) {
-          v_colour = srgb_to_linear(violet_to_red(a_incline / ${(Math.PI / 2).toFixed(8)}));
         } else {
           v_colour = a_colour;
         }
@@ -458,7 +543,6 @@ export class LidarMapLayer implements CustomLayerInterface {
     this.positionBuffer = gl.createBuffer();
     this.colourBuffer = gl.createBuffer();
     this.heightBuffer = gl.createBuffer();
-    this.inclineBuffer = gl.createBuffer();
     this.differenceBuffer = gl.createBuffer();
     this.linkBuffer = gl.createBuffer();
 
@@ -475,10 +559,6 @@ export class LidarMapLayer implements CustomLayerInterface {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.heightBuffer);
     gl.enableVertexAttribArray(heightLocation);
     gl.vertexAttribPointer(heightLocation, 1, gl.FLOAT, false, 0, 0);
-    const inclineLocation = gl.getAttribLocation(program, "a_incline");
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.inclineBuffer);
-    gl.enableVertexAttribArray(inclineLocation);
-    gl.vertexAttribPointer(inclineLocation, 1, gl.FLOAT, false, 0, 0);
     const differenceLocation = gl.getAttribLocation(program, "a_difference");
     gl.bindBuffer(gl.ARRAY_BUFFER, this.differenceBuffer);
     gl.enableVertexAttribArray(differenceLocation);
@@ -486,7 +566,116 @@ export class LidarMapLayer implements CustomLayerInterface {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.linkBuffer);
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // A second, tiny program for the grid mode's textured quad.
+    const gridVertex = compileShader(
+      gl,
+      gl.VERTEX_SHADER,
+      `#version 300 es
+      uniform mat4 u_matrix;
+      in vec2 a_position;
+      in vec2 a_uv;
+      out vec2 v_uv;
+      void main() {
+        gl_Position = u_matrix * vec4(a_position, 0.0, 1.0);
+        v_uv = a_uv;
+      }`,
+    );
+    const gridFragment = compileShader(
+      gl,
+      gl.FRAGMENT_SHADER,
+      `#version 300 es
+      precision highp float;
+      uniform sampler2D u_cells;
+      in vec2 v_uv;
+      out vec4 frag_colour;
+      void main() {
+        vec4 cell = texture(u_cells, v_uv);
+        if (cell.a < 0.01) discard;
+        frag_colour = vec4(cell.rgb * cell.a, cell.a);
+      }`,
+    );
+    const gridProgram = gl.createProgram();
+    if (!gridProgram) throw new Error("Could not create LiDAR grid program");
+    gl.attachShader(gridProgram, gridVertex);
+    gl.attachShader(gridProgram, gridFragment);
+    gl.linkProgram(gridProgram);
+    gl.deleteShader(gridVertex);
+    gl.deleteShader(gridFragment);
+    if (!gl.getProgramParameter(gridProgram, gl.LINK_STATUS)) {
+      const message = gl.getProgramInfoLog(gridProgram) ?? "Unknown shader link error";
+      gl.deleteProgram(gridProgram);
+      throw new Error(`Could not link LiDAR grid program: ${message}`);
+    }
+    this.gridProgram = gridProgram;
+    this.gridMatrixLocation = gl.getUniformLocation(gridProgram, "u_matrix");
+    this.gridQuadBuffer = gl.createBuffer();
+    this.edgeBuffer = gl.createBuffer();
+    this.gridVertexArray = gl.createVertexArray();
+    gl.bindVertexArray(this.gridVertexArray);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.gridQuadBuffer);
+    const gridPosition = gl.getAttribLocation(gridProgram, "a_position");
+    gl.enableVertexAttribArray(gridPosition);
+    gl.vertexAttribPointer(gridPosition, 2, gl.FLOAT, false, 16, 0);
+    const gridUv = gl.getAttribLocation(gridProgram, "a_uv");
+    gl.enableVertexAttribArray(gridUv);
+    gl.vertexAttribPointer(gridUv, 2, gl.FLOAT, false, 16, 8);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // A third micro-program for the separation lines' flat-coloured quads.
+    const edgeVertex = compileShader(
+      gl,
+      gl.VERTEX_SHADER,
+      `#version 300 es
+      uniform mat4 u_matrix;
+      in vec2 a_position;
+      in vec4 a_colour;
+      out vec4 v_colour;
+      void main() {
+        gl_Position = u_matrix * vec4(a_position, 0.0, 1.0);
+        v_colour = a_colour;
+      }`,
+    );
+    const edgeFragment = compileShader(
+      gl,
+      gl.FRAGMENT_SHADER,
+      `#version 300 es
+      precision highp float;
+      in vec4 v_colour;
+      out vec4 frag_colour;
+      void main() {
+        frag_colour = vec4(v_colour.rgb * v_colour.a, v_colour.a);
+      }`,
+    );
+    const edgeProgram = gl.createProgram();
+    if (!edgeProgram) throw new Error("Could not create LiDAR edge program");
+    gl.attachShader(edgeProgram, edgeVertex);
+    gl.attachShader(edgeProgram, edgeFragment);
+    gl.linkProgram(edgeProgram);
+    gl.deleteShader(edgeVertex);
+    gl.deleteShader(edgeFragment);
+    if (!gl.getProgramParameter(edgeProgram, gl.LINK_STATUS)) {
+      const message = gl.getProgramInfoLog(edgeProgram) ?? "Unknown shader link error";
+      gl.deleteProgram(edgeProgram);
+      throw new Error(`Could not link LiDAR edge program: ${message}`);
+    }
+    this.edgeProgram = edgeProgram;
+    this.edgeMatrixLocation = gl.getUniformLocation(edgeProgram, "u_matrix");
+    this.edgeVertexArray = gl.createVertexArray();
+    gl.bindVertexArray(this.edgeVertexArray);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.edgeBuffer);
+    const edgePosition = gl.getAttribLocation(edgeProgram, "a_position");
+    gl.enableVertexAttribArray(edgePosition);
+    gl.vertexAttribPointer(edgePosition, 2, gl.FLOAT, false, 24, 0);
+    const edgeColour = gl.getAttribLocation(edgeProgram, "a_colour");
+    gl.enableVertexAttribArray(edgeColour);
+    gl.vertexAttribPointer(edgeColour, 4, gl.FLOAT, false, 24, 8);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
     this.upload();
+    if (this.mode === "surface") this.ensureGrid();
     // The ramp follows the viewport, so it is refitted when a movement settles
     // rather than on every frame of a pan.
     map.on("moveend", this.onMoveEnd);
@@ -494,6 +683,10 @@ export class LidarMapLayer implements CustomLayerInterface {
 
   render(gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
     if (!this.visible || this.pointCount === 0 || !this.program || !this.vertexArray) return;
+    if (this.mode === "surface") {
+      this.renderGrid(gl, options);
+      return;
+    }
     // A full-world Mercator coordinate in a Float32 vertex buffer has only a
     // few meters of precision. Keep vertices local to the cloud and fold its
     // origin into MapLibre's matrix in JavaScript's double precision instead.
@@ -519,14 +712,46 @@ export class LidarMapLayer implements CustomLayerInterface {
     gl.bindVertexArray(null);
   }
 
+  /** The grid mode draws one textured quad where the points would be. */
+  private renderGrid(gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
+    if (!this.gridQuadReady || !this.gridProgram || !this.gridVertexArray) return;
+    const matrix = options.defaultProjectionData.mainMatrix;
+    this.localizedMatrix.set(matrix);
+    this.localizedMatrix[12] = matrix[0] * this.originX + matrix[4] * this.originY + matrix[12];
+    this.localizedMatrix[13] = matrix[1] * this.originX + matrix[5] * this.originY + matrix[13];
+    this.localizedMatrix[14] = matrix[2] * this.originX + matrix[6] * this.originY + matrix[14];
+    this.localizedMatrix[15] = matrix[3] * this.originX + matrix[7] * this.originY + matrix[15];
+    gl.useProgram(this.gridProgram);
+    gl.bindVertexArray(this.gridVertexArray);
+    gl.uniformMatrix4fv(this.gridMatrixLocation, false, this.localizedMatrix);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.gridTexture);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindVertexArray(null);
+    if (this.edgeVertexCount > 0 && this.edgeProgram && this.edgeVertexArray) {
+      gl.useProgram(this.edgeProgram);
+      gl.bindVertexArray(this.edgeVertexArray);
+      gl.uniformMatrix4fv(this.edgeMatrixLocation, false, this.localizedMatrix);
+      gl.drawArrays(gl.TRIANGLES, 0, this.edgeVertexCount);
+      gl.bindVertexArray(null);
+    }
+  }
+
   onRemove(map: MaplibreMap, gl: WebGL2RenderingContext): void {
     map.off("moveend", this.onMoveEnd);
     if (this.positionBuffer) gl.deleteBuffer(this.positionBuffer);
     if (this.colourBuffer) gl.deleteBuffer(this.colourBuffer);
     if (this.heightBuffer) gl.deleteBuffer(this.heightBuffer);
-    if (this.inclineBuffer) gl.deleteBuffer(this.inclineBuffer);
     if (this.differenceBuffer) gl.deleteBuffer(this.differenceBuffer);
     if (this.linkBuffer) gl.deleteBuffer(this.linkBuffer);
+    if (this.gridQuadBuffer) gl.deleteBuffer(this.gridQuadBuffer);
+    if (this.edgeBuffer) gl.deleteBuffer(this.edgeBuffer);
+    if (this.gridTexture) gl.deleteTexture(this.gridTexture);
+    if (this.gridVertexArray) gl.deleteVertexArray(this.gridVertexArray);
+    if (this.edgeVertexArray) gl.deleteVertexArray(this.edgeVertexArray);
+    if (this.gridProgram) gl.deleteProgram(this.gridProgram);
+    if (this.edgeProgram) gl.deleteProgram(this.edgeProgram);
     if (this.vertexArray) gl.deleteVertexArray(this.vertexArray);
     if (this.program) gl.deleteProgram(this.program);
     this.map = null;
@@ -536,9 +761,17 @@ export class LidarMapLayer implements CustomLayerInterface {
     this.positionBuffer = null;
     this.colourBuffer = null;
     this.heightBuffer = null;
-    this.inclineBuffer = null;
     this.differenceBuffer = null;
     this.linkBuffer = null;
+    this.gridProgram = null;
+    this.gridVertexArray = null;
+    this.gridQuadBuffer = null;
+    this.gridTexture = null;
+    this.edgeProgram = null;
+    this.edgeVertexArray = null;
+    this.edgeBuffer = null;
+    this.edgeVertexCount = 0;
+    this.gridQuadReady = false;
   }
 
   /**
@@ -564,15 +797,13 @@ export class LidarMapLayer implements CustomLayerInterface {
   private upload(): void {
     const gl = this.gl;
     if (!gl || !this.positionBuffer || !this.colourBuffer || !this.linkBuffer) return;
-    if (!this.heightBuffer || !this.inclineBuffer || !this.differenceBuffer) return;
+    if (!this.heightBuffer || !this.differenceBuffer) return;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.positions, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.colourBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.colours, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.heightBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.heights, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.inclineBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, this.inclinations, gl.STATIC_DRAW);
     this.uploadDifferences();
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.linkBuffer);

@@ -56,8 +56,16 @@ export interface Suggestion {
   /** Existing OSM value, when there is one. */
   current?: string;
   kind: "missing" | "differs";
+  /** Which measurement produced it, for the tooltip and for precedence. */
+  source: "LOD1" | "laser";
   /** Where the number comes from, for the tooltip. */
   note: string;
+  /**
+   * Mean distance from the roof this advice implies to the laser points,
+   * metres, when it was read by fitting one. Absent for advice that no surface
+   * was measured against.
+   */
+  error?: number;
   /** False when the LOD1 block covers more than this building. */
   confident: boolean;
 }
@@ -127,9 +135,9 @@ function compare(
 ): Suggestion | null {
   const current = tags[key];
   if (current === undefined || current === "")
-    return { key, value, kind: "missing", note, confident };
+    return { key, value, kind: "missing", source: "LOD1", note, confident };
   if (current.trim() === value) return null;
-  return { key, value, current, kind: "differs", note, confident };
+  return { key, value, current, kind: "differs", source: "LOD1", note, confident };
 }
 
 /**

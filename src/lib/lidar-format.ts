@@ -141,6 +141,11 @@ export function withSingleReturn(classification: number): number {
   return classification | SINGLE_RETURN;
 }
 
+/** Whether a stored classification byte carries the single-return flag. */
+export function isSingleReturn(stored: number): boolean {
+  return (stored & SINGLE_RETURN) !== 0;
+}
+
 /** Pack 8-bit channels into the RGB565 the tile format carries. */
 export function packColour(r: number, g: number, b: number): number {
   return ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);

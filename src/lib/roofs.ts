@@ -273,6 +273,11 @@ type StraightSkeletonVertex = [number, number, number];
 let straightSkeletonBuilder: StraightSkeletonBuilder | null = null;
 let straightSkeletonInitialization: Promise<boolean> | null = null;
 
+/** True once the skeleton engine can build hipped roofs rather than pyramids. */
+export function hippedRoofGeometryReady(): boolean {
+  return straightSkeletonBuilder !== null;
+}
+
 /** Initialize the browser-only CGAL/Wasm engine once before building hipped roofs. */
 export function initializeHippedRoofGeometry(): Promise<boolean> {
   if (straightSkeletonBuilder) return Promise.resolve(true);

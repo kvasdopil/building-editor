@@ -10,12 +10,13 @@ Related documents:
 - [Building Explorer domain spec](../spec/domain/building-explorer.md): What the dots are and how they are placed. Read it for the normative behavior.
 - [National laser data is read on demand](0005-national-laser-data-read-on-demand.md): The second source, covering the country where the city's own scan stops. Read it before changing how points are delivered.
 - [Mapterhorn defines the 3D ground datum](0006-mapterhorn-defines-3d-ground.md): The terrain source of truth and the vertical alignment contract for this overlay. Read it before changing point heights.
+- [The laser measures roof tags](0007-laser-roof-advice.md): Amends this record. The cloud is still shown as points and still defines nothing, but it is now also read for per-element roof advice. Read it before deriving another number from the returns.
 
 ## Decision
 
 - The dataset is "SBK Punktmoln - flygburen laserskanning (2023)" from Stockholm's data portal: LAS, SWEREF 99 18 00 (EPSG:3011), heights in RH2000, >16 points/m², coloured from the 2023 orthophoto, classified into ground, building, water, bridge, noise and unclassified.
 - `scripts/import-lidar.mjs` reprojects it and writes one **binary** tile per z16 grid cell under `data/lidar`, thinned to at most 500,000 points per tile. `src/lib/lidar.ts` reads those tiles directly into typed arrays.
-- The 3D view draws the cloud as coloured dots around the selected building, in the same local frame as the extruded solids. Source colour is preserved except for above-roof points inside the selected footprint, where a green-to-red distance gradient makes disagreement with the rendered roof legible. Mapterhorn supplies the ground and scene datum; class-2 returns only measure the per-survey translation that visually aligns this overlay. Nothing is inferred into editable data: no suggested tags, no per-part heights.
+- The 3D view draws the cloud as coloured dots around the selected building, in the same local frame as the extruded solids. Source colour is preserved except for above-roof points inside the selected footprint, where a green-to-red distance gradient makes disagreement with the rendered roof legible. Mapterhorn supplies the ground and scene datum; class-2 returns only measure the per-survey translation that visually aligns this overlay. Nothing is inferred into the scene: the points define no ground, no building base and no geometry. **Amended by [ADR 0007](0007-laser-roof-advice.md):** the cloud is now also rasterized and read for `height`, `roof:height` and `roof:shape` advice per element, offered the way LOD1 is rather than imported.
 
 ## Why
 

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { localTilePath } from "@/lib/local-data";
 import { emptyTile } from "@/lib/lidar-format";
 import { tileRoute } from "@/lib/tile-route";
 
@@ -12,14 +12,7 @@ import { tileRoute } from "@/lib/tile-route";
  */
 
 export const GET = tileRoute(async (tile) => {
-  const file = path.join(
-    process.cwd(),
-    "data",
-    "lidar",
-    String(tile.z),
-    String(tile.x),
-    `${tile.y}.bin`,
-  );
+  const file = localTilePath("lidar", tile, ".bin");
   try {
     const body = await readFile(file);
     return new NextResponse(new Uint8Array(body), {

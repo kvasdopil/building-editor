@@ -292,6 +292,39 @@ Suggested tags: `height` (ridge minus ground), `roof:height` (ridge minus eaves,
 taller than half the building, which indicates a merged block), and `building:levels` estimated
 from the facade height at the building's own level height.
 
+## Laser roof advice
+
+The selected building's point cloud is rasterized into the half-metre surface grid and read for
+`height`, `roof:height` and `roof:shape` — for the outline and for **each `building:part`
+separately**, which LOD1 cannot do ([ADR 0007](../../adr/0007-laser-roof-advice.md)). The raster is
+built from the whole building whichever element is selected, so a part is measured in the same frame
+as its neighbours.
+
+`height` is the 99th percentile of raw per-cell maxima above this building's own ground: the 10th
+percentile of ground-class returns within 2 m of the outline, widened outwards only when that ring
+holds too few. A raw return more than 1.5 m above the surface fitted around it is discarded first —
+a chimney, an antenna, an overhanging branch. `roof:height` is that ridge minus eaves read from the
+roof's own cells, where the roof starts at half the building's height so a courtyard or a lower wing
+cannot pull the join down. `roof:shape` is read from what the roof does where it meets each stretch
+of wall, weighted by wall length, and is always offered unconfident: it is a judgement, and the panel
+draws it muted with "confirm against the roof".
+
+Each element's advice carries the **fit error**: the roof those tags describe, built as the 3D view
+would extrude it and measured against the cells as the mean distance over the closest-fitting 90%.
+The `roof:shape` row shows it beside the same measurement for the element's current tags, so the two
+are comparable, and pressing the recommendation applies the whole combination at once — a height
+without the roof height it was measured with builds a different roof. The advised figure is measured
+from the rounded values that get written, so it equals what the tags report once applied.
+
+The error may choose `roof:height`, searched in the written half-metre steps, and only where the
+modelled roof already lands within 0.5 m of the points. It never chooses `height`, which names the
+ridge the maxima read directly, and it never chooses the shape. ADR 0007 records the measurements
+behind both limits.
+
+LOD1 keeps precedence for any tag it has a confident opinion on; the laser fills in the rest —
+`roof:shape` always, every `building:part`, and any building whose LOD1 block spans several
+structures. Each suggestion names its source in the tooltip.
+
 The whole pending change set is local only and persists in IndexedDB, so a reload keeps it: tag
 overrides keyed per OSM element, footprint overrides and drawn parts under their own store. Both
 halves must persist together — a tag override that outlives the part it describes is a pending
@@ -622,9 +655,9 @@ describes, so a selection whose lookup is still in flight shows nothing rather t
 building's count. Without it a building still being read looks exactly like one with no data,
 which matters most for the national source, where a first read assembles tiles on demand.
 
-The cloud is evidence only. It suggests no tags and is not matched to parts; a `height` that
-disagrees with the survey shows up as a roof floating above or sunk into the dots, and the mapper
-draws the conclusion. Points arrive after the buildings, are added to the standing scene without
+The cloud is drawn as evidence first: a `height` that disagrees with the survey shows up as a roof
+floating above or sunk into the dots, and the mapper draws the conclusion. It is also measured, per
+element and per tag, into the roof advice described above ([ADR 0007](../../adr/0007-laser-roof-advice.md)). Points arrive after the buildings, are added to the standing scene without
 moving the camera, and are absent wherever neither source has points — where both tile routes
 answer an empty tile rather than an error, so a missing credential, a missing product permission
 and an upstream outage all look the same to the view: no dots.

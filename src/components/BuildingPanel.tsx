@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Building3D, type CameraView, type CloudStatus, type TerrainStatus } from "./Building3D";
 import { External3DLinks } from "./External3DLinks";
 import { Photoreal3D } from "./Photoreal3D";
@@ -8,9 +8,14 @@ import { EDITABLE_DIMENSION_KEYS, OPTIONAL_ROOF_KEYS, type TagRow, TagRows } fro
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
 import { applyEditsToSelection, type EditsApi } from "@/lib/edits";
 import { boundsCenter, boundsRadiusMeters, elementBounds } from "@/lib/geometry";
-import { type Lod1Match, suggestionsFor } from "@/lib/lod1";
+import { type Lod1Match, type Suggestion, suggestionsFor } from "@/lib/lod1";
 import type { LidarCloud } from "@/lib/lidar";
+import { roofAdviceFor } from "@/lib/roof-advice";
 import { roofDirectionFromLook } from "@/lib/roofs";
+import { buildSurfaceGrid } from "@/lib/surface-grid";
+
+/** Stable empty list, so a reading-less panel does not remake its rows. */
+const EMPTY_ADVICE: Suggestion[] = [];
 
 function buildingTitle(selection: BuildingSelection): string {
   const props = selection.selected.properties;
@@ -68,6 +73,7 @@ export function BuildingPanel({
   const match = lod1Match;
   const [camera, setCamera] = useState<CameraView | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const [cloud, setCloud] = useState<LidarCloud | null>(null);
   const [terrainStatus, setTerrainStatus] = useState<TerrainStatus | null>(null);
   const selectedId = selection?.selected.id ?? "";
   // Laser dots arrive after the 3D view, and a national tile is assembled on
@@ -102,6 +108,43 @@ export function BuildingPanel({
     () => (edited ? sourceTags(edited.selected.properties) : {}),
     [edited],
   );
+
+  // The laser cloud reaches the map as well, for its Surface mode; the panel
+  // keeps it to measure the roof from.
+  const handleCloud = useCallback(
+    (buildingId: string, loaded: LidarCloud | null) => {
+      setCloud(loaded);
+      onLidarCloudChange?.(buildingId, loaded);
+    },
+    [onLidarCloudChange],
+  );
+
+  // Rastered from the whole building whichever part is selected, so a part is
+  // measured in the same frame as its neighbours — and from the OSM geometry
+  // rather than the edited one, so applying a tag does not rebuild the raster.
+  const grid = useMemo(
+    () => (cloud && selection ? buildSurfaceGrid(cloud, selection.building.polygons) : null),
+    [cloud, selection],
+  );
+
+  const laserReading = useMemo(
+    () =>
+      grid && selection ? roofAdviceFor(grid, selection.selected.polygons, effectiveTags) : null,
+    [grid, selection, effectiveTags],
+  );
+  const laserAdvice = laserReading?.advice ?? EMPTY_ADVICE;
+
+  // The three tags describe one roof, and are worth applying as one: a height
+  // without the roof height it was measured with builds a different roof than
+  // the one the laser matched.
+  // The advice already holds exactly the keys that would change, so a tag the
+  // laser agrees with is left alone rather than recorded as a no-op edit.
+  const applyLaserRoof = useCallback(() => {
+    for (const advice of laserAdvice) {
+      onEditTag(selectedId, advice.key, advice.value, osmTags[advice.key]);
+    }
+  }, [laserAdvice, onEditTag, selectedId, osmTags]);
+
   const roofDirectionForLook = useMemo(
     () => (lookBearing: number) => {
       if (!edited) return "0";
@@ -120,6 +163,25 @@ export function BuildingPanel({
     const suggestions = match ? suggestionsFor(edited.selected, match, tags) : [];
     const byKey = new Map(suggestions.map((s) => [s.key, s]));
 
+    // LOD1 is a per-building municipal measurement, so where it has a
+    // confident opinion it keeps the row. The laser fills in the rest: roof
+    // shapes, which LOD1 does not model at all, every building:part, which it
+    // does not cover, and anywhere its block spans more than this building.
+    // Asked against empty tags it reports every key it has a value for, not
+    // just the ones OSM already disagrees with — which is what precedence
+    // needs, or the laser would argue with a tag LOD1 quietly agrees with.
+    const lod1Keys = new Set(
+      match
+        ? suggestionsFor(edited.selected, match, {})
+            .filter((suggestion) => suggestion.confident)
+            .map((suggestion) => suggestion.key)
+        : [],
+    );
+    for (const advice of laserAdvice) {
+      if (!lod1Keys.has(advice.key)) byKey.set(advice.key, advice);
+    }
+    const advised: Suggestion[] = [...byKey.values()];
+
     const known = Object.entries(tags)
       .filter(([, value]) => value !== "")
       .map(
@@ -135,7 +197,7 @@ export function BuildingPanel({
     // Advice and manually editable dimensions need rows even when OSM does not
     // have those tags yet.
     const extraKeys = new Set([
-      ...suggestions.filter((s) => !(s.key in tags)).map((s) => s.key),
+      ...advised.filter((s) => !(s.key in tags)).map((s) => s.key),
       ...EDITABLE_DIMENSION_KEYS.filter((key) => !(key in tags)),
       ...OPTIONAL_ROOF_KEYS.filter(
         (key) =>
@@ -156,8 +218,14 @@ export function BuildingPanel({
       }),
     );
 
-    return [...extra, ...known].sort((a, b) => a.key.localeCompare(b.key));
-  }, [edited, effectiveTags, match, edit, osmTags]);
+    // The dimensions being edited all day live above the alphabet.
+    const pinned = ["height", "min_height", "roof:height", "roof:shape", "building:levels"];
+    const rank = (row: TagRow) => {
+      const index = pinned.indexOf(row.key);
+      return index === -1 ? pinned.length : index;
+    };
+    return [...extra, ...known].sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+  }, [edited, effectiveTags, match, edit, osmTags, laserAdvice]);
 
   if (!selection || !edited) return null;
 
@@ -248,7 +316,7 @@ export function BuildingPanel({
           initialHeading={initialHeading}
           onCameraChange={setCamera}
           onCloudStatus={setCloudStatus}
-          onCloudChange={onLidarCloudChange}
+          onCloudChange={handleCloud}
           onCloudDifferences={onLidarDifferences}
           wantDifferences={wantLidarDifferences}
           onTerrainStatus={setTerrainStatus}
@@ -263,7 +331,7 @@ export function BuildingPanel({
 
       <p className="border-y border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
         {selectedIsPart ? (
-          "LOD1 advice is only available for building outlines"
+          "LOD1 covers building outlines only — this part is measured from the laser"
         ) : match ? (
           <>
             LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
@@ -312,6 +380,8 @@ export function BuildingPanel({
           onEdit={(key, value) => onEditTag(selectedId, key, value, osmTags[key])}
           onRevert={(key) => edits.revertTag(selectedId, key)}
           roofDirectionForLook={roofDirectionForLook}
+          laser={laserReading}
+          onApplyLaserRoof={laserAdvice.length > 0 ? applyLaserRoof : undefined}
           parentId={parentId}
           onSelectParent={parentId ? () => onSelectEntity(parentId) : undefined}
         />
