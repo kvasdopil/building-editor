@@ -319,10 +319,11 @@ are comparable, and pressing the recommendation applies the whole combination at
 without the roof height it was measured with builds a different roof. The advised figure is measured
 from the rounded values that get written, so it equals what the tags report once applied.
 
-The error may choose `roof:height`, searched in the written half-metre steps, and only where the
-modelled roof already lands within 0.5 m of the points. It never chooses `height`, which names the
-ridge the maxima read directly, and it never chooses the shape. ADR 0007 records the measurements
-behind both limits.
+The error may choose `height` and `roof:height` together, searched in the written half-metre steps,
+and only where the roof **at the measured heights** already lands within 0.5 m of the points — the
+condition is judged before anything moves, so a roof the model cannot describe cannot wander into
+the limit and be trusted for arriving there. Outside that, the measured ridge stands. The error never
+chooses the shape. ADR 0007 records the measurements behind both limits.
 
 LOD1 keeps precedence for any tag it has a confident opinion on; the laser fills in the rest —
 `roof:shape` always, every `building:part`, and any building whose LOD1 block spans several

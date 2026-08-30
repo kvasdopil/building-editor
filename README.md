@@ -101,7 +101,7 @@ walls actually stand in, following OSM's convention of measuring from the buildi
 point. Neither the cloud's level for its whole 200 m box nor a wider skirt will do: the first put a
 waterfront house 4 m above its own ground, and the second read a shed on the Kastellet cliff 3 m too
 tall by measuring from the shoreline six metres away. Against 260 tagged buildings in Hammarby
-Sjöstad the laser reads `height` to 1.12 m mean absolute error and `roof:height` to 0.89 m, both
+Sjöstad the laser reads `height` to 1.12 m mean absolute error and `roof:height` to 0.93 m, both
 closer than LOD1 manages on the same buildings (1.58 m and 1.55 m). In the dense old town, where
 narrow streets leave few ground returns, LOD1 is still the better source (2.53 m against 3.26 m).
 

@@ -18,25 +18,25 @@ Related documents:
 - `height` is the 99th percentile of raw per-cell maxima above **this building's own ground**: the 10th percentile of ground-class returns within 2 m of the outline, widened outwards only when that ring is too thin. A raw return standing more than 1.5 m above the surface fitted around it is discarded first, as a chimney, an antenna or an overhanging branch.
 - `roof:shape` is read from what the roof does where it meets each stretch of wall — falling over it, running along it as a gable end, or climbing away from it as the high side of a single pitch — weighted by wall length.
 - Every suggestion carries an **error**: the roof those tags describe is built with the app's own `roofSurface()` and measured against the cells, as the mean distance over the closest-fitting 90%. The panel shows it beside `roof:shape` together with the same measurement for the element's current tags, and applies the whole combination in one press.
-- That error may choose `roof:height` and nothing else, and only where the modelled roof already lands within 0.5 m of the points. It never chooses `height`, and never chooses the shape.
+- That error may choose `height` and `roof:height` together, searched in the half-metres a tag is written in — but only where the roof **at the measured heights** already lands within 0.5 m of the points. The condition is judged before anything moves, never on the refined fit: a roof the model cannot describe would otherwise wander until it happened to land inside the limit and be trusted for having done so. The error never chooses the shape.
 
 ## Why
 
 - ADR 0004's rule was that the cloud suggests nothing, because a summary of it (LOD1) is what fails for parts. That reasoning argued against _importing_ a summary, not against measuring — and the same clipping that makes points work for parts is what makes a per-part measurement possible. Advice keeps ADR 0003's shape: per element, per tag, accepted by a mapper.
 - Ground is the whole error on a slope, and it fails in both directions. The cloud's level for its entire 200 m box put a waterfront house 4 m above its own ground; a 15 m skirt then read a shed on the Kastellet cliff 3 m too tall by measuring from the shoreline six metres away. Two metres is close enough that only ground touching the building is in it, which is also what OSM means by measuring from the lowest ground point.
 - A percentile cannot reject a chimney on a small roof: at seventy peak cells the 99th percentile _is_ the maximum. The smithy at Kastellet read 12.5 m at its chimney against a 6.4 m ridge, and the inflated height then put the eaves floor above the whole roof, so `roof:height` disappeared as well. Rejecting on the gap to the locally fitted surface is independent of sample size.
-- Measured over 260 tagged buildings in Hammarby Sjöstad, where roof tags are well maintained, the laser reads `height` to 1.12 m and `roof:height` to 0.89 m of mean absolute error, against LOD1's 1.58 m and 1.55 m on the same buildings. In the dense old town LOD1 is still better on height (2.53 m against 3.26 m), where narrow streets leave few ground returns.
-- What the error is allowed to choose was measured rather than assumed, over the 256 of those buildings that cleared the sixty-cell floor this was measured under. Only the error's authority varies between the rows:
+- Measured over 260 tagged buildings in Hammarby Sjöstad, where roof tags are well maintained, the laser reads `height` to 1.12 m and `roof:height` to 0.93 m of mean absolute error, against LOD1's 1.58 m and 1.55 m on the same buildings. In the dense old town LOD1 is still better on height (2.53 m against 3.26 m), where narrow streets leave few ground returns.
+- **Minimizing the error is right exactly where the model fits, and wrong everywhere else.** Segmenting the calibration area by how closely the roof at the measured heights sits to the points, and comparing both readings against the tagged heights:
 
-  | the error may choose                    | `height` | `roof:height` |
-  | --------------------------------------- | -------- | ------------- |
-  | nothing                                 | 1.09 m   | 0.94 m        |
-  | the rise, where the fit is within 0.5 m | 1.09 m   | **0.84 m**    |
-  | the rise, always                        | 1.09 m   | 1.14 m        |
-  | the rise and the height, within 0.5 m   | 1.14 m   | 0.80 m        |
-  | the rise and the height, always         | 1.75 m   | 1.14 m        |
+  | model fit at the measured heights | n   | measured ridge | least error           |
+  | --------------------------------- | --- | -------------- | --------------------- |
+  | within 0.5 m                      | 45  | 0.66 m         | **0.63 m**            |
+  | 0.5 to 1 m                        | 36  | **0.57 m**     | 0.93 m                |
+  | beyond 1 m                        | 128 | **0.94 m**     | 2.17 m, and 1.5 m low |
 
-- `height` names the ridge, and a percentile of cell maxima reads a ridge directly. Letting the error move it drags it half a metre down on average: the mean miss is dominated by the broad surfaces near the eaves, and lowering the apex buys their agreement at the ridge's expense. On a building the model does not describe — Skanstull's bridge piers read as hipped, missing by 0.9 m and 3.5 m — the minimum of the error surface is a minimum of noise, which the 0.5 m gate keeps out.
+  Where the model describes the roof, the closest-fitting combination is the truer one, and the gate is what confines the search to that regime. Where it cannot, the surface still has a minimum and it sits well below the ridge: a model with no way to represent a mansard, a row of dormers or a bridge pier compensates by sinking the whole roof into the points it can reach. Sjökarteverket is the clean example — 1872, dormers along one slope, no gable fits it closer than 0.83 m, and the minimum puts it at 18.5 m where the raw maxima say 20.2 m and the city's own model says 19 m.
+
+- Ungated, the damage is what the third row implies: `height` mean error goes from 1.12 m to 1.75 m and the whole distribution slides half a metre down. The bias is a dose-response — letting the search move the height by up to 0.5 m, 1 m and 2 m walks the median error to -0.20 m, -0.30 m and -0.50 m in turn.
 - The shape is not chosen by the error either, and this was measured three times: an aspect histogram over the whole roof (64/112), idealized surfaces fitted to the cell heights, and the app's real roof geometry placed at each shape's own robust best fit with the model blurred to match the measurement (43/112 to 55/112). At ~2 points/m² a gable, a hip and a barrel vault leave height residuals within centimetres of each other, well inside the noise from roof equipment and the 2.5 m fit window, so the argmin is decided by noise. Slope _direction_ survives that noise where elevation does not, which is why the walls are read instead — 70/112, against 66/112 for tagging everything `gabled`.
 
 ## Trade-offs

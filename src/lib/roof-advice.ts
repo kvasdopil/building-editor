@@ -660,20 +660,29 @@ interface Placement {
   ridge: number;
   miss: number;
   rise: number;
+  height: number;
 }
 
 /**
- * The `roof:height`, in the half-metres a tag is written in, whose roof sits
- * closest to the laser.
+ * The `height` and `roof:height`, in the half-metres a tag is written in, whose
+ * roof sits closest to the laser.
  *
- * The ridge is left where the points put it. `height` names the top of the
- * roof, and a percentile of the cell maxima reads that directly; letting the
- * error move it instead drags it half a metre down on average, because the
- * mean miss is dominated by the broad surfaces near the eaves and lowering the
- * apex buys their agreement at the ridge's expense. Measured over 256 tagged
- * buildings, searching the height too takes `height` from 1.09 m to 1.75 m of
- * mean error while searching only the rise leaves it untouched and improves
- * `roof:height` from 0.94 m to 0.84 m.
+ * Only called where the roof at the measured heights already fits, and that
+ * condition is what makes minimizing safe rather than the search itself.
+ * Segmenting the calibration area by fit shows the two regimes plainly, as
+ * mean error against the tagged heights:
+ *
+ * | model fit | measured ridge | least error |
+ * | --------- | -------------- | ----------- |
+ * | <= 0.5 m  | 0.66 m         | 0.63 m      |
+ * | 0.5-1 m   | 0.57 m         | 0.93 m      |
+ * | > 1 m     | 0.94 m         | 2.17 m, and 1.5 m low |
+ *
+ * Where the model describes the roof, the closest-fitting combination is the
+ * truer one. Where it cannot — a bridge pier read as a hip, a mansard, a roof
+ * behind dormers — the surface still has a minimum, and it sits well below the
+ * ridge, because a model that cannot represent what is up there compensates by
+ * sinking the whole roof into the points it can reach.
  *
  * The window re-centres while its minimum sits on an edge, because the seed
  * can start well outside it, and stops once the minimum is interior or the
@@ -685,24 +694,29 @@ function bestRise(
   seed: { eaves: number; ridge: number },
   ground: number,
 ): Placement | undefined {
-  const height = seed.ridge - ground;
+  const seedHeight = seed.ridge - ground;
   const seedRise = seed.ridge - seed.eaves;
-  const at = (rise: number): Placement | undefined => {
+  const at = (height: number, rise: number): Placement | undefined => {
     if (rise < MIN_ROOF_RISE_M || rise > 0.6 * height) return undefined;
-    const eaves = seed.ridge - rise;
-    const miss = surfaceMiss(raised(modelled, seed, { eaves, ridge: seed.ridge }), cells);
-    return miss === undefined ? undefined : { eaves, ridge: seed.ridge, miss, rise };
+    const ridge = ground + height;
+    const eaves = ridge - rise;
+    const miss = surfaceMiss(raised(modelled, seed, { eaves, ridge }), cells);
+    return miss === undefined ? undefined : { eaves, ridge, miss, rise, height };
   };
 
-  let best = at(seedRise);
+  let best = at(seedHeight, seedRise);
   if (!best) return undefined;
   for (let round = 0; round < SEARCH_ROUNDS; round++) {
     const centre: Placement = best;
-    for (const step of SEARCH_STEPS_M) {
-      const rise = centre.rise + step;
-      if (Math.abs(rise - seedRise) > SEARCH_REACH_M) continue;
-      const candidate = at(rise);
-      if (candidate && candidate.miss < best.miss) best = candidate;
+    for (const dHeight of SEARCH_STEPS_M) {
+      for (const step of SEARCH_STEPS_M) {
+        const height = centre.height + dHeight;
+        const rise = centre.rise + step;
+        if (Math.abs(height - seedHeight) > SEARCH_REACH_M) continue;
+        if (Math.abs(rise - seedRise) > SEARCH_REACH_M) continue;
+        const candidate = at(height, rise);
+        if (candidate && candidate.miss < best.miss) best = candidate;
+      }
     }
     if (best === centre) break;
   }
@@ -798,22 +812,24 @@ export function roofAdviceFor(
     shape === null || shape === "flat"
       ? undefined
       : sampledRoof(cells, grid, polygons, shape, seedEaves, seedTop);
+  // Refining is only worth it where the model is a roof this building actually
+  // has. That is judged on the fit at the measured heights, before anything
+  // moves: judging it on the refined fit lets a roof the model cannot describe
+  // wander until it happens to land within the limit and be trusted for it.
+  // Where nothing fits — a bridge pier read as a hip, a roof under canopy —
+  // the ridge read straight off the points is the better answer.
+  const seedMiss = modelled ? surfaceMiss(modelled, cells) : undefined;
   const searched =
-    modelled && offerRise
+    modelled && offerRise && seedMiss !== undefined && seedMiss <= TRUSTED_FIT_M
       ? bestRise(modelled, cells, { eaves: seedEaves, ridge: seedTop }, grid.ground)
       : undefined;
-  // The search is only worth following where the model is a roof this building
-  // actually has. Where nothing fits — a bridge pier read as a hip, a roof
-  // under canopy — its optimum is a minimum of noise, and the ridge read
-  // straight off the points is the better answer.
-  const trusted = searched && searched.miss <= TRUSTED_FIT_M ? searched : undefined;
-  const advisedTop = trusted?.ridge ?? seedTop;
-  const advisedEaves = trusted?.eaves ?? seedEaves;
+  const advisedTop = searched?.ridge ?? seedTop;
+  const advisedEaves = searched?.eaves ?? seedEaves;
   const miss =
     shape === "flat"
       ? flatMiss
-      : trusted
-        ? trusted.miss
+      : searched
+        ? searched.miss
         : modelled &&
           surfaceMiss(
             raised(
