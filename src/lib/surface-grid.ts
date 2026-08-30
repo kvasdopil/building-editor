@@ -20,7 +20,7 @@ import { classOf, isSingleReturn } from "./lidar-format";
 export const GRID_CELL_M = 0.5;
 
 /** Plane-fit window edge, cells; 5 half-metre cells reads ~2.5 m patches. */
-export const WINDOW_CELLS = 5;
+const WINDOW_CELLS = 5;
 
 /** A window must hold this many points before its plane is believed. */
 const MIN_FIT_POINTS = 6;
@@ -114,6 +114,25 @@ export interface SurfaceGrid {
   frame: GridFrame;
   /** The outline's rings in the grid frame, for the separation-line search. */
   rings: [number, number][][];
+  /**
+   * The surface returns the cell fits were built from, kept in the grid frame.
+   *
+   * The cells are a summary — a plane over a 2.5 m window — and a summary is
+   * the wrong thing to measure a candidate roof against: matching a model to
+   * it means blurring the model the same way first, and the two roundings do
+   * not cancel evenly at a ridge. `roof-advice` scores roofs against these
+   * points instead, which is both simpler and closer to the survey.
+   */
+  points: GridPoints;
+}
+
+/** Surface returns inside the outline, in the grid frame. */
+interface GridPoints {
+  count: number;
+  us: Float32Array;
+  vs: Float32Array;
+  /** Absolute height, metres RH2000. */
+  zs: Float32Array;
 }
 
 /** Everything needed to turn a grid-frame (u, v) back into lon/lat. */
@@ -288,6 +307,10 @@ export function buildSurfaceGrid(cloud: LidarCloud, polygons: Footprint[]): Surf
   // Ground returns near the outline, kept with their distance from it so the
   // search can widen when the near ring holds too few.
   const groundLevels: { distance: number; z: number }[] = [];
+  // The same returns that feed the moments, kept for the roof fitting.
+  const pointUs: number[] = [];
+  const pointVs: number[] = [];
+  const pointZs: number[] = [];
   for (let i = 0; i < cloud.count; i++) {
     if (!isSurfaceReturn(cloud.classes[i])) continue;
     const e = toEast(cloud.lon[i]);
@@ -305,6 +328,9 @@ export function buildSurfaceGrid(cloud: LidarCloud, polygons: Footprint[]): Surf
     }
     if (u < uMin || u >= uMin + columns * cell || v < vMin || v >= vMin + rows * cell) continue;
     if (!insideRings(rings, u, v) || distanceToRings(rings, u, v) < EDGE_MARGIN_M) continue;
+    pointUs.push(u);
+    pointVs.push(v);
+    pointZs.push(cloud.z[i]);
     const z = cloud.z[i] - cloud.groundZ;
     const at = (((v - vMin) / cell) | 0) * columns + (((u - uMin) / cell) | 0);
     if (!(heightMax[at] >= cloud.z[i])) heightMax[at] = cloud.z[i];
@@ -391,6 +417,12 @@ export function buildSurfaceGrid(cloud: LidarCloud, polygons: Footprint[]): Surf
     ],
     frame,
     rings,
+    points: {
+      count: pointUs.length,
+      us: Float32Array.from(pointUs),
+      vs: Float32Array.from(pointVs),
+      zs: Float32Array.from(pointZs),
+    },
   };
 }
 

@@ -9,7 +9,7 @@ import {
   hippedRoofGeometryReady,
   roofSurface,
 } from "./roofs";
-import { type GridFrame, type SurfaceGrid, WINDOW_CELLS, lonLatToGrid } from "./surface-grid";
+import { type GridFrame, type SurfaceGrid, lonLatToGrid } from "./surface-grid";
 
 /**
  * Laser-measured advice for the dimension tags of one element — the selected
@@ -65,8 +65,18 @@ const SLOPED_CELL_RAD = (8 * Math.PI) / 180;
  */
 const MAX_PEAK_ABOVE_FIT_M = 1.5;
 
-/** Suggest `roof:height` only when the roof actually rises this much. */
-const MIN_ROOF_RISE_M = 0.75;
+/** The smallest rise a roof is searched at, and the smallest one suggested. */
+const MIN_ROOF_RISE_M = 0.5;
+
+/** The largest, as a share of the building's height and as a flat ceiling. */
+const MAX_ROOF_RISE_SHARE = 0.6;
+const MAX_ROOF_RISE_M = 8;
+
+/** The step the rise is searched in — the half-metres a tag is written in. */
+const RISE_STEP_M = 0.5;
+
+/** Bucket edge for the point index a modelled surface is dropped on, metres. */
+const BUCKET_M = 2;
 
 /**
  * Where the roof starts, as a share of the building's height above ground.
@@ -79,24 +89,7 @@ const ROOF_FLOOR_SHARE = 0.5;
 /** The roof has to be this much of the element before its eaves are believed. */
 const MIN_ROOF_CELL_SHARE = 0.25;
 
-/** The written half-metre steps the search moves the roof height by. */
-const SEARCH_STEPS_M = [-1, -0.5, 0, 0.5, 1];
-
-/** Re-centrings allowed while the best combination is still on an edge. */
-const SEARCH_ROUNDS = 6;
-
-/**
- * How far the search may end up from the reading that seeded it. Beyond a few
- * metres it has stopped refining a measurement and started inventing one, and
- * whatever it has found is a property of the roof model rather than of the
- * building.
- */
-const SEARCH_REACH_M = 3;
-
-/** A modelled roof this close to the points is describing the actual roof. */
-const TRUSTED_FIT_M = 0.5;
-
-/** A fitted candidate must reach this share of the element's cells to count. */
+/** A fitted candidate must reach this share of the element's points to count. */
 const MIN_MODEL_COVERAGE = 0.6;
 
 /** Share of the closest-fitting cells the reported miss is measured over. */
@@ -229,11 +222,36 @@ function distanceToEdge(edge: Edge, u: number, v: number): number {
   return Math.hypot(u - edge.u0 - t * du, v - edge.v0 - t * dv);
 }
 
-function elementCells(grid: SurfaceGrid, polygons: Footprint[]): ElementCells {
-  const rings = polygons
+/** One element's rings in the grid frame, the outline everything is cut to. */
+function gridRings(frame: GridFrame, polygons: Footprint[]): [number, number][][] {
+  return polygons
     .flatMap((polygon) => [polygon.outer, ...polygon.holes])
-    .map((ring) => ring.map(([lon, lat]) => lonLatToGrid(grid.frame, lon, lat)));
+    .map((ring) => ring.map(([lon, lat]) => lonLatToGrid(frame, lon, lat)));
+}
 
+/** The grid's surface returns that stand inside this element. */
+interface ElementPoints {
+  count: number;
+  us: Float32Array;
+  vs: Float32Array;
+  /** Absolute height, metres RH2000. */
+  zs: Float32Array;
+}
+
+function elementPoints(grid: SurfaceGrid, rings: [number, number][][]): ElementPoints {
+  const kept: number[] = [];
+  for (let i = 0; i < grid.points.count; i++) {
+    if (insideRings(rings, grid.points.us[i], grid.points.vs[i])) kept.push(i);
+  }
+  return {
+    count: kept.length,
+    us: Float32Array.from(kept, (i) => grid.points.us[i]),
+    vs: Float32Array.from(kept, (i) => grid.points.vs[i]),
+    zs: Float32Array.from(kept, (i) => grid.points.zs[i]),
+  };
+}
+
+function elementCells(grid: SurfaceGrid, rings: [number, number][][]): ElementCells {
   const cells: ElementCells = {
     heights: [],
     peaks: [],
@@ -428,29 +446,46 @@ function planFootprints(frame: GridFrame, polygons: Footprint[]): RoofFootprint[
 }
 
 /**
- * The modelled roof height over every cell the laser filled, NaN where the
- * surface does not reach, blurred the way the measurement already is.
+ * The modelled roof height over every point the survey left inside the
+ * element, NaN where the surface does not reach it.
  *
- * The surface arrives as triangles of `[x, height, y]`, and each is rasterised
- * over the cells beneath it: the roof is sampled where the laser looked rather
- * than the other way round, so nothing has to be interpolated between points.
- * A cell's measured height then comes from a plane fitted across a 2.5 m
- * window, which rounds off a ridge however sharp it really is — passing the
- * model through the same window is what puts both sides in the same state.
+ * The surface arrives as triangles of `[x, height, y]`, and each is dropped on
+ * the points beneath it. Measuring against the returns themselves is what
+ * removes the correction this used to need: a cell height is a plane fitted
+ * across a 2.5 m window, so a model had to be passed through the same window
+ * before the two were comparable, and the pair of roundings did not cancel
+ * evenly — a ridge lost more of itself than the broad surfaces around it did,
+ * which biased every rise the fit was asked to choose. Points have no window
+ * to match.
  */
 function sampleSurface(
   surface: RoofSurface,
-  cells: ElementCells,
-  columns: number,
-  rows: number,
-  cell: number,
+  points: ElementPoints,
   frame: GridFrame,
 ): Float64Array {
-  const lookup = new Int32Array(columns * rows).fill(-1);
-  for (let i = 0; i < cells.columns.length; i++) {
-    lookup[cells.rows[i] * columns + cells.columns[i]] = i;
+  const modelled = new Float64Array(points.count).fill(Number.NaN);
+  if (points.count === 0) return modelled;
+
+  // Points bucketed coarsely, so each triangle only visits what could lie
+  // under it rather than the whole element.
+  let uMin = Infinity;
+  let vMin = Infinity;
+  let uMax = -Infinity;
+  let vMax = -Infinity;
+  for (let i = 0; i < points.count; i++) {
+    if (points.us[i] < uMin) uMin = points.us[i];
+    if (points.us[i] > uMax) uMax = points.us[i];
+    if (points.vs[i] < vMin) vMin = points.vs[i];
+    if (points.vs[i] > vMax) vMax = points.vs[i];
   }
-  const modelled = new Float64Array(cells.heights.length).fill(Number.NaN);
+  const columns = Math.max(1, Math.ceil((uMax - uMin + 1) / BUCKET_M));
+  const rows = Math.max(1, Math.ceil((vMax - vMin + 1) / BUCKET_M));
+  const buckets: number[][] = Array.from({ length: columns * rows }, () => []);
+  const columnOf = (u: number) => Math.min(columns - 1, Math.max(0, ((u - uMin) / BUCKET_M) | 0));
+  const rowOf = (v: number) => Math.min(rows - 1, Math.max(0, ((v - vMin) / BUCKET_M) | 0));
+  for (let i = 0; i < points.count; i++) {
+    buckets[rowOf(points.vs[i]) * columns + columnOf(points.us[i])].push(i);
+  }
 
   const { positions, indices } = surface;
   const triangles = indices ? indices.length / 3 : positions.length / 9;
@@ -472,63 +507,34 @@ function sampleSurface(
 
     const us = corners.map((corner) => corner[0]);
     const vs = corners.map((corner) => corner[1]);
-    const minColumn = Math.max(0, Math.floor((Math.min(...us) - frame.uMin) / cell));
-    const maxColumn = Math.min(columns - 1, Math.ceil((Math.max(...us) - frame.uMin) / cell));
-    const minRow = Math.max(0, Math.floor((Math.min(...vs) - frame.vMin) / cell));
-    const maxRow = Math.min(rows - 1, Math.ceil((Math.max(...vs) - frame.vMin) / cell));
+    const minColumn = columnOf(Math.min(...us));
+    const maxColumn = columnOf(Math.max(...us));
+    const minRow = rowOf(Math.min(...vs));
+    const maxRow = rowOf(Math.max(...vs));
     for (let row = minRow; row <= maxRow; row++) {
       for (let column = minColumn; column <= maxColumn; column++) {
-        const index = lookup[row * columns + column];
-        if (index < 0) continue;
-        const u = frame.uMin + (column + 0.5) * cell;
-        const v = frame.vMin + (row + 0.5) * cell;
-        const w0 =
-          ((corners[1][0] - u) * (corners[2][1] - v) - (corners[2][0] - u) * (corners[1][1] - v)) /
-          area;
-        const w1 =
-          ((corners[2][0] - u) * (corners[0][1] - v) - (corners[0][0] - u) * (corners[2][1] - v)) /
-          area;
-        const w2 = 1 - w0 - w1;
-        if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
-        const height = w0 * corners[0][2] + w1 * corners[1][2] + w2 * corners[2][2];
-        // A roof folds back over itself at a valley or a dome's far side, so
-        // the surface the laser saw is the highest one above the cell.
-        if (!(modelled[index] >= height)) modelled[index] = height;
-      }
-    }
-  }
-  return blurLikeMeasured(modelled, cells, columns, rows);
-}
-
-function blurLikeMeasured(
-  modelled: Float64Array,
-  cells: ElementCells,
-  columns: number,
-  rows: number,
-): Float64Array {
-  const grid = new Float64Array(columns * rows).fill(Number.NaN);
-  for (let i = 0; i < modelled.length; i++) {
-    grid[cells.rows[i] * columns + cells.columns[i]] = modelled[i];
-  }
-  const half = (WINDOW_CELLS / 2) | 0;
-  const blurred = new Float64Array(modelled.length).fill(Number.NaN);
-  for (let i = 0; i < modelled.length; i++) {
-    let total = 0;
-    let counted = 0;
-    for (let row = cells.rows[i] - half; row <= cells.rows[i] + half; row++) {
-      if (row < 0 || row >= rows) continue;
-      for (let column = cells.columns[i] - half; column <= cells.columns[i] + half; column++) {
-        if (column < 0 || column >= columns) continue;
-        const value = grid[row * columns + column];
-        if (!Number.isNaN(value)) {
-          total += value;
-          counted += 1;
+        for (const index of buckets[row * columns + column]) {
+          const u = points.us[index];
+          const v = points.vs[index];
+          const w0 =
+            ((corners[1][0] - u) * (corners[2][1] - v) -
+              (corners[2][0] - u) * (corners[1][1] - v)) /
+            area;
+          const w1 =
+            ((corners[2][0] - u) * (corners[0][1] - v) -
+              (corners[0][0] - u) * (corners[2][1] - v)) /
+            area;
+          const w2 = 1 - w0 - w1;
+          if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+          const height = w0 * corners[0][2] + w1 * corners[1][2] + w2 * corners[2][2];
+          // A roof folds back over itself at a valley or a dome's far side, so
+          // the surface the laser saw is the highest one above the point.
+          if (!(modelled[index] >= height)) modelled[index] = height;
         }
       }
     }
-    if (counted > 0) blurred[i] = total / counted;
   }
-  return blurred;
+  return modelled;
 }
 
 /**
@@ -561,18 +567,22 @@ function downslopeBearing(cells: ElementCells): number {
 /**
  * How far the roof this advice describes actually sits from the laser, in
  * metres: build the surface the 3D view would extrude from the suggested
- * shape, eaves and ridge, and measure it against the cells.
+ * shape, eaves and ridge, and measure it against the points.
  *
- * This is reported, never used to choose. Choosing by it was measured twice
- * and is worse both times — see `classifyShape` for why the shapes cannot be
- * told apart this way, and note that fitting the heights to the model rather
- * than reading them off the points costs a factor of two in `height` as well.
- * What the number is good for is telling a mapper when to look twice: a roof
- * within 0.2 m of the points is the one that is there, and one adrift by a
- * metre has something on it that no roof shape describes.
+ * It chooses one thing and reports on the rest. `roof:height` is settled by
+ * minimizing it, because the eaves have no direct reading to beat. `height`
+ * and `roof:shape` are not: reading the ridge off the raw maxima beats fitting
+ * it, and brute-forcing every shape, orientation, height and rise against
+ * these same points scores 42 of 108 tagged roofs against the walls' 67, since
+ * a gambrel or a barrel vault has the freedom to bend onto anything at two
+ * points per square metre. What the number is good for otherwise is telling a
+ * mapper when to look twice: a roof within 0.2 m of the points is the one that
+ * is there, and one adrift by a metre has something on it that no roof shape
+ * describes.
  */
 function sampledRoof(
   cells: ElementCells,
+  points: ElementPoints,
   grid: SurfaceGrid,
   polygons: Footprint[],
   shape: string,
@@ -602,8 +612,8 @@ function sampledRoof(
     };
     const surface = roofSurface(plan, footprints, footprints, 0);
     if (!surface) continue;
-    const modelled = sampleSurface(surface, cells, grid.columns, grid.rows, grid.cell, grid.frame);
-    const miss = surfaceMiss(modelled, cells);
+    const modelled = sampleSurface(surface, points, grid.frame);
+    const miss = surfaceMiss(modelled, points);
     if (miss !== undefined && miss < bestMiss) {
       bestMiss = miss;
       best = modelled;
@@ -613,13 +623,13 @@ function sampledRoof(
 }
 
 /** Mean miss of a sampled surface, or undefined where it covered too little. */
-function surfaceMiss(modelled: Float64Array, cells: ElementCells): number | undefined {
+function surfaceMiss(modelled: Float64Array, points: ElementPoints): number | undefined {
   const residuals: number[] = [];
   for (let i = 0; i < modelled.length; i++) {
     if (Number.isNaN(modelled[i])) continue;
-    residuals.push(Math.abs(modelled[i] - cells.heights[i]));
+    residuals.push(Math.abs(modelled[i] - points.zs[i]));
   }
-  if (residuals.length < cells.heights.length * MIN_MODEL_COVERAGE) return undefined;
+  if (residuals.length < points.count * MIN_MODEL_COVERAGE) return undefined;
   return trimmedError(residuals);
 }
 
@@ -643,17 +653,6 @@ function raised(
   return moved;
 }
 
-/**
- * The eaves and ridge, in the half-metres a tag is written in, whose roof sits
- * closest to the laser.
- *
- * The percentiles that seed this read the ridge off the points directly, which
- * is the right way to find it and the wrong way to place a whole roof: a ridge
- * is a thin line of cells and the rest of the surface has a say too. Searching
- * half a metre either way costs one rebuild — the same shape at another height
- * is an affine transform of the one already rasterised — and the result is the
- * combination a mapper would otherwise find by nudging the number themselves.
- */
 /** One candidate placement of the roof, in both written and raw forms. */
 interface Placement {
   eaves: number;
@@ -664,61 +663,43 @@ interface Placement {
 }
 
 /**
- * The `height` and `roof:height`, in the half-metres a tag is written in, whose
- * roof sits closest to the laser.
+ * The `roof:height`, in the half-metres a tag is written in, whose roof sits
+ * closest to the points — every rise the building could have, not a nudge
+ * around the measured one.
  *
- * Only called where the roof at the measured heights already fits, and that
- * condition is what makes minimizing safe rather than the search itself.
- * Segmenting the calibration area by fit shows the two regimes plainly, as
- * mean error against the tagged heights:
+ * The ridge stays where the percentile put it. `height` names the highest
+ * point of the building and a high percentile of raw cell maxima reads that
+ * directly, while a mean residual moves it down: the broad surfaces near the
+ * eaves are most of the roof and they outvote the ridge line. Letting the fit
+ * choose the height as well costs `height` half a metre of median bias and
+ * takes its mean error from 1.10 m to 1.67 m over the calibration area.
  *
- * | model fit | measured ridge | least error |
- * | --------- | -------------- | ----------- |
- * | <= 0.5 m  | 0.66 m         | 0.63 m      |
- * | 0.5-1 m   | 0.57 m         | 0.93 m      |
- * | > 1 m     | 0.94 m         | 2.17 m, and 1.5 m low |
+ * The rise is the opposite case. Nothing reads the eaves directly — the low
+ * percentile of roof cells is a guess at where the roof starts, and dormers,
+ * parapets and a lower wing all move it — so the surface that fits is the
+ * better answer, and searching the whole range rather than a window around
+ * that guess takes `roof:height` from 0.89 m to 0.73 m.
  *
- * Where the model describes the roof, the closest-fitting combination is the
- * truer one. Where it cannot — a bridge pier read as a hip, a mansard, a roof
- * behind dormers — the surface still has a minimum, and it sits well below the
- * ridge, because a model that cannot represent what is up there compensates by
- * sinking the whole roof into the points it can reach.
- *
- * The window re-centres while its minimum sits on an edge, because the seed
- * can start well outside it, and stops once the minimum is interior or the
- * walk has gone as far as it is allowed from the measurement it started at.
+ * This used to be gated on the roof already fitting within half a metre,
+ * because an unrestricted search made the rise worse. That was an artefact of
+ * scoring against the fitted cells: the model had to be blurred to match them,
+ * and the blur cost a ridge more than it cost the eaves, so the fit paid for
+ * rises it should not have. Against the points there is nothing to gate.
  */
 function bestRise(
   modelled: Float64Array,
-  cells: ElementCells,
+  points: ElementPoints,
   seed: { eaves: number; ridge: number },
   ground: number,
 ): Placement | undefined {
-  const seedHeight = seed.ridge - ground;
-  const seedRise = seed.ridge - seed.eaves;
-  const at = (height: number, rise: number): Placement | undefined => {
-    if (rise < MIN_ROOF_RISE_M || rise > 0.6 * height) return undefined;
-    const ridge = ground + height;
-    const eaves = ridge - rise;
-    const miss = surfaceMiss(raised(modelled, seed, { eaves, ridge }), cells);
-    return miss === undefined ? undefined : { eaves, ridge, miss, rise, height };
-  };
-
-  let best = at(seedHeight, seedRise);
-  if (!best) return undefined;
-  for (let round = 0; round < SEARCH_ROUNDS; round++) {
-    const centre: Placement = best;
-    for (const dHeight of SEARCH_STEPS_M) {
-      for (const step of SEARCH_STEPS_M) {
-        const height = centre.height + dHeight;
-        const rise = centre.rise + step;
-        if (Math.abs(height - seedHeight) > SEARCH_REACH_M) continue;
-        if (Math.abs(rise - seedRise) > SEARCH_REACH_M) continue;
-        const candidate = at(height, rise);
-        if (candidate && candidate.miss < best.miss) best = candidate;
-      }
-    }
-    if (best === centre) break;
+  const height = seed.ridge - ground;
+  const limit = Math.min(MAX_ROOF_RISE_SHARE * height, MAX_ROOF_RISE_M);
+  let best: Placement | undefined;
+  for (let rise = MIN_ROOF_RISE_M; rise <= limit + 1e-6; rise += RISE_STEP_M) {
+    const eaves = seed.ridge - rise;
+    const miss = surfaceMiss(raised(modelled, seed, { eaves, ridge: seed.ridge }), points);
+    if (miss === undefined) continue;
+    if (!best || miss < best.miss) best = { eaves, ridge: seed.ridge, miss, rise, height };
   }
   return best;
 }
@@ -758,7 +739,9 @@ export function roofAdviceFor(
   polygons: Footprint[],
   tags: Record<string, string>,
 ): RoofReading | null {
-  const cells = elementCells(grid, polygons);
+  const rings = gridRings(grid.frame, polygons);
+  const cells = elementCells(grid, rings);
+  const points = elementPoints(grid, rings);
   if (cells.heights.length < MIN_CELLS) return null;
   const confident = cells.coverage >= 0.5;
 
@@ -796,49 +779,40 @@ export function roofAdviceFor(
   const squarish = Math.max(...spans) < 1.6 * Math.min(...spans);
 
   const shape = classifyShape(cells, squarish);
-  const rise = ridge - eaves;
   const shaped = shape !== null && shape !== "flat";
-  const offerRise = shaped && rise >= MIN_ROOF_RISE_M && rise <= 0.6 * (ridge - grid.ground);
-  // Measured from the rounded values this advice would actually write, not
-  // from the reading behind them: the number has to be the one the mapper gets
-  // after pressing apply, or it will not match what the tags then report. The
-  // percentiles only seed it — a half metre either way is then searched for
-  // the roof that actually sits closest to the points.
-  const seedTop = grid.ground + Number(formatHeight(ridge - grid.ground));
-  const seedEaves = offerRise ? seedTop - Number(formatHeight(rise)) : seedTop;
-  const flatLevel = [...cells.heights].sort((a, b) => a - b)[cells.heights.length >> 1];
-  const flatMiss = trimmedError(cells.heights.map((height) => Math.abs(height - flatLevel)));
-  const modelled =
-    shape === null || shape === "flat"
-      ? undefined
-      : sampledRoof(cells, grid, polygons, shape, seedEaves, seedTop);
-  // Refining is only worth it where the model is a roof this building actually
-  // has. That is judged on the fit at the measured heights, before anything
-  // moves: judging it on the refined fit lets a roof the model cannot describe
-  // wander until it happens to land within the limit and be trusted for it.
-  // Where nothing fits — a bridge pier read as a hip, a roof under canopy —
-  // the ridge read straight off the points is the better answer.
-  const seedMiss = modelled ? surfaceMiss(modelled, cells) : undefined;
-  const searched =
-    modelled && offerRise && seedMiss !== undefined && seedMiss <= TRUSTED_FIT_M
-      ? bestRise(modelled, cells, { eaves: seedEaves, ridge: seedTop }, grid.ground)
-      : undefined;
-  const advisedTop = searched?.ridge ?? seedTop;
-  const advisedEaves = searched?.eaves ?? seedEaves;
+  // The ridge is written from the measurement, rounded to the half metre a tag
+  // is written in: the reported miss has to be the one the mapper gets after
+  // pressing apply, or it will not match what the tags then report.
+  const advisedTop = grid.ground + Number(formatHeight(ridge - grid.ground));
+  // The eaves only seed a reference placement to rasterise once. Moving a roof
+  // between eaves and apex is affine, so every rise the search tries is a
+  // rescaling of this one surface.
+  const seedRise = Math.max(
+    MIN_ROOF_RISE_M,
+    Math.min(Number(formatHeight(ridge - eaves)), MAX_ROOF_RISE_M),
+  );
+  const seedEaves = advisedTop - seedRise;
+  // Only ever needed for a flat roof, and sorting every return of a large
+  // building is not worth doing for the rest.
+  const flatMiss = () => {
+    const sorted = [...points.zs].sort((a, b) => a - b);
+    const level = sorted[sorted.length >> 1];
+    return trimmedError(sorted.map((height) => Math.abs(height - level)));
+  };
+  const modelled = shaped
+    ? sampledRoof(cells, points, grid, polygons, shape, seedEaves, advisedTop)
+    : undefined;
+  const searched = modelled
+    ? bestRise(modelled, points, { eaves: seedEaves, ridge: advisedTop }, grid.ground)
+    : undefined;
+  const offerRise = shaped && searched !== undefined;
+  const advisedEaves = searched?.eaves ?? advisedTop;
   const miss =
     shape === "flat"
-      ? flatMiss
+      ? flatMiss()
       : searched
         ? searched.miss
-        : modelled &&
-          surfaceMiss(
-            raised(
-              modelled,
-              { eaves: seedEaves, ridge: seedTop },
-              { eaves: advisedEaves, ridge: advisedTop },
-            ),
-            cells,
-          );
+        : modelled && surfaceMiss(modelled, points);
   const note =
     `laser, ${cells.heights.length} cells of this element` +
     (miss === undefined
@@ -855,6 +829,7 @@ export function roofAdviceFor(
       : tags["roof:shape"] && taggedHeight !== undefined
         ? sampledRoof(
             cells,
+            points,
             grid,
             polygons,
             tags["roof:shape"],
@@ -864,8 +839,8 @@ export function roofAdviceFor(
         : undefined;
   const currentMiss =
     tags["roof:shape"] === "flat" && taggedHeight !== undefined
-      ? flatMiss
-      : tagged && surfaceMiss(tagged, cells);
+      ? flatMiss()
+      : tagged && surfaceMiss(tagged, points);
 
   const advice: Suggestion[] = [];
   const height = compare(

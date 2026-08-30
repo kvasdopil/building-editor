@@ -93,7 +93,7 @@ it came from.
 | tag           | from                                                                     |
 | ------------- | ------------------------------------------------------------------------ |
 | `height`      | the 99th percentile of raw cell maxima, above this building's own ground |
-| `roof:height` | that ridge minus the eaves, read from the roof's own low cells           |
+| `roof:height` | the rise whose roof sits closest to the points, searched over its range |
 | `roof:shape`  | what the roof does where it meets each wall of the outline               |
 
 Ground is a low percentile of the ground-class returns within 2 m of the outline — the ground the
@@ -101,7 +101,7 @@ walls actually stand in, following OSM's convention of measuring from the buildi
 point. Neither the cloud's level for its whole 200 m box nor a wider skirt will do: the first put a
 waterfront house 4 m above its own ground, and the second read a shed on the Kastellet cliff 3 m too
 tall by measuring from the shoreline six metres away. Against 260 tagged buildings in Hammarby
-Sjöstad the laser reads `height` to 1.12 m mean absolute error and `roof:height` to 0.93 m, both
+Sjöstad the laser reads `height` to 1.12 m mean absolute error and `roof:height` to 0.69 m, both
 closer than LOD1 manages on the same buildings (1.58 m and 1.55 m). In the dense old town, where
 narrow streets leave few ground returns, LOD1 is still the better source (2.53 m against 3.26 m).
 
@@ -118,13 +118,15 @@ fifth of a shed. Under a couple of decimetres, or a few per cent, is the roof th
 or a fifth of the building, means something the shape does not describe — a lift housing, a terrace,
 a wing at another height, tree canopy over a small roof.
 
-Where the modelled roof lands **within 0.5 m** of the points, the half-metre steps either side of the
-reading are searched and the closest-fitting combination is what gets offered; the percentiles only
-seed it. Beyond that the search is ignored, because a model that misses by three metres is not
-describing the building and the minimum of its error surface is a minimum of noise. Following it
-regardless was measured: `roof:height` improves to 0.78 m but `height` degrades to 1.14 m with a
-half-metre downward bias, since the bulk of the roof outvotes the ridge line that `height` actually
-names. Choosing the _shape_ by the error was measured twice more and lost both times.
+The fit chooses one of the three tags. `roof:height` is settled by it — every half-metre rise the
+building could have is tried and the closest-fitting one is offered, because nothing reads the eaves
+directly and the low percentile of roof cells is only a guess at where the roof starts. `height` is
+not: it names the highest point of the building, a high percentile of raw maxima reads that
+directly, and a mean residual pulls it down because the broad surfaces near the eaves outvote the
+ridge line. Letting the fit place the height as well costs half a metre of downward bias and takes
+its mean error from 1.12 m to 1.67 m. Nor the shape: brute-forcing every shape, orientation, height
+and rise against these points scores 42 of 112 tagged roofs, against the walls' 70, because a
+gambrel or a barrel vault has enough freedom to bend onto anything at two points per square metre.
 
 `roof:shape` is a judgement rather than a measurement — it agrees with 70 of 112 tagged roofs — so it
 is always offered muted and never claims the confidence the heights do. It is decided per wall: whether the roof falls over that wall, runs along
