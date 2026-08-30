@@ -726,6 +726,8 @@ export interface RoofReading {
   cells: number;
   /** The whole recommendation, whether or not OSM already agrees with it. */
   recommended: { height: string; roofHeight?: string; shape: string };
+  /** The building's height above its own ground, metres — the scale a miss is worth reading against. */
+  scale: number;
   /** Mean distance from the points to the recommended roof, metres. */
   miss?: number;
   /**
@@ -864,6 +866,7 @@ export function roofAdviceFor(
       advice,
       cells: cells.heights.length,
       recommended: { height: formatHeight(advisedTop - grid.ground), shape: "" },
+      scale: advisedTop - grid.ground,
       miss,
       currentMiss,
     };
@@ -895,6 +898,7 @@ export function roofAdviceFor(
       roofHeight: offerRise ? formatHeight(advisedTop - advisedEaves) : undefined,
       shape,
     },
+    scale: advisedTop - grid.ground,
     miss,
     currentMiss,
   };

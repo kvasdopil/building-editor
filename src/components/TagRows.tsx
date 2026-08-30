@@ -50,8 +50,22 @@ export interface TagRow {
   suggestion?: Suggestion;
 }
 
-function missTone(miss: number): string {
-  return miss <= 0.4 ? "text-slate-500" : "text-amber-600";
+/**
+ * A miss read against the building it was measured on. Half a metre is a fifth
+ * of a shed and a fortieth of an apartment block, so the same distance is a
+ * close fit on one and a wrong roof on the other; the share of the building's
+ * height is what makes the two comparable.
+ */
+function missShare(miss: number, scale: number): number {
+  return scale > 0 ? miss / scale : 1;
+}
+
+function missTone(miss: number, scale: number): string {
+  return miss <= 0.4 || missShare(miss, scale) <= 0.04 ? "text-slate-500" : "text-amber-600";
+}
+
+function missLabel(miss: number, scale: number): string {
+  return `${miss.toFixed(2)} m, ${Math.round(missShare(miss, scale) * 100)}% of its height`;
 }
 
 /**
@@ -66,7 +80,7 @@ function missTone(miss: number): string {
  * can see whether it beats what is tagged, and by how much.
  */
 function RoofFit({ laser, onApply }: { laser: RoofReading; onApply?: () => void }) {
-  const { miss, currentMiss, recommended } = laser;
+  const { miss, currentMiss, recommended, scale } = laser;
   if (miss === undefined) return null;
   // With nothing tagged there is no roof to be closer than, and a measured one
   // is plainly worth having.
@@ -80,8 +94,8 @@ function RoofFit({ laser, onApply }: { laser: RoofReading; onApply?: () => void 
     <span className="inline-flex shrink-0 items-center gap-1.5">
       {currentMiss !== undefined && (
         <span
-          title={`What this element's own tags describe sits ${currentMiss.toFixed(2)} m from the laser points, on average`}
-          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(currentMiss)}`}
+          title={`What this element's own tags describe sits ${missLabel(currentMiss, scale)} from the laser points, on average`}
+          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(currentMiss, scale)}`}
         >
           now {currentMiss.toFixed(2)} m
         </span>
@@ -90,7 +104,7 @@ function RoofFit({ laser, onApply }: { laser: RoofReading; onApply?: () => void 
         <button
           type="button"
           onClick={onApply}
-          title={`Apply the roof the laser measured — ${summary} — which sits ${miss.toFixed(2)} m from the points${
+          title={`Apply the roof the laser measured — ${summary} — which sits ${missLabel(miss, scale)} from the points${
             currentMiss === undefined
               ? ""
               : better
@@ -108,8 +122,8 @@ function RoofFit({ laser, onApply }: { laser: RoofReading; onApply?: () => void 
         </button>
       ) : (
         <span
-          title={`The roof this element's tags describe sits ${miss.toFixed(2)} m from the laser points, on average`}
-          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(miss)}`}
+          title={`The roof this element's tags describe sits ${missLabel(miss, scale)} from the laser points, on average`}
+          className={`inline-flex items-center gap-0.5 text-[11px] tabular-nums ${missTone(miss, scale)}`}
         >
           <FiCrosshair className="h-3 w-3" aria-hidden />
           {miss.toFixed(2)} m

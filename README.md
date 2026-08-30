@@ -112,8 +112,11 @@ asserted — a mapper can see whether it beats what is tagged, and by how much. 
 recommendation applies all three tags at once, since they describe one roof and a height without the
 roof height it was measured with builds a different one.
 
-Two decimetres is the roof that is there; a metre means something the shape does not describe — a
-lift housing, a terrace, a wing at another height, tree canopy over a small roof.
+Each is given as a distance and as a share of the building's own height, because the same distance
+means different things on different buildings: half a metre is a fortieth of an apartment block and a
+fifth of a shed. Under a couple of decimetres, or a few per cent, is the roof that is there; a metre,
+or a fifth of the building, means something the shape does not describe — a lift housing, a terrace,
+a wing at another height, tree canopy over a small roof.
 
 Where the modelled roof lands **within 0.5 m** of the points, the half-metre steps either side of the
 reading are searched and the closest-fitting combination is what gets offered; the percentiles only

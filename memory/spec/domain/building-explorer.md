@@ -311,6 +311,9 @@ draws it muted with "confirm against the roof".
 
 Each element's advice carries the **fit error**: the roof those tags describe, built as the 3D view
 would extrude it and measured against the cells as the mean distance over the closest-fitting 90%.
+Cells are all the same size, so that mean is already per unit area and comparable between a shed and
+a block; it is shown both as a distance and as a share of the building's height, since the same
+distance is a close fit on one and a wrong roof on the other.
 The `roof:shape` row shows it beside the same measurement for the element's current tags, so the two
 are comparable, and pressing the recommendation applies the whole combination at once — a height
 without the roof height it was measured with builds a different roof. The advised figure is measured
