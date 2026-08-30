@@ -6,7 +6,7 @@ import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson"
 import type { BuildingProperties, LngLat } from "./buildings";
 import { closeRing, closestPointOnSegment, openRing, segmentsIntersect } from "./geometry";
 import { normalizeOsmTags } from "./osm/parse";
-import { metersBetween } from "./osm/precision";
+import { coordinateKey, METERS_PER_DEG_LAT, metersBetween } from "./osm/precision";
 import { drawnId } from "./osm/ref";
 
 export type EditableGeometry = Polygon | MultiPolygon;
@@ -181,6 +181,103 @@ export function moveSharedGeometryVertex(
   return geometry.type === "Polygon"
     ? { type: "Polygon", coordinates: movedPolygons[0] }
     : { type: "MultiPolygon", coordinates: movedPolygons };
+}
+
+/** Move a whole set of shared coordinates at once, keyed by their OSM position. */
+export function moveSharedGeometryVertices(
+  geometry: EditableGeometry,
+  moves: Map<string, LngLat>,
+): EditableGeometry {
+  return rebuildGeometry(
+    geometry,
+    polygonsOf(geometry).map((rings) =>
+      rings.map((ring) =>
+        ring.map((point) => {
+          const moved = moves.get(coordinateKey(point));
+          return moved ? ([...moved] as LngLat) : ([...point] as LngLat);
+        }),
+      ),
+    ),
+  );
+}
+
+/** The turn a ring makes at one node, in degrees; 0 carries straight on. */
+function turnAtNode(nodes: LngLat[], nodeIndex: number): number {
+  const count = nodes.length;
+  const before = nodes[(nodeIndex - 1 + count) % count];
+  const at = nodes[nodeIndex];
+  const after = nodes[(nodeIndex + 1) % count];
+  // Local metres, so the answer does not depend on how the map happens to be
+  // projected or which way it is rotated.
+  const cosLat = Math.cos((at[1] * Math.PI) / 180);
+  const bearing = (from: LngLat, to: LngLat) =>
+    Math.atan2(
+      (to[1] - from[1]) * METERS_PER_DEG_LAT,
+      (to[0] - from[0]) * METERS_PER_DEG_LAT * cosLat,
+    );
+  let turn = bearing(at, after) - bearing(before, at);
+  while (turn > Math.PI) turn -= 2 * Math.PI;
+  while (turn < -Math.PI) turn += 2 * Math.PI;
+  return Math.abs((turn * 180) / Math.PI);
+}
+
+/**
+ * The unit normal of one ring segment, in east/north metres, pointing to its
+ * left. Which side it points at does not matter to a caller that slides along
+ * it in both directions; that it is measured in metres does, or the direction
+ * would depend on the projection the caller happens to draw in.
+ */
+export function segmentNormal(nodes: LngLat[], segmentIndex: number): [number, number] | null {
+  const count = nodes.length;
+  if (count < 2) return null;
+  const start = nodes[segmentIndex % count];
+  const end = nodes[(segmentIndex + 1) % count];
+  const cosLat = Math.cos((start[1] * Math.PI) / 180);
+  const east = (end[0] - start[0]) * METERS_PER_DEG_LAT * cosLat;
+  const north = (end[1] - start[1]) * METERS_PER_DEG_LAT;
+  const length = Math.hypot(east, north);
+  return length === 0 ? null : [-north / length, east / length];
+}
+
+/**
+ * The run of ring nodes that reads as one wall: the given segment, extended
+ * both ways for as long as the ring carries straight on at the node between.
+ *
+ * A wall in OSM is rarely one segment. Party walls, bay windows and surveyed
+ * facades leave nodes along an otherwise straight run, and a mapper moving
+ * "the wall" means all of them — stopping at the first corner that is actually
+ * a corner. `maxTurnDegrees` is what counts as carrying straight on; the
+ * slight kinks a hand-traced facade collects are below it and a real corner is
+ * far above.
+ *
+ * Returns node indices in order along the run: segment `i` joins nodes `i` and
+ * `i + 1`, so a run of n segments has n + 1 nodes. A ring that never turns
+ * sharply anywhere — a drawn apse, a roundhouse — returns every node once,
+ * which moves the whole ring rather than looping forever.
+ */
+export function edgeRunNodes(
+  nodes: LngLat[],
+  segmentIndex: number,
+  maxTurnDegrees: number,
+): number[] {
+  const count = nodes.length;
+  if (count < 2) return [];
+  let first = segmentIndex % count;
+  let last = first;
+  let segments = 1;
+  while (segments < count && turnAtNode(nodes, (last + 1) % count) <= maxTurnDegrees) {
+    last = (last + 1) % count;
+    segments += 1;
+  }
+  while (segments < count && turnAtNode(nodes, first) <= maxTurnDegrees) {
+    first = (first - 1 + count) % count;
+    segments += 1;
+  }
+  const run: number[] = [];
+  // One more node than segments, unless the run has closed the ring.
+  const length = segments === count ? count : segments + 1;
+  for (let step = 0; step < length; step++) run.push((first + step) % count);
+  return run;
 }
 
 /**

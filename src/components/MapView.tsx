@@ -60,12 +60,15 @@ import {
   type GeometryEditMap,
   geometryVertices,
   insertGeometryVertex,
+  edgeRunNodes,
   mergeSharedGeometryVertices,
   moveSharedGeometryVertex,
+  moveSharedGeometryVertices,
   nearestRightAnglePoint,
   type NodeMove,
   recordNodeMove,
   removeGeometryRingNode,
+  segmentNormal,
   subtractMaskFromGeometry,
   weldNewVertices,
   weldVerticesIntoGeometries,
@@ -75,7 +78,7 @@ import { drawnId, drawnRef, parseOsmRef } from "@/lib/osm/ref";
 import { relationMemberWays } from "@/lib/osm/member-way";
 import { NODE_REUSE_METERS } from "@/lib/osm/nodes";
 import type { IssueFix } from "@/lib/osm/issues";
-import { coordinateKey, roundToOsmGrid } from "@/lib/osm/precision";
+import { coordinateKey, METERS_PER_DEG_LAT, roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
 import { PART_ROOF_KEYS } from "@/lib/part-tags";
 import {
@@ -698,6 +701,22 @@ interface NodeDrag {
   gluedEntities: Set<string>;
 }
 
+/** A whole stretch of wall being dragged, with every footprint that shares it. */
+interface EdgeDrag {
+  /** The run's nodes as they stood when the drag began, in ring order. */
+  originalCoordinates: LngLat[];
+  /** Where they sit now; absent until the pointer has moved. */
+  coordinates: LngLat[] | null;
+  /** The line the wall slides on: its own unit normal, east/north metres. */
+  normal: [number, number];
+  /** Where the drag began, on the ground rather than on the screen. */
+  origin: LngLat;
+  /** How far it has slid along that normal, metres; signed. */
+  offset: number;
+  originalGeometries: GeometryByEntity;
+  geometries: GeometryByEntity;
+}
+
 interface RightAngleConstraint {
   previous: LngLat;
   next: LngLat;
@@ -787,6 +806,57 @@ function nearestSelectionSegment(
   if (!nearest) return null;
   const { distance: _distance, ...segment } = nearest;
   return segment;
+}
+
+/**
+ * How far a ring may turn at a node and still be the same wall. A hand-traced
+ * facade collects slight kinks well under this; a real corner is far over it.
+ */
+const EDGE_RUN_MAX_TURN_DEG = 15;
+
+/**
+ * Screen reach of a wall's grab spot inside Add node mode, which keeps the
+ * rest of the edge for inserting a node.
+ */
+const EDGE_HANDLE_PIXELS = 7;
+
+function withinEdgeHandle(
+  map: MaplibreMap,
+  midpoint: LngLat,
+  click: { x: number; y: number },
+): boolean {
+  const point = map.project(midpoint);
+  return Math.hypot(click.x - point.x, click.y - point.y) <= EDGE_HANDLE_PIXELS;
+}
+
+/** The stretch of wall a midpoint handle belongs to, and the line it moves on. */
+interface EdgeRun {
+  /** The nodes that move with it, in ring order. */
+  coordinates: LngLat[];
+  /** Unit normal of the grabbed segment, in east/north metres. */
+  normal: [number, number];
+  /** The grabbed segment's midpoint, which is where Add node mode grabs it. */
+  midpoint: LngLat;
+}
+
+function edgeRunFor(selection: BuildingSelection, segment: SelectionSegment): EdgeRun | null {
+  const footprint = selection.selected.polygons[segment.polygonIndex];
+  const ring = footprint && [footprint.outer, ...footprint.holes][segment.ringIndex];
+  if (!ring) return null;
+  const nodes = openRing(ring);
+  const run = edgeRunNodes(nodes, segment.segmentIndex, EDGE_RUN_MAX_TURN_DEG);
+  // The wall's own normal comes from the segment whose handle was grabbed: a
+  // run with a slight kink in it has no single direction, and the piece the
+  // mapper aimed at is the one they mean.
+  const normal = segmentNormal(nodes, segment.segmentIndex);
+  if (run.length < 2 || !normal) return null;
+  const start = nodes[segment.segmentIndex];
+  const end = nodes[(segment.segmentIndex + 1) % nodes.length];
+  return {
+    coordinates: run.map((index) => nodes[index]),
+    normal,
+    midpoint: [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2],
+  };
 }
 
 interface BoundarySnap {
@@ -1115,6 +1185,7 @@ function editorStyle(): StyleSpecification {
       selection: { type: "geojson", data: EMPTY },
       "selection-nodes": { type: "geojson", data: EMPTY },
       "selection-node-hover": { type: "geojson", data: EMPTY },
+      "edge-hover": { type: "geojson", data: EMPTY },
       "right-angle-gizmo": { type: "geojson", data: EMPTY },
       "roof-direction": { type: "geojson", data: EMPTY },
       "validation-location": { type: "geojson", data: EMPTY },
@@ -1145,6 +1216,13 @@ function editorStyle(): StyleSpecification {
         type: "line",
         source: "selection",
         paint: { "line-color": "#101828", "line-width": 2 },
+      },
+      {
+        id: "edge-hover",
+        type: "line",
+        source: "edge-hover",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#7c3aed", "line-width": 5, "line-opacity": 0.85 },
       },
       {
         id: "selection-nodes",
@@ -1335,6 +1413,8 @@ export function MapView() {
   const addNodeTargetRef = useRef<string | null>(null);
   const photoAdjustActiveRef = useRef(photoAdjustActive);
   const suppressSelectionClickRef = useRef(false);
+  /** A node or wall drag is in flight, so Escape belongs to it rather than to a mode. */
+  const dragActiveRef = useRef(false);
   const holeDraftRef = useRef<HoleDraft>(EMPTY_HOLE_DRAFT);
   const sliceDraftRef = useRef<SliceDraft>(EMPTY_SLICE_DRAFT);
   const addPartDraftRef = useRef<AddPartDraft>(EMPTY_ADD_PART_DRAFT);
@@ -3147,7 +3227,9 @@ export function MapView() {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      // A drag in flight owns Escape: the first press abandons it, and only a
+      // second one leaves the mode.
+      if (event.key !== "Escape" || dragActiveRef.current) return;
       event.preventDefault();
       cancelAddNode();
     };
@@ -3163,20 +3245,47 @@ export function MapView() {
     const canvas = map.getCanvas();
     const referenceNodes = lod1Visible ? lod1Nodes(lod1Match) : [];
     let drag: NodeDrag | null = null;
+    let edgeDrag: EdgeDrag | null = null;
 
-    const setNodeHover = (handle: SelectionNodeHandle | null) => {
+    /** Put the map back on the last committed geometry, discarding a preview. */
+    const restorePreview = () => {
+      const liveSource = map.getSource<GeoJSONSource>("live");
+      const outlineSource = map.getSource<GeoJSONSource>("selection");
+      const nodeSource = map.getSource<GeoJSONSource>("selection-nodes");
+      void liveSource?.setData(displayedFeaturesRef.current);
+      void outlineSource?.setData(selection.outline);
+      void nodeSource?.setData(selectionNodeFeatures(selection));
+    };
+
+    const setEdgeHover = (run: LngLat[] | null) => {
       if (mapRef.current !== map) return;
-      const source = map.getSource<GeoJSONSource>("selection-node-hover");
+      const source = map.getSource<GeoJSONSource>("edge-hover");
       void source?.setData(
-        handle
+        run
           ? {
               type: "FeatureCollection",
               features: [
                 {
                   type: "Feature",
                   properties: {},
-                  geometry: { type: "Point", coordinates: handle.coordinates },
+                  geometry: { type: "LineString", coordinates: run },
                 },
+              ],
+            }
+          : EMPTY,
+      );
+    };
+
+    /** The handle under the pointer — a corner or a wall midpoint alike. */
+    const setNodeHover = (coordinates: LngLat | null) => {
+      if (mapRef.current !== map) return;
+      const source = map.getSource<GeoJSONSource>("selection-node-hover");
+      void source?.setData(
+        coordinates
+          ? {
+              type: "FeatureCollection",
+              features: [
+                { type: "Feature", properties: {}, geometry: { type: "Point", coordinates } },
               ],
             }
           : EMPTY,
@@ -3213,9 +3322,9 @@ export function MapView() {
     const commitGeometries = (
       geometries: GeometryByEntity,
       notice: string,
-      /** The drag behind this commit, so the upload moves the node rather than
-       * creating one beside it and orphaning the original. */
-      move?: NodeMove,
+      /** The drag behind this commit, so the upload moves those nodes rather
+       * than creating new ones beside them and orphaning the originals. */
+      moves?: NodeMove[],
       gluedEntities = new Set<string>(),
       defaultKind: "reshape" | "add-node" = "reshape",
     ) => {
@@ -3231,8 +3340,11 @@ export function MapView() {
           nextGeometryEdits[entity] = {
             geometry,
             kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : defaultKind),
-            movedNodes: move
-              ? recordNodeMove(previous?.movedNodes, move.from, move.to)
+            movedNodes: moves?.length
+              ? moves.reduce(
+                  (recorded, move) => recordNodeMove(recorded, move.from, move.to),
+                  previous?.movedNodes,
+                )
               : previous?.movedNodes,
           };
         }
@@ -3302,18 +3414,118 @@ export function MapView() {
       drag = { ...activeDrag, geometries, coordinates, snap, gluedEntities };
       preview(geometries);
       setRightAngleGizmo(perpendicularSnap);
-      setNodeHover({
-        polygonIndex: activeDrag.polygonIndex,
-        ringIndex: activeDrag.ringIndex,
-        vertexIndex: activeDrag.vertexIndex,
-        coordinates,
-      });
+      setNodeHover(coordinates);
+    };
+
+    const onEdgeDragMove = (event: MapMouseEvent) => {
+      if (!edgeDrag) return;
+      const active = edgeDrag;
+      // A wall slides on its own normal and nowhere else: dragging along it
+      // would only shuffle nodes down a line they already sit on, and the
+      // sideways component is the whole intent. The pointer's travel is
+      // measured on the ground rather than on the screen, so a rotated or
+      // tilted map does not change how far the wall goes.
+      const cosLat = Math.cos((active.origin[1] * Math.PI) / 180);
+      const [normalEast, normalNorth] = active.normal;
+      const east = (event.lngLat.lng - active.origin[0]) * METERS_PER_DEG_LAT * cosLat;
+      const north = (event.lngLat.lat - active.origin[1]) * METERS_PER_DEG_LAT;
+      const offset = east * normalEast + north * normalNorth;
+      const offsetLng = (offset * normalEast) / (METERS_PER_DEG_LAT * cosLat);
+      const offsetLat = (offset * normalNorth) / METERS_PER_DEG_LAT;
+      const coordinates = active.originalCoordinates.map(
+        (node): LngLat => roundToOsmGrid([node[0] + offsetLng, node[1] + offsetLat]),
+      );
+      const moves = new Map(
+        active.originalCoordinates.map((node, index) => [coordinateKey(node), coordinates[index]]),
+      );
+      const geometries = Object.fromEntries(
+        Object.entries(active.originalGeometries).map(([entity, geometry]) => [
+          entity,
+          moveSharedGeometryVertices(geometry, moves),
+        ]),
+      );
+      edgeDrag = { ...active, coordinates, geometries, offset };
+      setEdgeHover(coordinates);
+      preview(geometries);
+    };
+
+    const finishEdgeDrag = () => {
+      if (!edgeDrag) return;
+      const finished = edgeDrag;
+      edgeDrag = null;
+      dragActiveRef.current = false;
+      map.off("mousemove", onEdgeDragMove);
+      map.dragPan.enable();
+      setEdgeHover(null);
+      canvas.style.cursor = "";
+      const moved = finished.coordinates;
+      if (!moved) return;
+
+      suppressSelectionClickRef.current = true;
+      setTimeout(() => {
+        suppressSelectionClickRef.current = false;
+      }, 0);
+
+      const moves = finished.originalCoordinates
+        .map((from, index) => ({ from, to: moved[index] }))
+        .filter((move) => coordinateKey(move.from) !== coordinateKey(move.to));
+      if (moves.length === 0) {
+        preview(finished.originalGeometries);
+        return;
+      }
+      const affected = Object.keys(finished.geometries).length;
+      const distance = `${Math.abs(finished.offset).toFixed(2)} m`;
+      const nodes = `${moves.length} node${moves.length === 1 ? "" : "s"}`;
+      commitGeometries(
+        finished.geometries,
+        affected === 1
+          ? `Edge moved ${distance}, ${nodes}`
+          : `Edge moved ${distance} across ${affected} footprints, ${nodes}`,
+        moves,
+      );
+    };
+
+    const startEdgeDrag = (event: MapMouseEvent): boolean => {
+      const segment = nearestSelectionSegment(map, selection, event.point);
+      const run = segment && edgeRunFor(selection, segment);
+      if (!run) return false;
+      if (addNodeActiveRef.current && !withinEdgeHandle(map, run.midpoint, event.point)) {
+        return false;
+      }
+      const originalGeometries: GeometryByEntity = {};
+      for (const node of run.coordinates) {
+        Object.assign(
+          originalGeometries,
+          geometriesSharingVertex(displayedFeaturesRef.current, node),
+        );
+      }
+      if (!originalGeometries[selection.selected.id]) {
+        originalGeometries[selection.selected.id] = currentGeometry();
+      }
+      edgeDrag = {
+        originalCoordinates: run.coordinates,
+        coordinates: null,
+        normal: run.normal,
+        origin: [event.lngLat.lng, event.lngLat.lat],
+        offset: 0,
+        originalGeometries,
+        geometries: originalGeometries,
+      };
+      dragActiveRef.current = true;
+      setNodeHover(null);
+      setEdgeHover(run.coordinates);
+      map.dragPan.disable();
+      canvas.style.cursor = "grabbing";
+      map.on("mousemove", onEdgeDragMove);
+      window.addEventListener("mouseup", finishEdgeDrag, { once: true });
+      return true;
     };
 
     const finishDrag = () => {
       if (!drag) return;
       const finished = drag;
       drag = null;
+      dragActiveRef.current = false;
       map.off("mousemove", onDragMove);
       map.dragPan.enable();
       setRightAngleGizmo(null);
@@ -3337,10 +3549,51 @@ export function MapView() {
       commitGeometries(
         finished.geometries,
         affected === 1 ? `Node ${action}` : `Node ${action} across ${affected} footprints`,
-        finished.created ? undefined : { from: finished.originalCoordinates, to: coordinates },
+        finished.created ? undefined : [{ from: finished.originalCoordinates, to: coordinates }],
         finished.gluedEntities,
         finished.created ? "add-node" : "reshape",
       );
+    };
+
+    /**
+     * Escape abandons a drag in flight. Nothing is committed, so the preview
+     * is thrown away and the map goes back to the geometry it had — including
+     * a node that only exists because this gesture inserted it.
+     */
+    const cancelDrag = () => {
+      if (!drag && !edgeDrag) return;
+      drag = null;
+      edgeDrag = null;
+      dragActiveRef.current = false;
+      map.off("mousemove", onDragMove);
+      map.off("mousemove", onEdgeDragMove);
+      window.removeEventListener("mouseup", finishDrag);
+      window.removeEventListener("mouseup", finishEdgeDrag);
+      map.dragPan.enable();
+      setNodeHover(null);
+      setEdgeHover(null);
+      setRightAngleGizmo(null);
+      canvas.style.cursor = "";
+      restorePreview();
+      setNotice("Drag cancelled");
+      // The button is still down. Keep the click its release generates from
+      // selecting whatever the pointer wandered over.
+      window.addEventListener(
+        "mouseup",
+        () => {
+          suppressSelectionClickRef.current = true;
+          setTimeout(() => {
+            suppressSelectionClickRef.current = false;
+          }, 0);
+        },
+        { once: true },
+      );
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || (!drag && !edgeDrag)) return;
+      event.preventDefault();
+      cancelDrag();
     };
 
     const onMouseDown = (event: MapMouseEvent) => {
@@ -3353,6 +3606,12 @@ export function MapView() {
       )
         return;
       const handle = nearestSelectionNode(map, selection, event.point);
+      // A midpoint handle moves the whole wall it belongs to. Corner handles
+      // still win, so a single node stays draggable where the two are close.
+      if (!handle && startEdgeDrag(event)) {
+        event.preventDefault();
+        return;
+      }
       let nextDrag: NodeDrag | null = null;
       let dragHandle = handle;
       if (handle) {
@@ -3426,8 +3685,9 @@ export function MapView() {
 
       event.preventDefault();
       drag = nextDrag;
+      dragActiveRef.current = true;
       setRightAngleGizmo(null);
-      setNodeHover(dragHandle);
+      setNodeHover(dragHandle.coordinates);
       map.dragPan.disable();
       canvas.style.cursor = "grabbing";
       map.on("mousemove", onDragMove);
@@ -3481,6 +3741,7 @@ export function MapView() {
     const onHover = (event: MapMouseEvent) => {
       if (
         drag ||
+        edgeDrag ||
         cutHoleActiveRef.current ||
         sliceActiveRef.current ||
         addPartActiveRef.current ||
@@ -3488,49 +3749,58 @@ export function MapView() {
       )
         return;
       const handle = nearestSelectionNode(map, selection, event.point);
-      const segment =
-        !handle && addNodeActiveRef.current
-          ? nearestSelectionSegment(map, selection, event.point)
-          : null;
+      const segment = handle ? null : nearestSelectionSegment(map, selection, event.point);
+      const run = segment && edgeRunFor(selection, segment);
+      // Add node mode keeps the rest of the edge for inserting, so there the
+      // wall is grabbed near its midpoint alone. With no tool active the whole
+      // hovered edge grabs it, since nothing else wants that press.
+      const grabbable =
+        run && (!addNodeActiveRef.current || withinEdgeHandle(map, run.midpoint, event.point));
       const selectableFootprint =
         addNodeActiveRef.current &&
         map.queryRenderedFeatures(event.point, {
           layers: ["live-building-fill", "live-part-fill"],
         }).length > 0;
-      setNodeHover(handle);
+      setNodeHover(handle?.coordinates ?? null);
+      // The highlight is the whole affordance: it shows up exactly where a
+      // press would take the wall, and nowhere else.
+      setEdgeHover(grabbable ? run.coordinates : null);
       if (handle) canvas.style.cursor = "pointer";
-      else if (segment) canvas.style.cursor = "crosshair";
+      else if (grabbable) canvas.style.cursor = "move";
+      else if (segment && addNodeActiveRef.current) canvas.style.cursor = "crosshair";
       else if (selectableFootprint) canvas.style.cursor = "pointer";
       else canvas.style.cursor = "";
     };
 
     const clearNodeHover = () => {
-      if (drag) return;
+      if (drag || edgeDrag) return;
       setNodeHover(null);
+      setEdgeHover(null);
       canvas.style.cursor = "";
     };
 
     map.on("mousedown", onMouseDown);
     map.on("dblclick", onDoubleClick);
     map.on("mousemove", onHover);
+    window.addEventListener("keydown", onKeyDown);
     canvas.addEventListener("mouseleave", clearNodeHover);
     return () => {
       map.off("mousedown", onMouseDown);
       map.off("dblclick", onDoubleClick);
       map.off("mousemove", onHover);
       map.off("mousemove", onDragMove);
+      map.off("mousemove", onEdgeDragMove);
+      window.removeEventListener("keydown", onKeyDown);
       canvas.removeEventListener("mouseleave", clearNodeHover);
       window.removeEventListener("mouseup", finishDrag);
+      window.removeEventListener("mouseup", finishEdgeDrag);
       setNodeHover(null);
+      setEdgeHover(null);
       setRightAngleGizmo(null);
-      if (drag) {
+      if (drag || edgeDrag) {
+        dragActiveRef.current = false;
         map.dragPan.enable();
-        const liveSource = map.getSource<GeoJSONSource>("live");
-        const outlineSource = map.getSource<GeoJSONSource>("selection");
-        const nodeSource = map.getSource<GeoJSONSource>("selection-nodes");
-        void liveSource?.setData(displayedFeaturesRef.current);
-        void outlineSource?.setData(selection.outline);
-        void nodeSource?.setData(selectionNodeFeatures(selection));
+        restorePreview();
       }
       canvas.style.cursor = "";
     };
@@ -3988,7 +4258,7 @@ export function MapView() {
 
       {addNodeActive && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full bg-violet-700 px-4 py-1.5 text-sm font-medium text-white shadow-lg">
-          Drag a node, or press and drag an edge to add one · Esc exits
+          Drag a node or a wall handle, or press and drag an edge to add a node · Esc exits
         </div>
       )}
 

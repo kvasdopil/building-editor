@@ -303,27 +303,30 @@ as its neighbours.
 `height` is the 99th percentile of raw per-cell maxima above this building's own ground: the 10th
 percentile of ground-class returns within 2 m of the outline, widened outwards only when that ring
 holds too few. A raw return more than 1.5 m above the surface fitted around it is discarded first —
-a chimney, an antenna, an overhanging branch. `roof:height` is that ridge minus eaves read from the
-roof's own cells, where the roof starts at half the building's height so a courtyard or a lower wing
-cannot pull the join down. `roof:shape` is read from what the roof does where it meets each stretch
+a chimney, an antenna, an overhanging branch. `roof:height` is the rise whose roof sits closest to
+the points, tried at every half metre from 0.5 m up to the smaller of six tenths of the building and
+8 m; the eaves percentile read from the roof's own cells, where the roof starts at half the
+building's height, only seeds the surface the search rescales. `roof:shape` is read from what the roof does where it meets each stretch
 of wall, weighted by wall length, and is always offered unconfident: it is a judgement, and the panel
 draws it muted with "confirm against the roof".
 
 Each element's advice carries the **fit error**: the roof those tags describe, built as the 3D view
-would extrude it and measured against the cells as the mean distance over the closest-fitting 90%.
-Cells are all the same size, so that mean is already per unit area and comparable between a shed and
-a block; it is shown both as a distance and as a share of the building's height, since the same
-distance is a close fit on one and a wrong roof on the other.
+would extrude it and measured against the **survey returns** as the mean distance over the
+closest-fitting 90%. Not against the fitted cells — a cell is a plane over a 2.5 m window, so a model
+had to be blurred through the same window before the two were comparable, and that pair of roundings
+took more off a ridge than off the broad surfaces around it, which biased every rise the fit chose.
+The mean is per point and so comparable between a shed and a block; it is shown both as a distance
+and as a share of the building's height, since the same distance is a close fit on one and a wrong
+roof on the other.
 The `roof:shape` row shows it beside the same measurement for the element's current tags, so the two
 are comparable, and pressing the recommendation applies the whole combination at once — a height
 without the roof height it was measured with builds a different roof. The advised figure is measured
 from the rounded values that get written, so it equals what the tags report once applied.
 
-The error may choose `height` and `roof:height` together, searched in the written half-metre steps,
-and only where the roof **at the measured heights** already lands within 0.5 m of the points — the
-condition is judged before anything moves, so a roof the model cannot describe cannot wander into
-the limit and be trusted for arriving there. Outside that, the measured ridge stands. The error never
-chooses the shape. ADR 0007 records the measurements behind both limits.
+The error chooses `roof:height` and nothing else, over the whole range of rises rather than a window
+around the reading, and with no condition on the roof already fitting. It never chooses `height`,
+which names the ridge a percentile of raw maxima reads directly, nor the shape. ADR 0007 records the
+measurements behind each of those.
 
 LOD1 keeps precedence for any tag it has a confident opinion on; the laser fills in the rest —
 `roof:shape` always, every `building:part`, and any building whose LOD1 block spans several
@@ -714,6 +717,52 @@ wins, the pointer leaves tolerance, the drag commits, or the drag is cancelled. 
 coordinate is rounded through the normal OSM grid and uses the same move-versus-insertion metadata as
 any other drag.
 
+### Moving a wall
+
+Hovering a selected segment highlights the **run of wall** it belongs to in violet and shows the move
+cursor; pressing and dragging moves that whole run. Corners move one node, a wall run moves all of
+it. This needs no mode of its own and works wherever a corner drag does — with no tool active and
+inside Add node mode alike.
+
+The highlight is the entire affordance: there is no handle drawn on top of it, and it appears
+exactly where a press would take the wall and nowhere else. So on a hundred-node outline nothing is
+drawn until an edge is hovered, and inside Add node mode — where only the middle of a segment grabs
+the wall — the highlight appears only while the pointer is over that middle.
+
+A run is that segment extended in both directions for as long as the ring turns by no more than **15°** at the
+node between. A wall is rarely one segment — party walls, bay windows and surveyed facades leave
+nodes along an otherwise straight stretch — and a mapper moving "the wall" means all of them,
+stopping at the first corner that is actually a corner. The turn is measured in local metres, so it
+does not depend on the map's zoom, rotation or pitch. A ring that never turns sharply anywhere, such
+as a drawn apse, yields every node once and translates as a whole rather than looping; the highlight
+always shows exactly what will move.
+
+The run slides **only along its own normal**, taken from the segment that was pressed — a run
+with a kink in it has no single direction, and the piece the mapper aimed at is the one they mean.
+The pointer's travel is measured on the ground from where the press landed and projected onto that
+normal, so the component along the wall is discarded: dragging parallel to a wall would only shuffle
+its nodes along a line they already sit on. Measuring on the ground rather than on screen keeps the
+distance honest under rotation and pitch. Every node of the run takes the same offset, rounded
+through the normal OSM grid, and every loaded footprint sharing any of them moves too, which keeps a
+party wall attached to its neighbour.
+
+There is no snapping — a wall drag is a deliberate translation, and letting a single node of it grab
+a boundary would shear the run. Each moved node is recorded as a move from its original OSM
+coordinate, so submission modifies those nodes rather than replacing them; a run released where it
+started commits nothing, and the notice names the distance it travelled.
+
+Corner handles are asked first and keep their nine-pixel reach, so the two never compete on a short
+wall. What grabs the wall then depends on the mode. With no tool active the whole hovered edge does,
+since nothing else wants that press — a press without a drag still selects normally. Inside Add node
+mode only the seven pixels around the segment's midpoint do, and the rest of the segment goes on
+inserting a node, as does a double-click anywhere on it.
+
+**Escape abandons a drag in flight**, corner or wall alike: nothing has been committed, so the
+preview is discarded and the map returns to the geometry it had, including a node that exists only
+because the gesture inserted it. In Add node mode the first Escape belongs to the drag and only a
+second one leaves the mode. The click generated when the button is finally released is suppressed,
+so an abandoned drag cannot change the selection either.
+
 Double-clicking an empty position on a selected outer or inner ring inserts a node at the nearest
 point on that segment and into every coincident loaded ring; double-clicking near an existing node
 does not add a duplicate. Node reshapes and hole cuts remain compatible with parts in 3D: once parts
@@ -724,7 +773,8 @@ from every underlying part.
 
 At live-OSM zoom, **Add node** is enabled when a building outline or `building:part` is selected and
 targets that selected element. Pressing the primary pointer within eight screen pixels of an empty
-outer or inner ring edge inserts a node at the nearest projected edge coordinate, welds the same
+outer or inner ring edge — outside the seven pixels around its midpoint, which move the wall instead
+— inserts a node at the nearest projected edge coordinate, welds the same
 coordinate into every coincident loaded building or part wall, and starts a drag in the same pointer
 gesture. The inserted node and every welded copy preview continuously; releasing without pointer
 movement still commits the insertion at its initial edge coordinate.
@@ -734,9 +784,10 @@ shared-node drag and creates nothing, so a click at an existing node can never s
 Clicking another visible building outline or part away from the selected target's nodes and edges
 selects it and retargets Add node without leaving the mode. Clicking the map background is inert and
 cannot accidentally clear the current selection. Existing and newly inserted nodes use the normal
-visible-boundary, right-angle and LOD1 snap behavior while dragging. Escape exits Add node mode; if a
-new-node drag is still in progress, the effect cleanup discards its uncommitted preview and restores
-map panning.
+visible-boundary, right-angle and LOD1 snap behavior while dragging. Escape belongs to a drag in
+flight first, abandoning it and discarding the node it had just inserted; with no drag running it
+exits the mode. Leaving the mode while a drag is somehow still live has the effect cleanup discard
+the uncommitted preview and restore map panning.
 
 A node inserted and moved within one gesture remains an insertion in the pending geometry metadata,
 not a move from its temporary edge coordinate. Existing-node drags continue to record their original

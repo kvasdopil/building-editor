@@ -30,7 +30,8 @@ export function formatCoordinate(value: number): string {
   return value.toFixed(OSM_COORDINATE_DECIMALS);
 }
 
-const METERS_PER_DEG_LAT = 111320;
+/** Metres per degree of latitude; longitude scales this by the cosine of the latitude. */
+export const METERS_PER_DEG_LAT = 111320;
 
 /** Approximate distance in meters, good enough over the few meters we compare. */
 export function metersBetween(a: LngLat, b: LngLat): number {
