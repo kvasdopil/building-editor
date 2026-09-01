@@ -282,6 +282,10 @@ not turn into a lecture about somebody else's work, still less block an upload:
 
 ### Errors
 
+Move metadata belongs only to footprints that contained the node before the drag. For compatibility
+with older wall-drag state, upload ignores a stale claim when the element neither owned the OSM node
+nor contains its claimed destination.
+
 | check                                                                               | rule                                                                                                                                                                           |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `changeset-empty`                                                                   | Nothing to upload, including the case where every pending change already matches OSM.                                                                                          |

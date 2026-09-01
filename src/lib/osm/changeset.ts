@@ -4,6 +4,7 @@ import type { EditMap } from "../edits";
 import {
   type CreatedPartMap,
   type EditableGeometry,
+  geometryHasVertex,
   type GeometryEditMap,
   positionOnSegment,
 } from "../geometry-edits";
@@ -299,6 +300,12 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       // Nothing upstream stands there, so the vertex was drawn in this session:
       // there is no node to move and it resolves as a new one like any other.
       if (!node) continue;
+      // Older wall-drag state copied every node in a wall run onto every
+      // footprint touched by any node in that run. Ignore only those stale
+      // copies: a real claim either comes from an element that owned the OSM
+      // node already, or from a footprint that now contains its destination
+      // after deliberately sharing the node during this editing session.
+      if (!node.ownerIds.includes(ref) && !geometryHasVertex(override.geometry, to)) continue;
       if (node.version <= 0) {
         issues.push(
           issue(

@@ -3337,11 +3337,25 @@ export function MapView() {
         if (drawn) nextCreatedParts[entity] = { ...drawn, geometry };
         else {
           const previous = nextGeometryEdits[entity];
+          const displayed = displayedFeaturesRef.current.features.find(
+            (feature) => feature.properties?.id === entity,
+          );
+          const before =
+            displayed?.geometry.type === "Polygon" || displayed?.geometry.type === "MultiPolygon"
+              ? displayed.geometry
+              : null;
+          // A wall run can touch several footprints at different nodes. Record
+          // only the run nodes this footprint actually owned before the drag;
+          // otherwise a later move of another run node leaves a false, stale
+          // destination on this unrelated footprint.
+          const entityMoves = moves?.filter((move) =>
+            before ? geometryHasVertex(before, move.from) : geometryHasVertex(geometry, move.to),
+          );
           nextGeometryEdits[entity] = {
             geometry,
             kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : defaultKind),
-            movedNodes: moves?.length
-              ? moves.reduce(
+            movedNodes: entityMoves?.length
+              ? entityMoves.reduce(
                   (recorded, move) => recordNodeMove(recorded, move.from, move.to),
                   previous?.movedNodes,
                 )
