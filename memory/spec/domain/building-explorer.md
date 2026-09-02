@@ -168,7 +168,14 @@ The two modes differ in what they change:
 
 - An **open polyline** partitions what it crosses, and must divide something — the outline, an
   existing part, or the area no part covers yet — otherwise it is rejected. A cut that ends on a part
-  edge leaves the outline itself whole.
+  edge leaves the outline itself whole. When the operation generates base/remainder parts, an
+  existing part group is subtracted from that base only if the group reaches an outer or inner
+  boundary of the building through touching or overlapping part footprints. A part or connected
+  group wholly isolated inside the solid footprint is treated as a tower group: it remains unchanged
+  and the generated base continues underneath it, rather than acquiring one or more cutout rings.
+  The starting geometry is always the complete building footprint with its existing holes, so this
+  overlap rule never fills or removes a courtyard or other hole already present in the
+  `building=*` outline.
 - A **closed loop** creates a center tower part from the enclosed loop without changing the
   `building=*` outline or any existing parts. If the building has no parts yet, it also creates one
   base part copying the complete building footprint; that base and tower overlap in 2D deliberately,
@@ -217,6 +224,13 @@ The operation follows [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/
   values of that part which differ from the outline;
 - uncovered footprint regions become new session-local part entities. These and every modified
   original part appear in Pending changes and render purple on the map.
+
+Boundary connectivity is deliberately only a 2D topology rule for now. It does not inspect
+`min_height`, `building:min_level`, or effective vertical ranges. An isolated ground-level part may
+therefore overlap the generated base even when a cutout would model it better, while an elevated
+group connected to the building boundary may still be subtracted. Those ambiguous cases receive no
+new inference or warning yet; vertical classification is deferred until it has its own explicit
+rule and acceptance cases.
 
 The OSM key is singular `building:min_level`; there is no `min_levels` key in this model.
 `building:levels` is the total level count including skipped levels below an elevated part and

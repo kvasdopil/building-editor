@@ -220,6 +220,14 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   polylines are unaffected — the sweep over two tiles still shows 110 slices and 89 holes with zero
   structural failures and 2.00 new nodes per slice.
 
+- **Isolated slice-part groups (2026-09-02).** Open Slice now subtracts from its generated
+  base/remainder only those existing part groups connected, directly or through other touching or
+  overlapping parts, to an outer or inner building boundary. A wholly isolated group remains stacked
+  over the generated base instead of cutting multipolygon holes into it. The base still begins with
+  the complete building geometry, so existing outline holes are preserved. Connectivity intentionally
+  remains a 2D rule: vertical tags do not yet override it and ambiguous ground-level or elevated
+  groups do not yet produce a new warning.
+
 - **Hole propagation through parts (2026-08-25).** A cut hole used to modify only the building
   outline and force that outline to replace all part meshes in 3D, leaving the actual part geometry
   and upload unchanged. The cut loop is now boolean-subtracted from every intersected existing or

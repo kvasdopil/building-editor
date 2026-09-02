@@ -13,6 +13,8 @@ import {
 
 const METERS_PER_DEGREE = 111320;
 const MIN_PART_AREA_M2 = 0.1;
+/** Absorb OSM coordinate rounding when deciding whether two part boundaries meet. */
+const PART_CONNECTION_METERS = 0.05;
 
 interface Projection {
   point(coordinates: LngLat): Flatten.Point;
@@ -152,6 +154,46 @@ function partitionCount(polygon: Flatten.Polygon, cuttingSegments: Flatten.Segme
 }
 
 /**
+ * Parts may overlap as stacked volumes or merely share a wall. Both relationships
+ * make them one footprint group for deciding whether the group reaches the
+ * building boundary.
+ */
+function partPolygonsConnected(first: Flatten.Polygon, second: Flatten.Polygon): boolean {
+  if (first.distanceTo(second)[0] <= PART_CONNECTION_METERS) return true;
+  return !Flatten.BooleanOperations.intersect(first, second).isEmpty();
+}
+
+/**
+ * Return the parts belonging to a group that reaches an outer or inner building
+ * boundary. A group wholly inside the solid footprint is treated as a tower
+ * group, so a generated base continues underneath it instead of gaining holes.
+ */
+function boundaryConnectedParts(
+  building: Flatten.Polygon,
+  parts: PartShape[],
+): Set<BuildingElement["id"]> {
+  const connected = new Set<number>();
+  const queue: number[] = [];
+
+  for (const [index, { polygon }] of parts.entries()) {
+    if (building.distanceTo(polygon)[0] > PART_CONNECTION_METERS) continue;
+    connected.add(index);
+    queue.push(index);
+  }
+
+  for (let head = 0; head < queue.length; head++) {
+    const current = parts[queue[head]].polygon;
+    for (const [index, candidate] of parts.entries()) {
+      if (connected.has(index) || !partPolygonsConnected(current, candidate.polygon)) continue;
+      connected.add(index);
+      queue.push(index);
+    }
+  }
+
+  return new Set([...connected].map((index) => parts[index].element.id));
+}
+
+/**
  * A slice end may rest on any outer or interior ring of the building outline
  * or an existing part: all are real boundaries of the region the polyline divides.
  */
@@ -238,10 +280,16 @@ export function sliceBuilding(
 
     const replacements: Record<string, EditableGeometry> = {};
     const additions: SliceAddition[] = [];
+    const subtractedParts = boundaryConnectedParts(buildingPolygon, partShapes);
+    // Start with the complete source polygon, holes included. Only part groups
+    // connected to one of its boundaries carve the generated base; isolated
+    // groups remain stacked over it.
     let uncovered = buildingPolygon.clone();
 
     for (const { element, polygon } of partShapes) {
-      uncovered = Flatten.BooleanOperations.subtract(uncovered, polygon);
+      if (subtractedParts.has(element.id)) {
+        uncovered = Flatten.BooleanOperations.subtract(uncovered, polygon);
+      }
       const regions = partition(polygon, cuttingSegments, closed, projection).sort(
         (a, b) => b.area - a.area,
       );
