@@ -1,7 +1,7 @@
 "use client";
 
 import { FiExternalLink } from "react-icons/fi";
-import { type CameraView, FIELD_OF_VIEW } from "./Building3D";
+import type { CameraView } from "./Building3D";
 import type { LngLat } from "@/lib/buildings";
 
 /** Match Bing's discrete map zoom to the Three.js camera range. */
@@ -22,20 +22,22 @@ function bing3dUrl([lon, lat]: LngLat, camera: CameraView): string {
   return `https://www.bing.com/maps/?${params.toString()}`;
 }
 
-/** Google Earth exposes target, distance, heading, tilt and roll in its URL. */
-function google3dUrl([lon, lat]: LngLat, camera: CameraView): string {
-  const view = [
-    lat.toFixed(6),
-    lon.toFixed(6),
-    "0a",
-    `${Math.max(camera.range, 10)}d`,
-    // The same lens the local camera uses, or the handoff would reframe.
-    `${FIELD_OF_VIEW}y`,
-    `${camera.heading}h`,
-    `${camera.tilt}t`,
-    "0r",
-  ].join(",");
-  return `https://earth.google.com/web/@${view}`;
+/** Official cross-platform Google Maps URL: centered satellite map, no API key. */
+function googleMapsUrl([lon, lat]: LngLat, camera: CameraView | null): string {
+  const params = new URLSearchParams({
+    api: "1",
+    map_action: "map",
+    center: `${lat.toFixed(6)},${lon.toFixed(6)}`,
+    zoom: String(Math.round(camera ? bingZoom(camera.range) : 19)),
+    basemap: "satellite",
+  });
+  return `https://www.google.com/maps/@?${params.toString()}`;
+}
+
+function osmUrl([lon, lat]: LngLat, entityId: string): string {
+  const osmEntity = /^(node|way|relation)\/(\d+)$/.exec(entityId);
+  if (osmEntity) return `https://www.openstreetmap.org/${osmEntity[1]}/${osmEntity[2]}`;
+  return `https://www.openstreetmap.org/#map=19/${lat.toFixed(6)}/${lon.toFixed(6)}`;
 }
 
 function LinkOut({ href, children }: { href: string; children: string }) {
@@ -44,7 +46,7 @@ function LinkOut({ href, children }: { href: string; children: string }) {
       href={href}
       target="_blank"
       rel="noreferrer"
-      title={`Continue from this camera angle in ${children}`}
+      title={`Open in ${children}`}
       className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
     >
       {children}
@@ -54,15 +56,24 @@ function LinkOut({ href, children }: { href: string; children: string }) {
 }
 
 /**
- * External photorealistic 3D views synchronized to the local orbit camera. Sits
- * in the panel header, so it renders only the links and leaves layout to it.
+ * External map links shown together at the bottom of the properties list.
+ * Bing follows the full local orbit; Google Maps and OSM use the same target.
  */
-export function External3DLinks({ center, camera }: { center: LngLat; camera: CameraView | null }) {
-  if (!camera) return null;
+export function ExternalMapLinks({
+  center,
+  camera,
+  entityId,
+}: {
+  center: LngLat;
+  camera: CameraView | null;
+  entityId: string;
+}) {
   return (
-    <>
-      <LinkOut href={bing3dUrl(center, camera)}>Bing</LinkOut>
-      <LinkOut href={google3dUrl(center, camera)}>Google</LinkOut>
-    </>
+    <div className="flex flex-wrap items-center gap-1 border-t border-slate-200 px-3 py-2">
+      <span className="mr-1 text-[11px] text-slate-400">Open in</span>
+      {camera && <LinkOut href={bing3dUrl(center, camera)}>Bing</LinkOut>}
+      <LinkOut href={googleMapsUrl(center, camera)}>Google Maps</LinkOut>
+      <LinkOut href={osmUrl(center, entityId)}>OpenStreetMap</LinkOut>
+    </div>
   );
 }

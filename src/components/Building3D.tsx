@@ -41,17 +41,10 @@ export interface TerrainStatus {
   groundZ?: number;
 }
 
-/**
- * Vertical field of view, in degrees, matched to the `35y` this app hands to
- * Google Earth in External3DLinks. It is the same scene either way, so the lens
- * has to be the same too: at 50° the building read about 1.5x further away than
- * the view the Google link opens. That gap is a ratio, not an offset, so it could
- * not have been corrected by starting closer — it would return on the first
- * scroll.
- */
+/** Vertical field of view, in degrees, chosen for close building inspection. */
 export const FIELD_OF_VIEW = 35;
 
-/** Camera values shared with external 3D map links. */
+/** Camera values shared with the external Bing link and photorealistic viewer. */
 export interface CameraView {
   /** Compass direction the camera faces, clockwise from north. */
   heading: number;

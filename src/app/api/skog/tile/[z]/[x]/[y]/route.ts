@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { emptyTile, encodeTile } from "@/lib/lidar-format";
+import { emptyTile, encodeTile, LIDAR_SOURCE_ID } from "@/lib/lidar-format";
 import { tileBounds } from "@/lib/osm/tiles";
 import { cachedBlob } from "@/lib/skog/cache";
 import { skogPointsForBounds } from "@/lib/skog/copc";
@@ -45,7 +45,7 @@ export const GET = tileRoute(async (tile) => {
       stats = `${points.files} files, ${points.nodes} nodes, ${Math.round(points.bytes / 1024)} KB${
         points.capped ? ", capped" : ""
       }`;
-      return encodeTile(points, bounds);
+      return encodeTile(points, bounds, LIDAR_SOURCE_ID.LASERDATA_SKOG);
     });
     return tileResponse(data, {
       "x-skog": cached ? "cache" : "upstream",

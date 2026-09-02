@@ -1,78 +1,76 @@
 /**
- * Import Stockholm's airborne laser point cloud into z16 tiles the app can serve.
+ * Import a dense airborne laser survey into the z16 tiles served by /api/lidar.
  *
- * Source: "SBK Punktmoln - flygburen laserskanning (2023)" from Stockholm's
- * data portal — LAS in SWEREF 99 18 00 (EPSG:3011) with heights in RH2000,
- * >16 points/m², coloured from the 2023 orthophoto. Only a 200 x 200 m test
- * area is published for direct download; the full municipality is ordered from
- * the city, so this script takes any number of local LAS files as well.
+ * Stockholm (the backward-compatible default):
  *
- *   node scripts/import-lidar.mjs [--src <file|dir>] [--out <dir>] [--max-per-tile <n>]
+ *   node scripts/import-lidar.mjs [--src <file|dir>] [--out <dir>]
  *
- * With no --src it downloads the published test area.
+ * ICGC LiDAR Territorial over a chosen Catalonia area:
  *
- * Output is one binary per tile, planar so the browser can view the arrays
- * without copying (see src/lib/lidar.ts for the reader):
+ *   node scripts/import-lidar.mjs --dataset icgc --bbox west,south,east,north
+ *   node scripts/import-lidar.mjs --dataset icgc --src <file|dir>
  *
- *   0  "LDR1"          magic
- *   4  uint32          point count
- *   8  float32         zBase, the RH2000 metre level the heights count from
- *   12 uint32          reserved
- *   16 uint16[count]   x, as a fraction of the tile's longitude span
- *      uint16[count]   y, as a fraction of the tile's latitude span
- *      uint16[count]   height above zBase, centimetres
- *      uint16[count]   colour, RGB565 from the orthophoto
- *      uint8[count]    LAS classification
+ * The ICGC form resolves the intersecting EPSG:25831 kilometre sheets and
+ * downloads their public LAZ files. `--padding <metres>` defaults to the 100 m
+ * context used by the viewer; `--max-source-tiles <n>` (default 16) guards
+ * against accidentally requesting a large part of Catalonia.
+ *
+ * Both LAS and LAZ are read twice. The first pass counts points and establishes
+ * each output tile's z base; the second retains a uniform storage-order sample
+ * directly in typed arrays. That keeps a 20+ million point ICGC source sheet
+ * bounded in memory without scrambling the scanner order drawn by LiDAR Lines.
  */
 
-import { mkdir, open, readdir, stat, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
+import { Las } from "copc";
 import { parseArgs } from "./lib/args.mjs";
+import { icgcSourceTiles } from "./lib/icgc-lidar.mjs";
 import { makeSweref99Inverse } from "./lib/sweref99.mjs";
 import { TILE_ZOOM, tileBounds, tileFor } from "./lib/tiles.mjs";
 
-const SOURCE_URL =
+const STOCKHOLM_URL =
   "https://dataportalen.stockholm.se/dataportalen/Data/Stadsbyggnadskontoret/Punktmoln_2023_testomrade.las";
-
-/** The projection the city publishes point clouds in. */
-const EXPECTED_EPSG = 3011;
-
-/**
- * LAS class 7 is "high and low points", i.e. noise the vendor already flagged.
- * It is the one class that is never worth keeping.
- */
-const NOISE_CLASS = 7;
-
-/**
- * Points kept per tile. A full z16 tile at 16 points/m² holds ~1.5 M points,
- * which is a 13 MB download to look at one building. Thinning is uniform over
- * the file's own order, which is by flight line, so it stays evenly spread.
- */
+const SOURCE_ID = { stockholm: 0, icgc: 2 };
 const DEFAULT_MAX_PER_TILE = 500_000;
-
-/** Points read from the file per pass, to keep a whole city cloud out of RAM. */
+const DEFAULT_CONTEXT_M = 100;
+const DEFAULT_MAX_SOURCE_TILES = 16;
 const READ_BATCH = 1 << 16;
 
-// --------------------------------------------------------------------- header
+const DATASETS = {
+  stockholm: {
+    id: SOURCE_ID.stockholm,
+    name: "SBK Punktmoln - flygburen laserskanning (2023), Stockholms stad",
+    epsg: 3011,
+    crs: "EPSG:3011 -> WGS84, heights RH2000",
+    inverse: makeSweref99Inverse(),
+    noise: new Set([7]),
+  },
+  icgc: {
+    id: SOURCE_ID.icgc,
+    name: "LiDAR Territorial 2021-2023, ICGC",
+    epsg: 25831,
+    crs: "EPSG:25831 -> WGS84, orthometric heights",
+    inverse: makeSweref99Inverse({ lon0: 3, k0: 0.9996, falseEasting: 500000 }),
+    noise: new Set([7, 18]),
+  },
+};
 
-/**
- * Parse the public header block. Fields sit at fixed offsets in every LAS
- * version; the 1.4 64-bit point count replaces the legacy 32-bit one.
- */
 function readHeader(buffer) {
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   if (buffer.subarray(0, 4).toString("latin1") !== "LASF") throw new Error("not a LAS file");
   const versionMinor = buffer[25];
-  const headerSize = view.getUint16(94, true);
-  const format = buffer[104] & 0x3f;
   let count = view.getUint32(107, true);
   if (versionMinor >= 4) count = Number(view.getBigUint64(247, true)) || count;
   return {
-    versionMinor,
-    headerSize,
+    headerSize: view.getUint16(94, true),
     vlrCount: view.getUint32(100, true),
     pointsAt: view.getUint32(96, true),
-    format,
+    compressed: (buffer[104] & 0xc0) !== 0,
+    format: buffer[104] & 0x3f,
     recordLength: view.getUint16(105, true),
     count,
     scale: [view.getFloat64(131, true), view.getFloat64(139, true), view.getFloat64(147, true)],
@@ -80,7 +78,6 @@ function readHeader(buffer) {
   };
 }
 
-/** The projected CRS from the GeoTIFF key directory VLR, when the file has one. */
 function readEpsg(buffer, header) {
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   let at = header.headerSize;
@@ -89,9 +86,8 @@ function readEpsg(buffer, header) {
     const length = view.getUint16(at + 20, true);
     if (recordId === 34735 && at + 54 + length <= buffer.byteLength) {
       const keys = view.getUint16(at + 54 + 6, true);
-      for (let k = 0; k < keys; k++) {
-        const entry = at + 54 + 8 + k * 8;
-        // 3072 is ProjectedCSTypeGeoKey; its value is the EPSG code.
+      for (let key = 0; key < keys; key++) {
+        const entry = at + 54 + 8 + key * 8;
         if (view.getUint16(entry, true) === 3072) return view.getUint16(entry + 6, true);
       }
     }
@@ -100,209 +96,341 @@ function readEpsg(buffer, header) {
   return null;
 }
 
-/**
- * Byte offsets of the fields we read, per point data record format. Formats 0-5
- * keep the classification in the flag byte's low 5 bits; 6-10 give it a byte of
- * its own. Colour only exists in some formats.
- */
 function recordLayout(format) {
   const legacy = format <= 5;
   const rgb = { 2: 20, 3: 28, 5: 28, 7: 30, 8: 30, 10: 30 }[format] ?? null;
   return { classAt: legacy ? 15 : 16, classMask: legacy ? 0x1f : 0xff, rgbAt: rgb };
 }
 
-// ----------------------------------------------------------------------- read
-
-/**
- * Read one LAS file, appending every point to its tile bucket. Buckets hold
- * plain arrays of lon/lat/z/colour/class, which the writer quantizes per tile.
- */
-async function readLas(file, tiles, stats) {
+async function inspectFile(file, dataset) {
   const handle = await open(file, "r");
   try {
     const head = Buffer.alloc(375);
     await handle.read(head, 0, head.length, 0);
     const header = readHeader(head);
-    // The projection VLR sits between the header and the first point record.
     const prologue = Buffer.alloc(Math.max(header.pointsAt, head.length));
     await handle.read(prologue, 0, prologue.length, 0);
     const epsg = readEpsg(prologue, header);
-    if (epsg !== null && epsg !== EXPECTED_EPSG) {
-      throw new Error(`${path.basename(file)} is EPSG:${epsg}, expected ${EXPECTED_EPSG}`);
+    if (epsg !== null && epsg !== dataset.epsg) {
+      throw new Error(`${path.basename(file)} is EPSG:${epsg}, expected ${dataset.epsg}`);
     }
-    const { classAt, classMask, rgbAt } = recordLayout(header.format);
-    const toWgs84 = makeSweref99Inverse();
-    const [scaleX, scaleY, scaleZ] = header.scale;
-    const [offsetX, offsetY, offsetZ] = header.offset;
-
-    const batch = Buffer.alloc(READ_BATCH * header.recordLength);
-    for (let read = 0; read < header.count; read += READ_BATCH) {
-      const points = Math.min(READ_BATCH, header.count - read);
-      const bytes = points * header.recordLength;
-      await handle.read(batch, 0, bytes, header.pointsAt + read * header.recordLength);
-      const view = new DataView(batch.buffer, batch.byteOffset, batch.byteLength);
-
-      for (let i = 0; i < points; i++) {
-        const at = i * header.recordLength;
-        const classification = batch[at + classAt] & classMask;
-        stats.classes[classification] = (stats.classes[classification] ?? 0) + 1;
-        if (classification === NOISE_CLASS) {
-          stats.noise++;
-          continue;
-        }
-        const easting = view.getInt32(at, true) * scaleX + offsetX;
-        const northing = view.getInt32(at + 4, true) * scaleY + offsetY;
-        const z = view.getInt32(at + 8, true) * scaleZ + offsetZ;
-        const [lon, lat] = toWgs84(easting, northing);
-
-        // LAS colour channels are 16-bit; this dataset fills the high byte.
-        let colour = 0xffff;
-        if (rgbAt !== null) {
-          const r = view.getUint16(at + rgbAt, true) >> 8;
-          const g = view.getUint16(at + rgbAt + 2, true) >> 8;
-          const b = view.getUint16(at + rgbAt + 4, true) >> 8;
-          colour = ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
-        }
-
-        const { x, y } = tileFor(lon, lat);
-        const key = `${x}/${y}`;
-        let bucket = tiles.get(key);
-        if (!bucket) {
-          bucket = { x, y, lon: [], lat: [], z: [], colour: [], classification: [] };
-          tiles.set(key, bucket);
-        }
-        bucket.lon.push(lon);
-        bucket.lat.push(lat);
-        bucket.z.push(z);
-        bucket.colour.push(colour);
-        bucket.classification.push(classification);
-        stats.kept++;
-      }
-    }
-    console.log(
-      `  ${path.basename(file)}: ${header.count} points, format ${header.format}` +
-        `${rgbAt === null ? " (no colour)" : ""}`,
-    );
+    return { header, layout: recordLayout(header.format) };
   } finally {
     await handle.close();
   }
 }
 
-// ---------------------------------------------------------------------- write
+let lazPerfPromise;
 
-/** Quantize one tile's points into the planar binary the browser reads. */
-function encodeTile(bucket, maxPerTile) {
-  const [west, south, east, north] = tileBounds(bucket.x, bucket.y);
-  const total = bucket.lon.length;
-  const stride = Math.max(1, Math.ceil(total / maxPerTile));
-  const count = Math.ceil(total / stride);
+async function lazPerf() {
+  lazPerfPromise ??= Las.PointData.createLazPerf();
+  return lazPerfPromise;
+}
 
-  let zBase = Infinity;
-  for (let i = 0; i < total; i += stride) zBase = Math.min(zBase, bucket.z[i]);
-  zBase = Math.floor(zBase);
+async function forEachLazPoint(file, metadata, visit) {
+  const compressed = await readFile(file);
+  const decoder = await lazPerf();
+  let filePointer = 0;
+  let pointPointer = 0;
+  let reader;
+  try {
+    filePointer = decoder._malloc(compressed.byteLength);
+    pointPointer = decoder._malloc(metadata.header.recordLength);
+    decoder.HEAPU8.set(compressed, filePointer);
+    reader = new decoder.LASZip();
+    reader.open(filePointer, compressed.byteLength);
+    let view = new DataView(decoder.HEAPU8.buffer);
+    for (let index = 0; index < metadata.header.count; index++) {
+      reader.getPoint(pointPointer);
+      if (view.buffer !== decoder.HEAPU8.buffer) view = new DataView(decoder.HEAPU8.buffer);
+      visit(decoder.HEAPU8, view, pointPointer);
+    }
+  } finally {
+    reader?.delete();
+    if (pointPointer) decoder._free(pointPointer);
+    if (filePointer) decoder._free(filePointer);
+  }
+}
 
+async function forEachLasPoint(file, metadata, visit) {
+  const { header } = metadata;
+  const handle = await open(file, "r");
+  try {
+    const batch = Buffer.alloc(READ_BATCH * header.recordLength);
+    for (let read = 0; read < header.count; read += READ_BATCH) {
+      const points = Math.min(READ_BATCH, header.count - read);
+      const bytes = points * header.recordLength;
+      await handle.read(batch, 0, bytes, header.pointsAt + read * header.recordLength);
+      const view = new DataView(batch.buffer, batch.byteOffset, bytes);
+      for (let index = 0; index < points; index++) visit(batch, view, index * header.recordLength);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function forEachDecodedPoint(file, dataset, metadata, visit, classes) {
+  const { header, layout } = metadata;
+  const [scaleX, scaleY, scaleZ] = header.scale;
+  const [offsetX, offsetY, offsetZ] = header.offset;
+  const consume = (bytes, view, at) => {
+    const classification = bytes[at + layout.classAt] & layout.classMask;
+    if (classes) classes[classification] = (classes[classification] ?? 0) + 1;
+    if (dataset.noise.has(classification)) return;
+    const easting = view.getInt32(at, true) * scaleX + offsetX;
+    const northing = view.getInt32(at + 4, true) * scaleY + offsetY;
+    const z = view.getInt32(at + 8, true) * scaleZ + offsetZ;
+    const [lon, lat] = dataset.inverse(easting, northing);
+
+    let colour = 0xffff;
+    if (layout.rgbAt !== null) {
+      const red = view.getUint16(at + layout.rgbAt, true) >> 8;
+      const green = view.getUint16(at + layout.rgbAt + 2, true) >> 8;
+      const blue = view.getUint16(at + layout.rgbAt + 4, true) >> 8;
+      colour = ((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3);
+    }
+    visit({ lon, lat, z, colour, classification });
+  };
+  if (header.compressed || file.toLowerCase().endsWith(".laz")) {
+    await forEachLazPoint(file, metadata, consume);
+  } else {
+    await forEachLasPoint(file, metadata, consume);
+  }
+}
+
+function clampU16(value) {
+  return Math.min(0xffff, Math.max(0, Math.round(value)));
+}
+
+function tileKey(x, y) {
+  return `${x}/${y}`;
+}
+
+function countPoint(counts, point) {
+  const { x, y } = tileFor(point.lon, point.lat);
+  const key = tileKey(x, y);
+  const current = counts.get(key);
+  if (current) {
+    current.total++;
+    current.minZ = Math.min(current.minZ, point.z);
+  } else {
+    counts.set(key, { x, y, total: 1, minZ: point.z });
+  }
+}
+
+function makeBuckets(counts, maxPerTile) {
+  const buckets = new Map();
+  for (const [key, counted] of counts) {
+    const stride = Math.max(1, Math.ceil(counted.total / maxPerTile));
+    const capacity = Math.ceil(counted.total / stride);
+    buckets.set(key, {
+      ...counted,
+      bounds: tileBounds(counted.x, counted.y),
+      stride,
+      seen: 0,
+      written: 0,
+      zBase: Math.floor(counted.minZ),
+      xValues: new Uint16Array(capacity),
+      yValues: new Uint16Array(capacity),
+      zValues: new Uint16Array(capacity),
+      colours: new Uint16Array(capacity),
+      classes: new Uint8Array(capacity),
+    });
+  }
+  return buckets;
+}
+
+function storePoint(buckets, point) {
+  const { x, y } = tileFor(point.lon, point.lat);
+  const bucket = buckets.get(tileKey(x, y));
+  if (!bucket) return;
+  const seen = bucket.seen++;
+  if (seen % bucket.stride !== 0) return;
+  const at = bucket.written++;
+  const [west, south, east, north] = bucket.bounds;
+  bucket.xValues[at] = clampU16(((point.lon - west) / (east - west)) * 0xffff);
+  bucket.yValues[at] = clampU16(((point.lat - south) / (north - south)) * 0xffff);
+  bucket.zValues[at] = clampU16((point.z - bucket.zBase) * 100);
+  bucket.colours[at] = point.colour;
+  bucket.classes[at] = point.classification;
+}
+
+function encodeBucket(bucket, sourceId) {
+  const count = bucket.written;
   const buffer = Buffer.alloc(16 + count * 9);
   buffer.write("LDR1", 0, "latin1");
   buffer.writeUInt32LE(count, 4);
-  buffer.writeFloatLE(zBase, 8);
-
-  const xs = new Uint16Array(count);
-  const ys = new Uint16Array(count);
-  const zs = new Uint16Array(count);
-  const colours = new Uint16Array(count);
-  const classes = new Uint8Array(count);
-  const lonSpan = east - west;
-  const latSpan = north - south;
-
-  for (let i = 0, out = 0; i < total; i += stride, out++) {
-    xs[out] = Math.min(
-      0xffff,
-      Math.max(0, Math.round(((bucket.lon[i] - west) / lonSpan) * 0xffff)),
-    );
-    ys[out] = Math.min(
-      0xffff,
-      Math.max(0, Math.round(((bucket.lat[i] - south) / latSpan) * 0xffff)),
-    );
-    // 655 m of headroom over the tile's lowest point, in centimetres.
-    zs[out] = Math.min(0xffff, Math.max(0, Math.round((bucket.z[i] - zBase) * 100)));
-    colours[out] = bucket.colour[i];
-    classes[out] = bucket.classification[i];
-  }
-
+  buffer.writeFloatLE(bucket.zBase, 8);
+  buffer.writeUInt32LE(sourceId, 12);
   let at = 16;
-  for (const array of [xs, ys, zs, colours]) {
-    Buffer.from(array.buffer, array.byteOffset, array.byteLength).copy(buffer, at);
-    at += array.byteLength;
+  for (const array of [bucket.xValues, bucket.yValues, bucket.zValues, bucket.colours]) {
+    Buffer.from(array.buffer, array.byteOffset, count * 2).copy(buffer, at);
+    at += count * 2;
   }
-  Buffer.from(classes.buffer).copy(buffer, at);
-  return { buffer, count, dropped: total - count };
+  Buffer.from(bucket.classes.buffer, bucket.classes.byteOffset, count).copy(buffer, at);
+  return buffer;
 }
 
-// ----------------------------------------------------------------------- main
-
-async function collectFiles(src, downloadTo) {
-  if (!src) {
-    console.log(`downloading ${SOURCE_URL}`);
-    const response = await fetch(SOURCE_URL, { headers: { "User-Agent": "building-editor/0.1" } });
-    if (!response.ok) throw new Error(`download failed: ${response.status}`);
-    await mkdir(path.dirname(downloadTo), { recursive: true });
-    await writeFile(downloadTo, Buffer.from(await response.arrayBuffer()));
-    return [downloadTo];
-  }
+async function localFiles(src) {
   if ((await stat(src)).isDirectory()) {
-    const names = await readdir(src);
-    return names
-      .filter((name) => name.toLowerCase().endsWith(".las"))
-      .map((n) => path.join(src, n));
+    return (await readdir(src))
+      .filter((name) => /\.laz?$/i.test(name))
+      .sort()
+      .map((name) => path.join(src, name));
   }
   return [src];
 }
 
+async function download(url, destination) {
+  try {
+    if ((await stat(destination)).size > 0) {
+      console.log(`using ${destination}`);
+      return;
+    }
+  } catch {
+    // Missing source: download it below.
+  }
+  console.log(`downloading ${url}`);
+  const response = await fetch(url, { headers: { "User-Agent": "building-editor/0.1" } });
+  if (!response.ok || !response.body) throw new Error(`download failed: ${response.status} ${url}`);
+  await mkdir(path.dirname(destination), { recursive: true });
+  const temporary = `${destination}.${process.pid}.tmp`;
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary));
+  await rename(temporary, destination);
+}
+
+function parseBbox(value) {
+  const bbox = String(value ?? "")
+    .split(",")
+    .map(Number);
+  if (bbox.length !== 4 || bbox.some((number) => !Number.isFinite(number))) {
+    throw new Error("--bbox must be west,south,east,north");
+  }
+  const [west, south, east, north] = bbox;
+  if (west >= east || south >= north) throw new Error("--bbox has inverted or empty bounds");
+  return bbox;
+}
+
+function padBbox([west, south, east, north], metres) {
+  const midLat = (south + north) / 2;
+  const latPad = metres / 111320;
+  const lonPad = metres / (111320 * Math.cos((midLat * Math.PI) / 180));
+  return [west - lonPad, south - latPad, east + lonPad, north + latPad];
+}
+
+async function collectFiles(args, datasetKey, outDir) {
+  if (args.src) return localFiles(args.src);
+  if (datasetKey === "stockholm") {
+    const destination = path.join(outDir, "source", "stockholm", "testomrade.las");
+    await download(STOCKHOLM_URL, destination);
+    return [destination];
+  }
+  const padding = Number(args.padding ?? DEFAULT_CONTEXT_M);
+  if (!Number.isFinite(padding) || padding < 0)
+    throw new Error("--padding must be zero or greater");
+  const sheets = icgcSourceTiles(padBbox(parseBbox(args.bbox), padding));
+  const maxSources = Number(args["max-source-tiles"] ?? DEFAULT_MAX_SOURCE_TILES);
+  if (sheets.length > maxSources) {
+    throw new Error(
+      `${sheets.length} ICGC source sheets exceed --max-source-tiles ${maxSources}; narrow the bbox or raise the guard explicitly`,
+    );
+  }
+  const files = [];
+  for (const sheet of sheets) {
+    const destination = path.join(outDir, "source", "icgc", sheet.name);
+    await download(sheet.url, destination);
+    files.push(destination);
+  }
+  return files;
+}
+
+async function writeManifest(outDir, imported) {
+  const file = path.join(outDir, "manifest.json");
+  let imports = [];
+  try {
+    const previous = JSON.parse(await readFile(file, "utf8"));
+    imports = Array.isArray(previous.imports) ? previous.imports : [previous];
+  } catch {
+    // First import.
+  }
+  const sourceIdOf = (entry) =>
+    entry.sourceId ?? (String(entry.dataset ?? "").startsWith("SBK Punktmoln") ? 0 : null);
+  imports = [...imports.filter((entry) => sourceIdOf(entry) !== imported.sourceId), imported];
+  await writeFile(file, JSON.stringify({ imports }, null, 2));
+}
+
 async function main() {
   const args = parseArgs(process.argv);
+  const datasetKey = String(args.dataset ?? "stockholm").toLowerCase();
+  const dataset = DATASETS[datasetKey];
+  if (!dataset) throw new Error(`unknown --dataset ${datasetKey}; use stockholm or icgc`);
   const outDir = args.out ?? "data/lidar";
   const maxPerTile = Number(args["max-per-tile"] ?? DEFAULT_MAX_PER_TILE);
+  if (!Number.isSafeInteger(maxPerTile) || maxPerTile < 1) {
+    throw new Error("--max-per-tile must be a positive integer");
+  }
 
-  const files = await collectFiles(args.src, path.join(outDir, "source", "testomrade.las"));
-  if (files.length === 0) throw new Error("no .las files found");
-  console.log(`${files.length} file(s)`);
+  const files = await collectFiles(args, datasetKey, outDir);
+  if (files.length === 0) throw new Error("no .las or .laz files found");
+  console.log(`${files.length} ${datasetKey} source file(s)`);
+  const metadata = new Map();
+  for (const file of files) {
+    const inspected = await inspectFile(file, dataset);
+    metadata.set(file, inspected);
+    console.log(
+      `  ${path.basename(file)}: ${inspected.header.count.toLocaleString()} points, format ${inspected.header.format}${inspected.header.compressed ? " LAZ" : " LAS"}`,
+    );
+  }
 
-  const tiles = new Map();
-  const stats = { kept: 0, noise: 0, classes: {} };
-  for (const file of files) await readLas(file, tiles, stats);
+  const counts = new Map();
+  const classes = {};
+  console.log("pass 1/2: counting output tiles");
+  for (const file of files) {
+    await forEachDecodedPoint(
+      file,
+      dataset,
+      metadata.get(file),
+      (point) => countPoint(counts, point),
+      classes,
+    );
+  }
+
+  const buckets = makeBuckets(counts, maxPerTile);
+  console.log("pass 2/2: retaining ordered samples");
+  for (const file of files) {
+    await forEachDecodedPoint(file, dataset, metadata.get(file), (point) =>
+      storePoint(buckets, point),
+    );
+  }
 
   let written = 0;
   let dropped = 0;
-  for (const bucket of tiles.values()) {
-    const { buffer, count, dropped: thinned } = encodeTile(bucket, maxPerTile);
+  for (const bucket of buckets.values()) {
     const dir = path.join(outDir, String(TILE_ZOOM), String(bucket.x));
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, `${bucket.y}.bin`), buffer);
-    written += count;
-    dropped += thinned;
-    console.log(`  ${TILE_ZOOM}/${bucket.x}/${bucket.y}: ${count} points`);
+    await writeFile(path.join(dir, `${bucket.y}.bin`), encodeBucket(bucket, dataset.id));
+    written += bucket.written;
+    dropped += bucket.total - bucket.written;
+    console.log(
+      `  ${TILE_ZOOM}/${bucket.x}/${bucket.y}: ${bucket.written.toLocaleString()} points`,
+    );
   }
 
-  await writeFile(
-    path.join(outDir, "manifest.json"),
-    JSON.stringify(
-      {
-        source: args.src ? files.map((f) => path.basename(f)) : SOURCE_URL,
-        dataset: "SBK Punktmoln - flygburen laserskanning (2023), Stockholms stad",
-        crs: `EPSG:${EXPECTED_EPSG} -> WGS84, heights RH2000`,
-        importedZoom: TILE_ZOOM,
-        points: written,
-        tiles: tiles.size,
-        maxPerTile,
-        classes: stats.classes,
-      },
-      null,
-      2,
-    ),
-  );
+  await writeManifest(outDir, {
+    sourceId: dataset.id,
+    source: files.map((file) => path.basename(file)),
+    dataset: dataset.name,
+    license:
+      datasetKey === "icgc" ? "CC BY 4.0, Institut Cartografic i Geologic de Catalunya" : undefined,
+    crs: dataset.crs,
+    importedZoom: TILE_ZOOM,
+    points: written,
+    tiles: buckets.size,
+    maxPerTile,
+    classes,
+  });
   console.log(
-    `\n${written} points in ${tiles.size} tiles -> ${outDir}` +
-      ` (dropped ${stats.noise} noise, thinned away ${dropped} over ${maxPerTile}/tile)`,
+    `\n${written.toLocaleString()} points in ${buckets.size} tiles -> ${outDir} (thinned away ${dropped.toLocaleString()})`,
   );
 }
 

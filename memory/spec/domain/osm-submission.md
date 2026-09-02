@@ -209,9 +209,11 @@ Rules that follow from that:
   behind thirty pending tiles would be a bug. They still identify the client, as the policy requires.
 - **The redirect URI is the origin in use, plus `/oauth/callback`.** OSM forces https on redirect URIs
   and exempts only `127.0.0.1` and `::1` — not the name `localhost` — so local development registers
-  and browses the loopback IP. The dialog says so when it is opened on `localhost`. Whether the session
-  cookie is marked `secure` follows the incoming request's protocol, not the build environment, or a
-  locally started production build over http would drop the cookie and fail sign-in silently.
+  and browses the loopback IP. Next.js must allowlist `127.0.0.1` as a development origin so its own
+  client assets are not rejected when using that required origin. The dialog says so when it is opened
+  on `localhost`. Whether the session cookie is marked `secure` follows the incoming request's protocol,
+  not the build environment, or a locally started production build over http would drop the cookie and
+  fail sign-in silently.
 - **No client id, no button.** Without `OSM_CLIENT_ID` the dialog says what to register
   and where, rather than offering a control that cannot work.
 

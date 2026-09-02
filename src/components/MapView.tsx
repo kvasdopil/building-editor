@@ -14,7 +14,7 @@ import {
   setWorkerUrl,
   type StyleSpecification,
 } from "maplibre-gl";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { FiMove } from "react-icons/fi";
 import { PiExcludeBold, PiKnifeBold, PiPlusCircleBold, PiSelectionPlusBold } from "react-icons/pi";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -1348,6 +1348,32 @@ function syncPhotoMap(main: MaplibreMap, photos: MaplibreMap, offset: PhotoOffse
   });
 }
 
+const SIDEBAR_WIDTH_STORAGE_KEY = "building-explorer:sidebar-width-percent";
+const DEFAULT_SIDEBAR_WIDTH_PX = 448;
+const MIN_SIDEBAR_WIDTH_PERCENT = 20;
+const MAX_SIDEBAR_WIDTH_PERCENT = 80;
+
+function clampSidebarWidth(percent: number): number {
+  return Math.min(MAX_SIDEBAR_WIDTH_PERCENT, Math.max(MIN_SIDEBAR_WIDTH_PERCENT, percent));
+}
+
+function defaultSidebarWidth(): number {
+  if (typeof window === "undefined") return 32;
+  return clampSidebarWidth((DEFAULT_SIDEBAR_WIDTH_PX / window.innerWidth) * 100);
+}
+
+function storedSidebarWidth(): number {
+  if (typeof window === "undefined") return defaultSidebarWidth();
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (raw === null) return defaultSidebarWidth();
+    const stored = Number(raw);
+    return Number.isFinite(stored) ? clampSidebarWidth(stored) : defaultSidebarWidth();
+  } catch {
+    return defaultSidebarWidth();
+  }
+}
+
 /** Main screen: MapLibre map with live OSM buildings and the 3D side panel. */
 export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1398,12 +1424,23 @@ export function MapView() {
   const [geometryEdits, setGeometryEdits] = useState<GeometryEditMap>({});
   const [createdParts, setCreatedParts] = useState<CreatedPartMap>({});
   const [selection, setSelection] = useState<BuildingSelection | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const lod1Match = useLod1(selection);
   const selectionBuildingId = selection?.building.id ?? null;
   const selectionRef = useRef<BuildingSelection | null>(selection);
   const [selectionBearing, setSelectionBearing] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [validationLocation, setValidationLocation] = useState<LngLat | null>(null);
+
+  const setAndStoreSidebarWidth = useCallback((percent: number) => {
+    const next = clampSidebarWidth(percent);
+    setSidebarWidth(next);
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(next));
+    } catch {
+      // Keep the in-memory position when storage is unavailable.
+    }
+  }, []);
   /** Pending-changes entity to select as soon as its tile is loaded. */
   const pendingSelectRef = useRef<string | null>(null);
   const cutHoleActiveRef = useRef(cutHoleActive);
@@ -3962,6 +3999,7 @@ export function MapView() {
       className={`map-shell relative h-dvh w-full overflow-hidden ${
         selection ? "building-panel-open" : ""
       }`}
+      style={{ "--building-panel-width": `${sidebarWidth}%` } as CSSProperties}
     >
       <div className="absolute inset-0">
         <div ref={photoContainerRef} className="h-full w-full" />
@@ -3971,9 +4009,8 @@ export function MapView() {
       </div>
 
       <div
-        className={`absolute top-3 z-30 flex flex-col items-stretch gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md ${
-          selection ? "right-[29rem]" : "right-3"
-        }`}
+        className={`absolute top-3 z-30 flex flex-col items-stretch gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md ${selection ? "" : "right-3"}`}
+        style={selection ? { right: `calc(${sidebarWidth}% + 1rem)` } : undefined}
       >
         <div className="flex items-center gap-1">
           {/* One underlay at a time, so the three read as positions of a single
@@ -4088,7 +4125,8 @@ export function MapView() {
         <div
           className={`absolute z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
             photos || lidar ? "top-[5.75rem]" : "top-16"
-          } ${selection ? "right-[29rem]" : "right-3"}`}
+          } ${selection ? "" : "right-3"}`}
+          style={selection ? { right: `calc(${sidebarWidth}% + 1rem)` } : undefined}
         >
           <p className="mb-1.5 text-[10px] font-semibold tracking-wide text-slate-500 uppercase">
             Building colors
@@ -4316,6 +4354,10 @@ export function MapView() {
 
       <BuildingPanel
         selection={selection}
+        widthPercent={sidebarWidth}
+        minWidthPercent={MIN_SIDEBAR_WIDTH_PERCENT}
+        maxWidthPercent={MAX_SIDEBAR_WIDTH_PERCENT}
+        onWidthPercentChange={setAndStoreSidebarWidth}
         lod1Match={lod1Match}
         initialHeading={selectionBearing}
         edits={edits}
@@ -4324,7 +4366,6 @@ export function MapView() {
         onLidarDifferences={onLidarDifferences}
         wantLidarDifferences={lidar && lidarColourMode === "diff"}
         onSelectEntity={selectLoadedEntity}
-        onClose={() => setSelection(null)}
       />
     </div>
   );

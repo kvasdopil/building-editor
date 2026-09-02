@@ -52,3 +52,6 @@ next-env.d.ts
 
 # imported laser point cloud tiles, regenerate with scripts/import-lidar.mjs
 /data/lidar/
+
+# generated local investigation artifacts
+/analysis/

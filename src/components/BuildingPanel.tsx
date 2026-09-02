@@ -1,8 +1,15 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { Building3D, type CameraView, type CloudStatus, type TerrainStatus } from "./Building3D";
-import { External3DLinks } from "./External3DLinks";
+import { ExternalMapLinks } from "./External3DLinks";
 import { Photoreal3D } from "./Photoreal3D";
 import { EDITABLE_DIMENSION_KEYS, OPTIONAL_ROOF_KEYS, type TagRow, TagRows } from "./TagRows";
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
@@ -17,12 +24,25 @@ import { buildSurfaceGrid } from "@/lib/surface-grid";
 /** Stable empty list, so a reading-less panel does not remake its rows. */
 const EMPTY_ADVICE: Suggestion[] = [];
 
-function buildingTitle(selection: BuildingSelection): string {
-  const props = selection.selected.properties;
-  if (props["@name"]) return props["@name"];
-  const type =
-    props.class ?? props.subtype ?? (props.role === "part" ? "building part" : "building");
-  return type.replace(/_/g, " ");
+const VIEWER_HEIGHT_STORAGE_KEY = "building-explorer:sidebar-viewer-height-percent";
+const DEFAULT_VIEWER_HEIGHT_PERCENT = 66;
+const MIN_VIEWER_HEIGHT_PERCENT = 25;
+const MAX_VIEWER_HEIGHT_PERCENT = 80;
+
+function clampViewerHeight(percent: number): number {
+  return Math.min(MAX_VIEWER_HEIGHT_PERCENT, Math.max(MIN_VIEWER_HEIGHT_PERCENT, percent));
+}
+
+function storedViewerHeight(): number {
+  if (typeof window === "undefined") return DEFAULT_VIEWER_HEIGHT_PERCENT;
+  try {
+    const raw = window.localStorage.getItem(VIEWER_HEIGHT_STORAGE_KEY);
+    if (raw === null) return DEFAULT_VIEWER_HEIGHT_PERCENT;
+    const stored = Number(raw);
+    return Number.isFinite(stored) ? clampViewerHeight(stored) : DEFAULT_VIEWER_HEIGHT_PERCENT;
+  } catch {
+    return DEFAULT_VIEWER_HEIGHT_PERCENT;
+  }
 }
 
 function tagValue(value: unknown): string {
@@ -49,6 +69,10 @@ function sourceTags(properties: BuildingProperties): Record<string, string> {
 /** Side panel: 3D view, LOD1 advice, and the element's tags. */
 export function BuildingPanel({
   selection,
+  widthPercent,
+  minWidthPercent,
+  maxWidthPercent,
+  onWidthPercentChange,
   lod1Match,
   initialHeading,
   edits,
@@ -57,9 +81,12 @@ export function BuildingPanel({
   onLidarDifferences,
   wantLidarDifferences,
   onSelectEntity,
-  onClose,
 }: {
   selection: BuildingSelection | null;
+  widthPercent: number;
+  minWidthPercent: number;
+  maxWidthPercent: number;
+  onWidthPercentChange: (percent: number) => void;
   lod1Match: Lod1Match | null;
   initialHeading: number;
   edits: EditsApi;
@@ -68,13 +95,18 @@ export function BuildingPanel({
   onLidarDifferences?: (buildingId: string, differences: Float32Array | null) => void;
   wantLidarDifferences?: boolean;
   onSelectEntity: (entityId: string) => void;
-  onClose: () => void;
 }) {
   const match = lod1Match;
   const [camera, setCamera] = useState<CameraView | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
   const [cloud, setCloud] = useState<LidarCloud | null>(null);
   const [terrainStatus, setTerrainStatus] = useState<TerrainStatus | null>(null);
+  const [viewerHeight, setViewerHeight] = useState(storedViewerHeight);
+  const [resizing, setResizing] = useState(false);
+  const [resizingWidth, setResizingWidth] = useState(false);
+  const splitRef = useRef<HTMLDivElement>(null);
+  const resizePointer = useRef<number | null>(null);
+  const widthResizePointer = useRef<number | null>(null);
   const selectedId = selection?.selected.id ?? "";
   // Laser dots arrive after the 3D view, and a national tile is assembled on
   // demand, so say which of "reading", "measured" and "nothing here" it is.
@@ -144,6 +176,83 @@ export function BuildingPanel({
       onEditTag(selectedId, advice.key, advice.value, osmTags[advice.key]);
     }
   }, [laserAdvice, onEditTag, selectedId, osmTags]);
+
+  const setAndStoreViewerHeight = useCallback((percent: number) => {
+    const next = clampViewerHeight(percent);
+    setViewerHeight(next);
+    try {
+      window.localStorage.setItem(VIEWER_HEIGHT_STORAGE_KEY, String(next));
+    } catch {
+      // Keep the in-memory position when storage is unavailable.
+    }
+  }, []);
+
+  const resizeFromPointer = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (resizePointer.current !== event.pointerId) return;
+      const split = splitRef.current;
+      if (!split) return;
+      event.preventDefault();
+      const bounds = split.getBoundingClientRect();
+      setAndStoreViewerHeight(((event.clientY - bounds.top) / bounds.height) * 100);
+    },
+    [setAndStoreViewerHeight],
+  );
+
+  const finishResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    if (resizePointer.current !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizePointer.current = null;
+    setResizing(false);
+  }, []);
+
+  const resizeWithKeyboard = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      let next = viewerHeight;
+      if (event.key === "ArrowUp") next -= 1;
+      else if (event.key === "ArrowDown") next += 1;
+      else if (event.key === "Home") next = MIN_VIEWER_HEIGHT_PERCENT;
+      else if (event.key === "End") next = MAX_VIEWER_HEIGHT_PERCENT;
+      else return;
+      event.preventDefault();
+      setAndStoreViewerHeight(next);
+    },
+    [setAndStoreViewerHeight, viewerHeight],
+  );
+
+  const resizeWidthFromPointer = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (widthResizePointer.current !== event.pointerId) return;
+      event.preventDefault();
+      onWidthPercentChange(((window.innerWidth - event.clientX) / window.innerWidth) * 100);
+    },
+    [onWidthPercentChange],
+  );
+
+  const finishWidthResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    if (widthResizePointer.current !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    widthResizePointer.current = null;
+    setResizingWidth(false);
+  }, []);
+
+  const resizeWidthWithKeyboard = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      let next = widthPercent;
+      if (event.key === "ArrowLeft") next += 1;
+      else if (event.key === "ArrowRight") next -= 1;
+      else if (event.key === "Home") next = minWidthPercent;
+      else if (event.key === "End") next = maxWidthPercent;
+      else return;
+      event.preventDefault();
+      onWidthPercentChange(next);
+    },
+    [maxWidthPercent, minWidthPercent, onWidthPercentChange, widthPercent],
+  );
 
   const roofDirectionForLook = useMemo(
     () => (lookBearing: number) => {
@@ -232,159 +341,152 @@ export function BuildingPanel({
   const props = edited.selected.properties;
   const selectedIsPart = props.role === "part";
   const parentId = edited.selected.id !== edited.building.id ? edited.building.id : null;
-  const editedCount = edit ? Object.keys(edit.changed).length : 0;
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-20 flex w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl">
-      <header className="flex items-center gap-2 border-b border-slate-200 px-3 py-1.5">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-slate-900 capitalize">
-            {buildingTitle(edited)}
-          </h2>
-          <p className="truncate text-[11px] text-slate-500">
-            <span className="font-mono">{selectedId}</span>
-            {selectedIsPart ? (
-              <>
-                <span aria-hidden> · </span>
-                {parentId ? (
-                  <>
-                    part of{" "}
-                    <a
-                      href={`#${parentId}`}
-                      onClick={(event) => {
-                        if (
-                          event.button !== 0 ||
-                          event.metaKey ||
-                          event.ctrlKey ||
-                          event.shiftKey ||
-                          event.altKey
-                        )
-                          return;
-                        event.preventDefault();
-                        onSelectEntity(parentId);
-                      }}
-                      className="font-mono font-medium text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
-                    >
-                      {parentId}
-                    </a>
-                  </>
-                ) : (
-                  "standalone part"
-                )}
-              </>
-            ) : selection.parts.length > 0 ? (
-              <>
-                <span aria-hidden> · </span>
-                {selection.parts.length} parts
-              </>
-            ) : null}
-            {editedCount > 0 && (
-              <>
-                <span aria-hidden> · </span>
-                {editedCount} edited
-              </>
-            )}
-          </p>
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          <External3DLinks center={boundsCenter(elementBounds(edited.selected))} camera={camera} />
-          {edit && (
-            <button
-              type="button"
-              onClick={() => edits.revertBuilding(selectedId)}
-              className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-50"
-            >
-              Revert all
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close panel"
-            className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-          >
-            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-              <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <div className="relative min-h-48 flex-1">
-        <Building3D
-          selection={edited}
-          initialHeading={initialHeading}
-          onCameraChange={setCamera}
-          onCloudStatus={setCloudStatus}
-          onCloudChange={handleCloud}
-          onCloudDifferences={onLidarDifferences}
-          wantDifferences={wantLidarDifferences}
-          onTerrainStatus={setTerrainStatus}
+    <aside
+      className={`absolute inset-y-0 right-0 z-20 flex min-w-0 flex-col bg-white shadow-2xl ${resizingWidth ? "cursor-col-resize select-none" : ""}`}
+      style={{ width: `${widthPercent}%` }}
+    >
+      <div className="absolute inset-y-0 left-0 z-30 w-px">
+        <button
+          type="button"
+          aria-label="Resize map and sidebar"
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            widthResizePointer.current = event.pointerId;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setResizingWidth(true);
+          }}
+          onPointerMove={resizeWidthFromPointer}
+          onPointerUp={finishWidthResize}
+          onPointerCancel={finishWidthResize}
+          onKeyDown={resizeWidthWithKeyboard}
+          className="peer absolute -inset-x-1.5 inset-y-0 m-0 w-4 cursor-col-resize touch-none border-0 bg-transparent outline-none"
+        />
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 left-0 w-px bg-slate-200 peer-hover:bg-violet-400 peer-focus-visible:bg-violet-500"
         />
       </div>
+      <div
+        ref={splitRef}
+        className={`flex min-h-0 flex-1 flex-col ${resizing ? "cursor-row-resize select-none" : ""}`}
+      >
+        <div
+          className="flex min-h-0 shrink-0 flex-col overflow-hidden"
+          style={{ height: `${viewerHeight}%` }}
+        >
+          <div className="relative min-h-0 flex-1">
+            <Building3D
+              selection={edited}
+              initialHeading={initialHeading}
+              onCameraChange={setCamera}
+              onCloudStatus={setCloudStatus}
+              onCloudChange={handleCloud}
+              onCloudDifferences={onLidarDifferences}
+              wantDifferences={wantLidarDifferences}
+              onTerrainStatus={setTerrainStatus}
+            />
+          </div>
 
-      <Photoreal3D
-        center={boundsCenter(elementBounds(edited.selected))}
-        camera={camera}
-        radius={boundsRadiusMeters(elementBounds(edited.selected))}
-      />
+          <Photoreal3D
+            center={boundsCenter(elementBounds(edited.selected))}
+            camera={camera}
+            radius={boundsRadiusMeters(elementBounds(edited.selected))}
+          />
+        </div>
 
-      <p className="border-y border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
-        {selectedIsPart ? (
-          "LOD1 covers building outlines only — this part is measured from the laser"
-        ) : match ? (
-          <>
-            LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
-            {match.properties.category ? ` · ${match.properties.category}` : ""}
-            {!match.confident && (
-              <span className="text-amber-700">
+        <div className="relative z-10 h-px shrink-0">
+          <button
+            type="button"
+            aria-label="Resize 3D view and properties"
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              resizePointer.current = event.pointerId;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setResizing(true);
+            }}
+            onPointerMove={resizeFromPointer}
+            onPointerUp={finishResize}
+            onPointerCancel={finishResize}
+            onKeyDown={resizeWithKeyboard}
+            className="peer absolute inset-x-0 -inset-y-1.5 m-0 h-4 cursor-row-resize touch-none border-0 bg-transparent outline-none"
+          />
+          <hr className="pointer-events-none absolute inset-x-0 top-0 m-0 h-px border-0 bg-slate-200 peer-hover:bg-violet-400 peer-focus-visible:bg-violet-500" />
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <dl className="border-b border-slate-100 text-xs">
+            <div className="flex items-start">
+              <dt className="w-2/5 px-4 py-1.5 font-medium text-slate-500">feature</dt>
+              <dd className="w-3/5 px-4 py-1.5 font-mono break-words text-slate-900">
+                {selectedId}
+              </dd>
+            </div>
+          </dl>
+          <p className="border-b border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
+            {selectedIsPart ? (
+              "LOD1 covers building outlines only — this part is measured from the laser"
+            ) : match ? (
+              <>
+                LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
+                {match.properties.category ? ` · ${match.properties.category}` : ""}
+                {!match.confident && (
+                  <span className="text-amber-700">
+                    {" "}
+                    · block is {(1 / Math.max(match.blockShare, 0.01)).toFixed(1)}× larger, so its
+                    heights cover several buildings — advice is unreliable
+                  </span>
+                )}
+              </>
+            ) : (
+              "No LOD1 building matches this footprint"
+            )}
+            {laserStatus && <span className="text-slate-400"> · {laserStatus}</span>}
+            {selectedTerrainStatus && (
+              <span className="text-slate-400">
                 {" "}
-                · block is {(1 / Math.max(match.blockShare, 0.01)).toFixed(1)}× larger, so its
-                heights cover several buildings — advice is unreliable
+                · terrain:{" "}
+                {selectedTerrainStatus.state === "loading"
+                  ? "reading…"
+                  : selectedTerrainStatus.state === "empty"
+                    ? "unavailable"
+                    : `${selectedTerrainStatus.groundZ?.toFixed(1)} m ground · `}
+                {selectedTerrainStatus.state === "loaded" && (
+                  <a
+                    href="https://mapterhorn.com/attribution/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline hover:text-slate-600"
+                  >
+                    Mapterhorn z13
+                  </a>
+                )}
               </span>
             )}
-          </>
-        ) : (
-          "No LOD1 building matches this footprint"
-        )}
-        {laserStatus && <span className="text-slate-400"> · {laserStatus}</span>}
-        {selectedTerrainStatus && (
-          <span className="text-slate-400">
-            {" "}
-            · terrain:{" "}
-            {selectedTerrainStatus.state === "loading"
-              ? "reading…"
-              : selectedTerrainStatus.state === "empty"
-                ? "unavailable"
-                : `${selectedTerrainStatus.groundZ?.toFixed(1)} m ground · `}
-            {selectedTerrainStatus.state === "loaded" && (
-              <a
-                href="https://mapterhorn.com/attribution/"
-                target="_blank"
-                rel="noreferrer"
-                className="underline hover:text-slate-600"
-              >
-                Mapterhorn z13
-              </a>
-            )}
-          </span>
-        )}
-      </p>
+          </p>
 
-      <div className="max-h-[32%] min-h-24 overflow-y-auto">
-        <TagRows
-          rows={rows}
-          onApply={(suggestion) =>
-            onEditTag(selectedId, suggestion.key, suggestion.value, osmTags[suggestion.key])
-          }
-          onEdit={(key, value) => onEditTag(selectedId, key, value, osmTags[key])}
-          onRevert={(key) => edits.revertTag(selectedId, key)}
-          roofDirectionForLook={roofDirectionForLook}
-          laser={laserReading}
-          onApplyLaserRoof={laserAdvice.length > 0 ? applyLaserRoof : undefined}
-          parentId={parentId}
-          onSelectParent={parentId ? () => onSelectEntity(parentId) : undefined}
-        />
+          <TagRows
+            rows={rows}
+            onApply={(suggestion) =>
+              onEditTag(selectedId, suggestion.key, suggestion.value, osmTags[suggestion.key])
+            }
+            onEdit={(key, value) => onEditTag(selectedId, key, value, osmTags[key])}
+            onRevert={(key) => edits.revertTag(selectedId, key)}
+            roofDirectionForLook={roofDirectionForLook}
+            laser={laserReading}
+            onApplyLaserRoof={laserAdvice.length > 0 ? applyLaserRoof : undefined}
+            parentId={parentId}
+            onSelectParent={parentId ? () => onSelectEntity(parentId) : undefined}
+          />
+          <ExternalMapLinks
+            center={boundsCenter(elementBounds(edited.selected))}
+            camera={camera}
+            entityId={selectedId}
+          />
+        </div>
       </div>
     </aside>
   );

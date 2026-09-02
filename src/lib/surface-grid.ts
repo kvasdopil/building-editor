@@ -91,10 +91,10 @@ export interface SurfaceGrid {
   aspect: Float32Array;
   /** Surface slope per cell, radians from level; NaN where unfitted. */
   slope: Float32Array;
-  /** Mean surface height per cell, metres RH2000; NaN where unfitted. */
+  /** Mean surface height per cell, in published orthometric metres; NaN where unfitted. */
   height: Float32Array;
   /**
-   * Highest raw return per cell, metres RH2000; NaN where the cell itself
+   * Highest raw return per cell, in published orthometric metres; NaN where the cell itself
    * holds no point. Unsmoothed on purpose: the plane-fit window erodes ridge
    * peaks by up to a metre, and ridge reads need the points themselves.
    */
@@ -103,7 +103,7 @@ export interface SurfaceGrid {
   inside: Uint8Array;
   /** Brightness normalisation range, from the fitted cells' heights. */
   heightRange: [number, number];
-  /** The cloud's ground level, metres RH2000, for heights above ground. */
+  /** The cloud's ground level, in published orthometric metres, for heights above ground. */
   ground: number;
   /**
    * The raster's corners as lon/lat, in image order — top-left, top-right,
@@ -131,7 +131,7 @@ interface GridPoints {
   count: number;
   us: Float32Array;
   vs: Float32Array;
-  /** Absolute height, metres RH2000. */
+  /** Absolute height in the survey's published orthometric metres. */
   zs: Float32Array;
 }
 

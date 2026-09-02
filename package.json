@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "advice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/roof-advice.mjs",
+    "test:lidar": "node --test scripts/lib/icgc-lidar.test.mjs",
     "lint": "oxlint .",
     "lint:format": "oxfmt . --check",
     "lint:knip": "knip",

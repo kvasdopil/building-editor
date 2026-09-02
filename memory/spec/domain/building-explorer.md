@@ -7,13 +7,19 @@ pan, zoom and bearing, pitch locked at 0). Below map zoom z15.5 only that normal
 at z15.5 and above, live OSM buildings and parts appear in contrast colors and become selectable.
 The basemap is flat and vector-only: provider raster relief and fill-extrusion building layers are
 removed before the editor overlays are installed.
-Zoom and bearing controls sit in the visible map's bottom-right corner, shifting left when the
-building panel is open so they remain accessible.
+Zoom and bearing controls sit in the visible map's bottom-right corner, shifting left by the
+building panel's current width when it is open so they remain accessible. The thin vertical
+separator between the map and panel is draggable from 20–80% of the viewport width and supports the
+arrow, Home, and End keys. Its percentage position is stored in local storage and restored after
+reloads; the map toolbar and building-colors legend follow the same boundary.
 Selecting a building or building part opens a right-side panel with an interactive 3D extrusion
 (initial bearing copied from the map on every new selection, then zoom + rotate independent of
 the map, Mapterhorn z13 terrain), with adjacent buildings
 drawn in gray as context, and below it an inspector listing every raw tag of the
-selected feature. A "Photos" toggle swaps the basemap for satellite imagery and reduces
+selected feature. A thin horizontal separator between the 3D views and inspector is draggable from
+25–80% of the panel height, remains easy to grab through an invisible hit area, and supports the
+arrow, Home, and End keys. Its percentage position is stored in local storage and restored after
+reloads. A "Photos" toggle swaps the basemap for satellite imagery and reduces
 buildings/parts to boundaries only. While Photos is on, a four-way-arrow button toggles imagery
 alignment mode. In that mode the editing map's drag-pan interaction is locked and primary-pointer
 dragging changes only the imagery's geographic offset. The chosen offset remains aligned through
@@ -72,9 +78,10 @@ the click point, the part wins as the more specific entity. The map highlights o
 the inspector shows and edits the part's own OSM id and tags. The selection still carries its
 parent building and sibling parts: the parent supplies the shared level height, the complete
 building stays visible as 3D context, and the camera frames the selected part. LOD1 advice is not
-offered for parts because the source describes whole building blocks. The inspector toolbar always
-shows the selected entity id. For a part, that id comes before a `part of way/…` parent link, which
-switches selection to its loaded building outline without another network request.
+offered for parts because the source describes whole building blocks. The sidebar has no separate
+building/part header or panel-level close/revert toolbar: the first inspector row shows the selected
+feature id. For a part, the `building:part` row includes a parent control which switches selection
+to its loaded building outline without another network request.
 
 Selection assembly is cached per immutable displayed-feature snapshot. The snapshot is parsed once,
 parent and sibling associations are lazy, and building parts are associated only after bounding-box
@@ -82,20 +89,14 @@ and distance filtering has reduced 3D context to the nearest eligible buildings.
 a parent and its already assembled parts therefore reuses the parent, siblings, and neighbors rather
 than repeating the building-by-part polygon-overlap pass.
 
-## External 3D views
+## External map views
 
-The panel does not embed third-party imagery. Below the local Three.js viewer, **Open in Bing**
-and **Open in Google** links launch photorealistic 3D centered on the selected building. Their
-URLs are regenerated from the current orbit camera whenever it rotates, tilts or zooms, carrying
-the same heading, tilt and viewing distance as far as each provider's URL format allows. Bing's
-distance is approximate because it exposes zoom and eye height rather than an explicit range.
-
-The **field of view is shared** between the local camera and the Google Earth link — one exported
-constant, `FIELD_OF_VIEW`, used both to construct the `PerspectiveCamera` and to write the `y`
-parameter in the URL. Distance, heading and tilt only agree on framing if the lens does too: at 50°
-locally against the 35° sent to Google, the same distance showed a view 1.48x wider, so the local
-camera looked that much further away than the one the link opened. That gap is a ratio, so starting
-closer would have hidden it for one frame and let it return on the first scroll.
+The bottom of the scrollable properties list holds one group of external map links: **Bing**,
+**Google Maps**, and **OpenStreetMap**. Bing opens its 3D view with the local Three.js orbit's target,
+heading, tilt, eye height, and approximate zoom. Google Maps uses its documented cross-platform map
+URL with the selected building center, a range-derived whole-number zoom, and satellite basemap; the
+Maps URL does not accept the local orbit's heading or tilt. OpenStreetMap opens the exact selected
+way, relation, or node; a session-local entity instead falls back to a z19 map centered on it.
 Creating the links makes no third-party request; coordinates and the user's IP leave the app only
 when a link is opened.
 
@@ -497,11 +498,16 @@ building sits at its own footprint's lowest Mapterhorn elevation relative to tha
 parts of one building share that base. OSM heights remain distances above the building base.
 
 The 3D view draws airborne laser points as coloured dots around the selected building (see
-ADR 0004), from two sources that share one tile format and are tried in order per z16 tile:
+ADR 0004), from three surveys that share one tile format and are tried in order per z16 tile:
 
 - **Stockholm 2023**, 25 points/m², imported to `data/lidar` and served by `/api/lidar`. Dense, and
   coloured from the orthophoto, so the cloud reads as a photographic surface. Buildings are a
   classified LAS class here.
+- **ICGC LiDAR Territorial 2021–2023**, at least 8 points/m², imported for a bounded Catalonia area
+  to `data/lidar` and served by the same `/api/lidar` route (see
+  [ADR 0008](../../adr/0008-icgc-lidar-is-imported.md)). It is classified and RGB-coloured. Its
+  source id travels in the LDR1 header so pre-existing Stockholm tiles remain valid and the client
+  can name the survey without a second route.
 - **Laserdata Skog**, 1.4 points/m², read on demand from Lantmäteriet by `/api/skog` (see
   [ADR 0005](../../adr/0005-national-laser-data-read-on-demand.md)). Covers the country. No colour
   and no building class, so dots are coloured by class — ground, water, bridge — with unclassified
@@ -652,9 +658,9 @@ about 140 ms to 8 ms, or 33 ms with the difference view open.
 
 Height reaches the map only as colour in every mode; position stays flat XY throughout.
 
-Both sources are read where available. Occupied one-meter municipal coverage cells and their
-immediate neighbors suppress national returns, so dense data wins over its actual coverage while
-Skog fills a municipal scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
+Both routes are read where available. Occupied one-meter dense-import coverage cells and their
+immediate neighbors suppress national returns, so imported data wins over its actual coverage while
+Skog fills a Stockholm scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
 carries the LAS class in its low bits and a single-return flag in `0x80`.
 
 Within the selected element's footprint, returns above its rendered roof are recoloured by their
@@ -858,10 +864,11 @@ The map has two zoom-dependent states (see [ADR 0001](../../adr/0001-live-osm-da
 - **Normal basemap** — geographic context below z15.5, without a separate building overlay or edit targets.
 - **Live OSM API** — everything editable, at map zoom z >= 15.5, using fixed-grid z16 tiles and always through the cached proxy required by [ADR 0002](../../adr/0002-cached-rate-limited-osm-proxy.md).
 
-Two local reference datasets sit beside them, imported to the same z16 grid and served from disk:
-Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)) and the 2023 laser
-point cloud ([ADR 0004](../../adr/0004-laser-point-cloud-as-raw-evidence.md)). Neither is ever an
-edit target.
+Local reference datasets sit beside them, imported to the same z16 grid and served from disk:
+Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)), the 2023 Stockholm
+laser point cloud ([ADR 0004](../../adr/0004-laser-point-cloud-as-raw-evidence.md)), and bounded
+imports from ICGC LiDAR Territorial ([ADR 0008](../../adr/0008-icgc-lidar-is-imported.md)). None is
+ever an edit target.
 
 Mapterhorn z13 terrain is read through the app's fixed-grid `/api/terrain` route and decoded in the
 3D preview. It defines ground elevation only and is never an edit target or a source of OSM height

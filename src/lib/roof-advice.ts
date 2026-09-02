@@ -234,7 +234,7 @@ interface ElementPoints {
   count: number;
   us: Float32Array;
   vs: Float32Array;
-  /** Absolute height, metres RH2000. */
+  /** Absolute height in the survey's published orthometric metres. */
   zs: Float32Array;
 }
 

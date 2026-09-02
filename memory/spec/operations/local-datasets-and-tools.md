@@ -14,7 +14,9 @@ Related documents:
 
 ## Where the imported data lives
 
-- `scripts/import-lod1.mjs` and `scripts/import-lidar.mjs` write z16 tiles under `data/lod1` and `data/lidar`. Both are gitignored and regenerated rather than committed.
+- `scripts/import-lod1.mjs` and `scripts/import-lidar.mjs` write z16 tiles under `data/lod1` and `data/lidar`. Both are gitignored and regenerated rather than committed. The LiDAR importer defaults to Stockholm; `--dataset icgc --bbox west,south,east,north` resolves and imports the public ICGC kilometre sheets intersecting a bounded Catalonia area.
+- ICGC publishes ordinary LAZ rather than COPC. Its source sheets are therefore downloaded under `data/lidar/source/icgc` and decoded offline, never fetched from a route handler. The bbox receives 100 m of context by default and a 16-sheet guard prevents an accidental multi-gigabyte import; both values have explicit CLI overrides.
+- The LDR1 header's uint32 at byte 12 identifies the imported survey: zero remains the original Stockholm id for backward compatibility, one identifies Laserdata Skog tiles, and two identifies ICGC LiDAR Territorial. `/api/lidar` serves either imported source without a separate dataset route.
 - `BUILDING_DATA_DIR` overrides that root. `localTilePath()` in `src/lib/local-data.ts` resolves it for both tile routes and for the measurement tool, defaulting to `data/` under the working directory.
 - A git worktree needs it: the import is tens of megabytes and belongs to the checkout rather than to the branch. Set it in the worktree's `.env`, which Next loads server-side.
 - **Never symlink the directory into the project tree instead.** Tailwind's source scan for `globals.css` follows the link, resolves a path above the project root, and Turbopack fails every build with `FileSystemPath("").join("../../../data") leaves the filesystem root`. The error names the stylesheet, not the link; an absolute target does not help, because the offending path is computed relative to the project either way; and it persists in the `.next` cache, so clear that before concluding a fix failed.

@@ -20,7 +20,8 @@
  * and the same `.cache` — OSM for geometry and tags, Lantmäteriet's Laserdata
  * Skog for the points — so the first run over an area is slow and the rest are
  * not, and warming the cache here warms it for the dev server too. Imported
- * Stockholm tiles under `data/lidar` are read when they exist, as in the app.
+ * Stockholm or ICGC tiles under `data/lidar` are read when they exist, as in
+ * the app.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -51,7 +52,7 @@ const [
   { isFresh, readCachedTile, writeCachedTile },
   { OSM_TILE_SCHEMA, tileBounds, tilesForBounds },
   { cloudBounds, mergeTiles },
-  { decodeTile, encodeTile },
+  { LIDAR_SOURCE_ID, decodeTile, encodeTile },
   { cachedBlob },
   { skogPointsForBounds },
   { buildSurfaceGrid, surfaceGridImage },
@@ -177,20 +178,26 @@ async function featuresAround(bounds) {
 
 // --------------------------------------------------------------------- laser
 
-/** One z16 laser tile, from the imported Stockholm scan or from Skog. */
+/** One z16 laser tile, from an imported dense scan or from Skog. */
 async function loadTile(tile) {
   const loaded = [];
   const file = localTilePath("lidar", tile, ".bin");
   try {
     const bytes = await readFile(file);
     const raw = decodeTile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
-    if (raw && raw.count > 0) loaded.push({ tile, raw, source: "Stockholm 2023" });
+    if (raw && raw.count > 0) {
+      const source =
+        raw.sourceId === LIDAR_SOURCE_ID.ICGC_TERRITORIAL
+          ? "ICGC LiDAR Territorial 2021–2023"
+          : "Stockholm 2023";
+      loaded.push({ tile, raw, source });
+    }
   } catch {
     // Outside the imported area, which is nearly everywhere.
   }
   const bounds = tileBounds(tile);
   const { data } = await cachedBlob([String(tile.z), String(tile.x), String(tile.y)], async () =>
-    encodeTile(await skogPointsForBounds(bounds), bounds),
+    encodeTile(await skogPointsForBounds(bounds), bounds, LIDAR_SOURCE_ID.LASERDATA_SKOG),
   );
   const raw = decodeTile(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
   if (raw && raw.count > 0) loaded.push({ tile, raw, source: "Laserdata Skog" });

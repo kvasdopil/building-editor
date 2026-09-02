@@ -8,8 +8,8 @@ import type { Bounds } from "./geometry";
  *
  *   0  "LDR1"          magic
  *   4  uint32          point count
- *   8  float32         zBase, the RH2000 metre level the heights count from
- *   12 uint32          reserved
+ *   8  float32         zBase, the published orthometric metre level the heights count from
+ *   12 uint32          source id (zero is the original Stockholm import)
  *   16 uint16[count]   x, as a fraction of the tile's longitude span
  *      uint16[count]   y, as a fraction of the tile's latitude span
  *      uint16[count]   height above zBase, centimetres
@@ -31,11 +31,23 @@ const BYTES_PER_POINT = 9;
 
 const MAGIC = [0x4c, 0x44, 0x52, 0x31]; // "LDR1"
 
+/**
+ * Stable ids carried by an LDR1 tile. Zero deliberately remains Stockholm so
+ * tiles written before this field was assigned keep their original meaning.
+ */
+export const LIDAR_SOURCE_ID = {
+  STOCKHOLM_2023: 0,
+  LASERDATA_SKOG: 1,
+  ICGC_TERRITORIAL: 2,
+} as const;
+
+export type LidarSourceId = (typeof LIDAR_SOURCE_ID)[keyof typeof LIDAR_SOURCE_ID];
+
 /** Points of a laser cloud, as the tile format stores them. */
 export interface PointArrays {
   lon: ArrayLike<number>;
   lat: ArrayLike<number>;
-  /** RH2000 height, meters. */
+  /** Published orthometric survey height, meters. */
   z: ArrayLike<number>;
   /** RGB565 per point. */
   colour: ArrayLike<number>;
@@ -46,6 +58,7 @@ export interface PointArrays {
 export interface RawTile {
   count: number;
   zBase: number;
+  sourceId: number;
   x: Uint16Array;
   y: Uint16Array;
   z: Uint16Array;
@@ -65,7 +78,11 @@ export function emptyTile(): Uint8Array {
  * tile's own span, so a tile is self-describing given its z/x/y, and heights as
  * centimetres above the tile's lowest point — 655 m of headroom.
  */
-export function encodeTile(points: PointArrays, [west, south, east, north]: Bounds): Uint8Array {
+export function encodeTile(
+  points: PointArrays,
+  [west, south, east, north]: Bounds,
+  sourceId: LidarSourceId = LIDAR_SOURCE_ID.STOCKHOLM_2023,
+): Uint8Array {
   const total = points.z.length;
   let zBase = Infinity;
   for (let i = 0; i < total; i++) zBase = Math.min(zBase, points.z[i]);
@@ -77,6 +94,7 @@ export function encodeTile(points: PointArrays, [west, south, east, north]: Boun
   const header = new DataView(buffer);
   header.setUint32(4, total, true);
   header.setFloat32(8, zBase, true);
+  header.setUint32(12, sourceId, true);
 
   const x = new Uint16Array(total);
   const y = new Uint16Array(total);
@@ -123,6 +141,7 @@ export function decodeTile(buffer: ArrayBuffer): RawTile | null {
   return {
     count,
     zBase: header.getFloat32(8, true),
+    sourceId: header.getUint32(12, true),
     x: take(),
     y: take(),
     z: take(),

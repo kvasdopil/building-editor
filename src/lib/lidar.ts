@@ -1,22 +1,21 @@
 import type { BuildingElement } from "./buildings";
 import { type Bounds, elementBounds, padBounds } from "./geometry";
-import { type RawTile, classOf, decodeTile } from "./lidar-format";
+import { LIDAR_SOURCE_ID, type RawTile, classOf, decodeTile } from "./lidar-format";
 import { type TileId, tileBounds, tilesForBounds } from "./osm/tiles";
 
 /**
- * Airborne laser point clouds for the selected building, from two sources that
+ * Airborne laser point clouds for the selected building, from three sources that
  * speak the same tile format (see `lidar-format.ts`):
  *
- * - `/api/lidar` — Stockholm's own 2023 scan at 25 points/m², imported to disk
- *   by scripts/import-lidar.mjs. Dense and colour from the orthophoto, but only
- *   where the city's data has been imported.
+ * - `/api/lidar` — imported dense scans: Stockholm's 2023 survey or ICGC's
+ *   2021-2023 LiDAR Territorial over a chosen Catalonia area.
  * - `/api/skog` — Lantmäteriet's national "Laserdata Skog" at 1.4 points/m²,
  *   read on demand from upstream COPC files. Sparser and without colour, but
  *   covering the whole country.
  *
- * Both sources are read where available. Dense Stockholm points suppress
+ * Both routes are read where available. Dense imported points suppress
  * overlapping Skog points spatially, rather than suppressing a whole tile — a
- * city scan can end halfway through a z16 tile. Heights stay as survey levels
+ * local scan can end halfway through a z16 tile. Heights stay as survey levels
  * here; the 3D overlay aligns each survey to Mapterhorn terrain separately.
  */
 
@@ -34,21 +33,35 @@ const CLOUD_PADDING_M = 100;
 /** Resolution of the dense survey's spatial coverage mask. */
 const DENSE_PRIORITY_CELL_M = 1;
 
-/** Which survey a cloud's points came from. Both can appear at a tile border. */
-export type LidarSource = "Stockholm 2023" | "Laserdata Skog" | "both surveys";
+/** Which survey a cloud's points came from. Several can appear at a border. */
+export type LidarSurvey = "Stockholm 2023" | "Laserdata Skog" | "ICGC LiDAR Territorial 2021–2023";
+export type LidarSource = LidarSurvey | "multiple surveys";
 
-/** Points of a laser cloud in lon/lat plus RH2000 height, parallel arrays. */
+const SURVEY_ID: Record<LidarSurvey, number> = {
+  "Stockholm 2023": LIDAR_SOURCE_ID.STOCKHOLM_2023,
+  "Laserdata Skog": LIDAR_SOURCE_ID.LASERDATA_SKOG,
+  "ICGC LiDAR Territorial 2021–2023": LIDAR_SOURCE_ID.ICGC_TERRITORIAL,
+};
+
+/** Zero is the backward-compatible id of every pre-existing local tile. */
+function importedSurvey(raw: RawTile): LidarSurvey {
+  return raw.sourceId === LIDAR_SOURCE_ID.ICGC_TERRITORIAL
+    ? "ICGC LiDAR Territorial 2021–2023"
+    : "Stockholm 2023";
+}
+
+/** Points in lon/lat plus the source's orthometric height, parallel arrays. */
 export interface LidarCloud {
   count: number;
   lon: Float64Array;
   lat: Float64Array;
-  /** Height above the RH2000 zero level, meters. */
+  /** Published orthometric height, meters. */
   z: Float32Array;
   /** Orthophoto colour per point, as 0-1 RGB triples. */
   colours: Float32Array;
   /** LAS classification per point. */
   classes: Uint8Array;
-  /** 0 for Stockholm 2023, 1 for Laserdata Skog. */
+  /** Stable `LIDAR_SOURCE_ID` value for each point's survey. */
   surveys: Uint8Array;
   /**
    * Legacy flat-scene fallback: median nearby ground-return level, or the
@@ -57,7 +70,7 @@ export interface LidarCloud {
    */
   groundZ: number;
   /**
-   * Typical distance between neighbouring points, meters. The two sources
+   * Typical distance between neighbouring points, meters. The surveys
    * differ by a factor of four in spacing, so the 3D view sizes its dots from
    * this instead of a constant: dots the size of the spacing read as a surface,
    * while city-sized dots on national data read as a faint dusting.
@@ -117,7 +130,7 @@ export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | nu
   const classes: number[] = [];
   const surveys: number[] = [];
   const groundLevels: number[] = [];
-  const sources = new Set<LidarSource>();
+  const sources = new Set<LidarSurvey>();
   const denseCells = new Set<string>();
   let lowest = Infinity;
 
@@ -134,9 +147,10 @@ export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | nu
     return false;
   };
 
-  // Dense data is visited first so it can establish the spatial priority mask.
+  // Dense imported data is visited first so it can establish the spatial
+  // priority mask before the Swedish national fallback is considered.
   const ordered = [...tiles].sort(
-    (a, b) => Number(a.source !== "Stockholm 2023") - Number(b.source !== "Stockholm 2023"),
+    (a, b) => Number(a.source === "Laserdata Skog") - Number(b.source === "Laserdata Skog"),
   );
   for (const { tile, raw, source } of ordered) {
     const [tileWest, tileSouth, tileEast, tileNorth] = tileBounds(tile);
@@ -150,13 +164,13 @@ export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | nu
       const pointZ = raw.zBase + raw.z[i] / 100;
       const [cellX, cellY] = cellFor(pointLon, pointLat);
       if (source === "Laserdata Skog" && nearDensePoint(cellX, cellY)) continue;
-      if (source === "Stockholm 2023") denseCells.add(`${cellX}/${cellY}`);
+      if (source !== "Laserdata Skog") denseCells.add(`${cellX}/${cellY}`);
       lon.push(pointLon);
       lat.push(pointLat);
       height.push(pointZ);
       packed.push(raw.colour[i]);
       classes.push(raw.classes[i]);
-      surveys.push(source === "Stockholm 2023" ? 0 : 1);
+      surveys.push(SURVEY_ID[source]);
       sources.add(source);
       if (classOf(raw.classes[i]) === GROUND_CLASS) groundLevels.push(pointZ);
       if (pointZ < lowest) lowest = pointZ;
@@ -179,7 +193,7 @@ export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | nu
     surveys: Uint8Array.from(surveys),
     groundZ: groundLevels.length > 0 ? median(groundLevels) : lowest,
     spacing: Math.sqrt(area / count),
-    source: sources.size === 1 ? [...sources][0] : "both surveys",
+    source: sources.size === 1 ? [...sources][0] : "multiple surveys",
   };
 }
 
@@ -187,14 +201,14 @@ export function mergeTiles(tiles: LoadedTile[], bounds: Bounds): LidarCloud | nu
 export interface LoadedTile {
   tile: TileId;
   raw: RawTile;
-  source: LidarSource;
+  source: LidarSurvey;
 }
 
-/** Both surveys for a tile; overlap is resolved after decoding, not by tile. */
+/** Every applicable survey for a tile; overlap is resolved after decoding. */
 async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[]> {
   const routes = [
-    { route: "lidar", source: "Stockholm 2023" },
-    { route: "skog", source: "Laserdata Skog" },
+    { route: "lidar", source: null },
+    { route: "skog", source: "Laserdata Skog" as const },
   ] as const;
   const loaded = await Promise.all(
     routes.map(async ({ route, source }): Promise<LoadedTile | null> => {
@@ -204,7 +218,8 @@ async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[
         });
         if (!response.ok) return null;
         const raw = decodeTile(await response.arrayBuffer());
-        return raw && raw.count > 0 ? { tile, raw, source } : null;
+        if (!raw || raw.count === 0) return null;
+        return { tile, raw, source: source ?? importedSurvey(raw) };
       } catch {
         // Aborted or offline: treat as no data, like any tile without points.
         return null;
@@ -215,8 +230,8 @@ async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[
 }
 
 /**
- * Fetch the laser cloud around one building. Returns null where neither source
- * has points — outside Sweden, or when Skog is not configured.
+ * Fetch the laser cloud around one building. Returns null where no imported
+ * survey has points and the Swedish national source is unavailable.
  */
 export async function fetchLidarCloud(
   building: BuildingElement,

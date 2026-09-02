@@ -321,12 +321,15 @@ function median(values: number[]): number {
  * Survey-to-terrain offsets from ground returns. Mapterhorn remains the datum:
  * LiDAR is translated to it, never used to move the terrain or buildings.
  */
-const lidarBiasCache = new WeakMap<LidarCloud, WeakMap<TerrainModel, [number, number]>>();
+const lidarBiasCache = new WeakMap<LidarCloud, WeakMap<TerrainModel, number[]>>();
 
-function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): [number, number] {
+function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): number[] {
   const cached = lidarBiasCache.get(cloud)?.get(terrain);
   if (cached) return cached;
-  const residuals: [number[], number[]] = [[], []];
+  let highestSurvey = 0;
+  for (const survey of cloud.surveys) highestSurvey = Math.max(highestSurvey, survey);
+  const surveyCount = highestSurvey + 1;
+  const residuals = Array.from({ length: surveyCount }, () => [] as number[]);
   // A few thousand evenly distributed ground pairs are enough for a robust
   // median and keep sorting cost bounded on a dense million-point city tile.
   const step = Math.max(1, Math.floor(cloud.count / 20_000));
@@ -336,12 +339,9 @@ function lidarTerrainBiases(cloud: LidarCloud, terrain: TerrainModel): [number, 
     if (ground === null) continue;
     residuals[cloud.surveys[i]].push(cloud.z[i] - ground);
   }
-  const combined = [...residuals[0], ...residuals[1]];
+  const combined = residuals.flat();
   const fallback = combined.length > 0 ? median(combined) : 0;
-  const biases: [number, number] = [
-    residuals[0].length >= 3 ? median(residuals[0]) : fallback,
-    residuals[1].length >= 3 ? median(residuals[1]) : fallback,
-  ];
+  const biases = residuals.map((values) => (values.length >= 3 ? median(values) : fallback));
   let byTerrain = lidarBiasCache.get(cloud);
   if (!byTerrain) {
     byTerrain = new WeakMap();
@@ -447,7 +447,7 @@ function roofDistanceColour(distance: number): [number, number, number] {
 }
 
 interface PointCloudAlignment {
-  biases: readonly [number, number];
+  biases: readonly number[];
   datum: number;
   buildingGround: number;
 }
@@ -457,7 +457,7 @@ function pointCloudAlignment(
   selection: BuildingSelection,
   terrain: TerrainModel | null,
 ): PointCloudAlignment {
-  const biases = terrain ? lidarTerrainBiases(cloud, terrain) : ([0, 0] as const);
+  const biases = terrain ? lidarTerrainBiases(cloud, terrain) : [];
   const datum = terrain?.referenceZ ?? cloud.groundZ;
   return {
     biases,
@@ -474,8 +474,7 @@ function pointCloudAlignment(
  * where a point is.
  */
 function alignedHeight(cloud: LidarCloud, index: number, alignment: PointCloudAlignment): number {
-  const survey = cloud.surveys[index] === 0 ? 0 : 1;
-  return cloud.z[index] - alignment.biases[survey] - alignment.datum;
+  return cloud.z[index] - (alignment.biases[cloud.surveys[index]] ?? 0) - alignment.datum;
 }
 
 /** The lon/lat of one cloud point. */
@@ -729,8 +728,7 @@ export function buildPointCloud(
     const point: LngLat = [cloud.lon[i], cloud.lat[i]];
     const [x, y] = projector.toLocal(point);
     positions[i * 3] = x;
-    const survey = cloud.surveys[i] === 0 ? 0 : 1;
-    const pointHeight = cloud.z[i] - alignment.biases[survey] - alignment.datum;
+    const pointHeight = cloud.z[i] - (alignment.biases[cloud.surveys[i]] ?? 0) - alignment.datum;
     positions[i * 3 + 1] = pointHeight;
     // Three's local axes are east (+X), up (+Y), south (+Z), so north is -Z.
     positions[i * 3 + 2] = -y;
