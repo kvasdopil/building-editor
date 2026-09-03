@@ -231,9 +231,14 @@ function extrudeBuildingWithParts(
   colorFor: (element: BuildingElement, index: number) => number,
   edgeOpacity: number,
   groundOffset: number,
-): { group: THREE.Group; elements: Map<string, THREE.Object3D> } {
+): {
+  group: THREE.Group;
+  elements: Map<string, THREE.Object3D>;
+  pickTargets: THREE.Object3D[];
+} {
   const group = new THREE.Group();
   const objects = new Map<string, THREE.Object3D>();
+  const pickTargets: THREE.Object3D[] = [];
   // One level height for the whole building, so its parts stack on each other.
   const metersPerLevel = levelHeight(building.properties);
   const covered = partsCoverage(building, parts) >= OUTLINE_REPLACED_ABOVE;
@@ -249,7 +254,9 @@ function extrudeBuildingWithParts(
       edgeOpacity,
       groundOffset,
     );
+    object.userData.entityId = element.id;
     objects.set(element.id, object);
+    pickTargets.push(object);
     group.add(object);
   });
   const hasSharedParts = parts.some((part) => {
@@ -265,9 +272,13 @@ function extrudeBuildingWithParts(
       edgeOpacity,
       groundOffset,
     );
-    if (roof) group.add(roof);
+    if (roof) {
+      roof.userData.entityId = building.id;
+      pickTargets.push(roof);
+      group.add(roof);
+    }
   }
-  return { group, elements: objects };
+  return { group, elements: objects, pickTargets };
 }
 
 function footprintCenter(element: BuildingElement): LngLat {
@@ -290,6 +301,8 @@ interface BuildingScene {
   focus: THREE.Box3;
   /** Existing scene objects that can become camera focus without re-extruding. */
   focusTargets: Map<string, THREE.Object3D>;
+  /** Visible building and part objects that the 3D viewer can raycast. */
+  pickTargets: THREE.Object3D[];
   /** Lon/lat the local metric frame is centered on, for anything added later. */
   origin: LngLat;
 }
@@ -822,6 +835,7 @@ export function buildScene(
     groundOffset(selection.building),
   );
   root.add(selected.group);
+  const pickTargets = [...selected.pickTargets];
   const focusTarget =
     selection.selected.id === selection.building.id
       ? selected.group
@@ -831,20 +845,20 @@ export function buildScene(
   focusTargets.set(selection.building.id, selected.group);
 
   for (const neighbor of selection.neighbors) {
-    root.add(
-      extrudeBuildingWithParts(
-        neighbor,
-        projector,
-        () => NEIGHBOR_COLOR,
-        0.18,
-        groundOffset(neighbor.building),
-      ).group,
+    const context = extrudeBuildingWithParts(
+      neighbor,
+      projector,
+      () => NEIGHBOR_COLOR,
+      0.18,
+      groundOffset(neighbor.building),
     );
+    root.add(context.group);
+    pickTargets.push(...context.pickTargets);
   }
 
   if (terrain) {
     root.add(buildTerrainSurface(terrain, projector));
-    return { root, focus, focusTargets, origin };
+    return { root, focus, focusTargets, pickTargets, origin };
   }
 
   // Ground spans the half-diagonal of everything drawn, so no building
@@ -866,5 +880,5 @@ export function buildScene(
   grid.position.set(center.x, -0.04, center.z);
   root.add(grid);
 
-  return { root, focus, focusTargets, origin };
+  return { root, focus, focusTargets, pickTargets, origin };
 }

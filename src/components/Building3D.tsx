@@ -118,6 +118,7 @@ function pointCloudProfileChanged(previous: BuildingSelection, next: BuildingSel
 export function Building3D({
   selection,
   initialHeading = 315,
+  onSelectEntity,
   onCameraChange,
   onCloudStatus,
   onCloudChange,
@@ -128,6 +129,8 @@ export function Building3D({
   selection: BuildingSelection;
   /** Initial compass direction, copied from the map when selection changes. */
   initialHeading?: number;
+  /** Select a visible building or part by clicking its extrusion. */
+  onSelectEntity?: (entityId: string) => void;
   onCameraChange?: (view: CameraView) => void;
   onCloudStatus?: (status: CloudStatus) => void;
   /** Shares the decoded cloud with the map's XY-only LiDAR mode. */
@@ -149,8 +152,10 @@ export function Building3D({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hippedRoofsReady, setHippedRoofsReady] = useState(false);
   const selectionRef = useRef(selection);
+  const onSelectEntityRef = useRef(onSelectEntity);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   selectionRef.current = selection;
+  onSelectEntityRef.current = onSelectEntity;
   // Decoded laser cloud for the building on screen. Kept in a ref, not state,
   // so it arriving never re-renders — the scene is built once and the dots are
   // added to it — and so a camera-only rebuild reuses it instead of refetching.
@@ -456,6 +461,63 @@ export function Building3D({
     controls.update();
     reportCamera();
 
+    const pointer = new THREE.Vector2();
+    const raycaster = new THREE.Raycaster();
+    let pointerDown: { id: number; x: number; y: number } | null = null;
+
+    const entityAt = (event: PointerEvent): string | null => {
+      const rect = canvas.renderer.domElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObjects(built.pickTargets, true)[0];
+      let object: THREE.Object3D | null = hit?.object ?? null;
+      while (object) {
+        const entityId = object.userData.entityId;
+        if (typeof entityId === "string") return entityId;
+        object = object.parent;
+      }
+      return null;
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      pointerDown = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!event.isPrimary || event.buttons !== 0) return;
+      canvas.renderer.domElement.style.cursor = entityAt(event) ? "pointer" : "";
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const start = pointerDown;
+      pointerDown = null;
+      canvas.renderer.domElement.style.cursor = entityAt(event) ? "pointer" : "";
+      if (!start || start.id !== event.pointerId || event.button !== 0) return;
+      // OrbitControls uses the same primary-pointer gesture. Only a stationary
+      // press is a pick; even a small intentional orbit must not change entity.
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) return;
+      const entityId = entityAt(event);
+      if (entityId && entityId !== activeSelection.selected.id) {
+        onSelectEntityRef.current?.(entityId);
+      }
+    };
+    const onPointerCancel = () => {
+      pointerDown = null;
+      canvas.renderer.domElement.style.cursor = "";
+    };
+    const onPointerLeave = (event: PointerEvent) => {
+      if (event.buttons === 0) canvas.renderer.domElement.style.cursor = "";
+    };
+    const element = canvas.renderer.domElement;
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointermove", onPointerMove);
+    element.addEventListener("pointerup", onPointerUp);
+    element.addEventListener("pointercancel", onPointerCancel);
+    element.addEventListener("pointerleave", onPointerLeave);
+
     canvas.start(() => {
       // Pointer drags may publish several tag states before the browser paints.
       // Render only the newest state, while still providing a live preview.
@@ -474,6 +536,11 @@ export function Building3D({
       if (runtimeRef.current === runtime) runtimeRef.current = null;
       controls.removeEventListener("change", reportCamera);
       controls.dispose();
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointermove", onPointerMove);
+      element.removeEventListener("pointerup", onPointerUp);
+      element.removeEventListener("pointercancel", onPointerCancel);
+      element.removeEventListener("pointerleave", onPointerLeave);
       canvas.dispose();
       disposeRoot(built.root);
       if (cloudPoints) disposeRoot(cloudPoints);

@@ -83,6 +83,12 @@ building/part header or panel-level close/revert toolbar: the first inspector ro
 feature id. For a part, the `building:part` row includes a parent control which switches selection
 to its loaded building outline without another network request.
 
+Every visible building and part extrusion is also a selection target in the local 3D view, including
+gray context buildings. A primary click or tap selects the hit entity through the same loaded-feature
+selection path as the map, so its parent, siblings, neighbors, highlight, inspector, and URL all update
+together. Pointer movement beyond the click tolerance belongs to OrbitControls and never changes the
+selection; clicking terrain or empty space leaves the current selection intact.
+
 Selection assembly is cached per immutable displayed-feature snapshot. The snapshot is parsed once,
 parent and sibling associations are lazy, and building parts are associated only after bounding-box
 and distance filtering has reduced 3D context to the nearest eligible buildings. Switching between

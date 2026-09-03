@@ -404,6 +404,7 @@ export function BuildingPanel({
             <Building3D
               selection={edited}
               initialHeading={initialHeading}
+              onSelectEntity={onSelectEntity}
               onCameraChange={setCamera}
               onCloudStatus={setCloudStatus}
               onCloudChange={handleCloud}
