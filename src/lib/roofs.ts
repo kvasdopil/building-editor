@@ -1,6 +1,7 @@
 import Flatten from "@flatten-js/core";
 import { ShapeUtils, Vector2 } from "three";
-import type { BuildingElement, BuildingProperties } from "./buildings";
+import type { BuildingElement, BuildingProperties, Footprint, LngLat } from "./buildings";
+import { boundsCenter, elementBounds, openRing } from "./geometry";
 import { verticalExtent } from "./heights";
 
 export type Point2 = [number, number];
@@ -792,6 +793,76 @@ function flattenFootprints(footprints: RoofFootprint[]): Flatten.Polygon {
     }
   }
   return polygon;
+}
+
+/**
+ * Lowest rendered roof height over a supporting overlap. A tower's flat base
+ * must reach the low side of the roof, not float at its ridge. Clip the actual
+ * roof triangles: sampling just footprint corners misses valleys and profile
+ * breaks, while rebuilding a roof on the overlap would move its ridge/centre.
+ */
+export function minimumRoofHeight(
+  element: BuildingElement,
+  parent: BuildingElement,
+  overlap: Footprint[],
+  metersPerLevel: number,
+): number {
+  const extent = verticalExtent(element.properties, metersPerLevel, parent.properties);
+  const resolved = resolvedRoofPlan(element, parent, metersPerLevel);
+  if (!resolved) return extent.top;
+  const origin = boundsCenter(elementBounds(parent));
+  const cosLat = Math.cos((origin[1] * Math.PI) / 180);
+  const project = ([lon, lat]: LngLat): Point2 => [
+    (lon - origin[0]) * 111320 * cosLat,
+    (origin[1] - lat) * 111320,
+  ];
+  const footprints = (polygons: Footprint[]): RoofFootprint[] =>
+    polygons.map(({ outer, holes }) => ({
+      outer: openRing(outer).map(project),
+      holes: holes.map((hole) => openRing(hole).map(project)),
+    }));
+
+  try {
+    const surface = roofSurface(
+      resolved.plan,
+      footprints(element.polygons),
+      footprints(resolved.frameElement.polygons),
+    );
+    // The renderer keeps the facade when roof construction fails.
+    if (!surface) return resolved.plan.eaves;
+    const region = flattenFootprints(footprints(overlap));
+    const { positions, indices } = surface;
+    const count = indices?.length ?? positions.length / 3;
+    let minimum = Infinity;
+    for (let i = 0; i < count; i += 3) {
+      const a = (indices ? indices[i] : i) * 3;
+      const b = (indices ? indices[i + 1] : i + 1) * 3;
+      const c = (indices ? indices[i + 2] : i + 2) * 3;
+      const start: Point2 = [positions[a], positions[a + 2]];
+      const ab: Point2 = [positions[b] - start[0], positions[b + 2] - start[1]];
+      const ac: Point2 = [positions[c] - start[0], positions[c + 2] - start[1]];
+      const determinant = cross2(ab, ac);
+      if (Math.abs(determinant) < 1e-9) continue;
+      const triangle = new Flatten.Polygon(
+        oriented([start, [positions[b], positions[b + 2]], [positions[c], positions[c + 2]]], true),
+      );
+      const clipped = Flatten.BooleanOperations.intersect(region, triangle);
+      for (const vertex of clipped.vertices) {
+        const offset: Point2 = [vertex.x - start[0], vertex.y - start[1]];
+        const height =
+          positions[a + 1] +
+          (cross2(offset, ac) / determinant) * (positions[b + 1] - positions[a + 1]) +
+          (cross2(ab, offset) / determinant) * (positions[c + 1] - positions[a + 1]);
+        minimum = Math.min(minimum, height);
+      }
+    }
+    return Number.isFinite(minimum)
+      ? Math.max(resolved.plan.eaves, Math.min(extent.top, minimum))
+      : extent.top;
+  } catch {
+    // A failed intersection must not invent a lower support height.
+    return extent.top;
+  }
 }
 
 function pointAt(frame: RoofFrame, along: number, across: number): Point2 {

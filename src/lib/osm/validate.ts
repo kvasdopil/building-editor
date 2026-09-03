@@ -13,10 +13,12 @@ import {
   openRing,
   padBounds,
   ringCenter,
+  toFootprints,
 } from "../geometry";
 import { localBacktrackRepair, ringIntersections, ringIsSimple } from "../geometry-edits";
 import { levelHeight, verticalExtent } from "../heights";
 import { overlapFraction } from "../parts";
+import { minimumRoofHeight } from "../roofs";
 import {
   type ChangesetPlan,
   changesetSize,
@@ -660,12 +662,16 @@ function checkBuilding(
         `${parts[i].id} and ${parts[j].id} share ${sharedArea.toFixed(1)} m² between ${overlapBase.toFixed(1)} m and ${overlapTop.toFixed(1)} m, so their 3D volumes overlap.`,
         [parts[i].id, parts[j].id],
       );
-      if (canStack) {
+      const supportHeight =
+        canStack && shared
+          ? minimumRoofHeight(lower.part, building, toFootprints(shared.geometry), metersPerLevel)
+          : lower.extent.top;
+      if (canStack && higher.extent.base < supportHeight - 0.01) {
         finding.fix = {
           kind: "set-tag",
           entity: higher.part.id,
           key: "min_height",
-          value: String(Number(lower.extent.top.toFixed(6))),
+          value: String(Number(supportHeight.toFixed(6))),
         };
       }
       issues.push(finding);
