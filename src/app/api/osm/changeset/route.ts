@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
+import { track } from "@vercel/analytics/server";
 import { readJsonBody } from "@/lib/json-request";
 import { changesetTags, type ChangesetPlan } from "@/lib/osm/changeset";
-import { readSession } from "@/lib/osm/oauth";
+import { isProductionHost, OAUTH_BASE, readSession } from "@/lib/osm/oauth";
 import { UploadError, uploadChangeset } from "@/lib/osm/upload";
 
 /**
@@ -31,20 +32,37 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "A changeset needs a comment" }, { status: 400 });
   }
 
+  const analytics = {
+    target: isProductionHost(new URL(OAUTH_BASE).host) ? "production" : "development",
+    elements: plan.nodes.length + plan.ways.length + plan.relations.length,
+  };
+
   try {
+    await track("OSM Submission Attempted", analytics, { request }).catch(() => undefined);
     const result = await uploadChangeset({
       accessToken: session.accessToken,
       plan,
       tags: changesetTags({ comment, source }),
     });
+    await track("OSM Submission Succeeded", analytics, { request }).catch(() => undefined);
     return NextResponse.json(result, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     if (error instanceof UploadError) {
+      await track(
+        "OSM Submission Failed",
+        { ...analytics, kind: error.kind, status: error.status },
+        { request },
+      ).catch(() => undefined);
       return NextResponse.json(
         { error: error.message, kind: error.kind },
         { status: error.status },
       );
     }
+    await track(
+      "OSM Submission Failed",
+      { ...analytics, kind: "unknown", status: 502 },
+      { request },
+    ).catch(() => undefined);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Upload failed" },
       { status: 502 },

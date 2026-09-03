@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -18,6 +19,7 @@ import { LOD1_ENABLED } from "@/lib/features";
 import { boundsCenter, boundsRadiusMeters, elementBounds } from "@/lib/geometry";
 import { type Lod1Match, type Suggestion, suggestionsFor } from "@/lib/lod1";
 import type { LidarCloud } from "@/lib/lidar";
+import { trackProductEvent } from "@/lib/product-analytics";
 import { roofAdviceFor } from "@/lib/roof-advice";
 import { roofDirectionFromLook } from "@/lib/roofs";
 import { buildSurfaceGrid } from "@/lib/surface-grid";
@@ -44,6 +46,14 @@ function storedViewerHeight(): number {
   } catch {
     return DEFAULT_VIEWER_HEIGHT_PERCENT;
   }
+}
+
+function pointCountBucket(points = 0): string {
+  if (points === 0) return "0";
+  if (points < 10_000) return "1-9k";
+  if (points < 100_000) return "10-99k";
+  if (points < 500_000) return "100-499k";
+  return "500k+";
 }
 
 function tagValue(value: unknown): string {
@@ -105,6 +115,7 @@ export function BuildingPanel({
   const [viewerHeight, setViewerHeight] = useState(storedViewerHeight);
   const [resizing, setResizing] = useState(false);
   const [resizingWidth, setResizingWidth] = useState(false);
+  const reportedCloudsRef = useRef(new Set<string>());
   const splitRef = useRef<HTMLDivElement>(null);
   const resizePointer = useRef<number | null>(null);
   const widthResizePointer = useRef<number | null>(null);
@@ -122,6 +133,17 @@ export function BuildingPanel({
   const selectedTerrainStatus =
     terrainStatus?.buildingId === selection?.building.id ? terrainStatus : null;
   const edit = edits.edits[selectedId];
+
+  useEffect(() => {
+    if (!cloudStatus || cloudStatus.state === "loading") return;
+    if (reportedCloudsRef.current.has(cloudStatus.buildingId)) return;
+    reportedCloudsRef.current.add(cloudStatus.buildingId);
+    trackProductEvent("LiDAR Query Completed", {
+      result: cloudStatus.state,
+      source: cloudStatus.source ?? "none",
+      points: pointCountBucket(cloudStatus.points),
+    });
+  }, [cloudStatus]);
 
   // Project every pending override into the scene so both the selected subject
   // and gray context buildings render from their effective properties.

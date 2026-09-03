@@ -82,6 +82,7 @@ import type { IssueFix } from "@/lib/osm/issues";
 import { coordinateKey, METERS_PER_DEG_LAT, roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
 import { PART_ROOF_KEYS } from "@/lib/part-tags";
+import { trackProductEvent } from "@/lib/product-analytics";
 import {
   edgeNormalRoofDirection,
   isCompassRoofDirection,
@@ -1494,6 +1495,27 @@ export function MapView() {
   }, 0);
   const changeCount =
     distinctTagEditCount + Object.keys(geometryEdits).length + createdPartChangeCount;
+  const reportedEditorStartRef = useRef(false);
+  const reportedChangesRef = useRef(false);
+  const reportedUnderlaysRef = useRef(new Set<MapUnderlay>());
+
+  useEffect(() => {
+    if (!selectionBuildingId || reportedEditorStartRef.current) return;
+    reportedEditorStartRef.current = true;
+    trackProductEvent("Building Selected");
+  }, [selectionBuildingId]);
+
+  useEffect(() => {
+    if (changeCount === 0 || reportedChangesRef.current) return;
+    reportedChangesRef.current = true;
+    trackProductEvent("Changes Present");
+  }, [changeCount]);
+
+  useEffect(() => {
+    if (mapUnderlay === "map" || reportedUnderlaysRef.current.has(mapUnderlay)) return;
+    reportedUnderlaysRef.current.add(mapUnderlay);
+    trackProductEvent(mapUnderlay === "photos" ? "Photos View Opened" : "LiDAR View Opened");
+  }, [mapUnderlay]);
   /**
    * What a changeset would be built from. This has to follow the tiles, not only
    * the edits: reading raw data from the ref meant the changeset was assembled
@@ -4348,6 +4370,7 @@ export function MapView() {
         onRevertAll={revertAllChanges}
         onSubmit={() => {
           setValidationLocation(null);
+          trackProductEvent("Submission Review Opened", { changes: changeCount });
           setSubmitOpen(true);
         }}
       />

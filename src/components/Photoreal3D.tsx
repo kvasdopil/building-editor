@@ -8,6 +8,7 @@ import { FiChevronDown, FiChevronRight } from "react-icons/fi";
 import type { CameraView } from "./Building3D";
 import type { LngLat } from "@/lib/buildings";
 import { placeEcefCamera } from "@/lib/ecef-camera";
+import { trackProductEvent } from "@/lib/product-analytics";
 import { mountCanvas } from "@/lib/three-canvas";
 
 /**
@@ -28,6 +29,14 @@ const HAS_TILE_SOURCE = Boolean(CESIUM_TOKEN);
 const OPEN_STORAGE_KEY = "building-explorer:google-3d-open";
 /** Keeps remounts during selection changes from flashing the panel closed. */
 let rememberedOpen: boolean | null = null;
+/** One event per page visit, even when selection changes remount this section. */
+let reportedOpen = false;
+
+function reportOpen(): void {
+  if (reportedOpen) return;
+  reportedOpen = true;
+  trackProductEvent("Google 3D Preview Opened", { available: HAS_TILE_SOURCE });
+}
 
 const DEG = Math.PI / 180;
 
@@ -175,7 +184,10 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
     }
     rememberedOpen = restored;
     setOpen(restored);
-    if (restored) setMounted(true);
+    if (restored) {
+      setMounted(true);
+      reportOpen();
+    }
   }, []);
 
   useEffect(() => {
@@ -275,6 +287,7 @@ export function Photoreal3D({ center, camera: view, radius }: Viewpoint) {
           rememberedOpen = next;
           setOpen(next);
           setMounted(true);
+          if (next) reportOpen();
           try {
             window.localStorage.setItem(OPEN_STORAGE_KEY, String(next));
           } catch {
