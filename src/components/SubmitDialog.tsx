@@ -31,7 +31,6 @@ import { type OsmAuth, useOsmAuth } from "@/lib/osm/use-osm-auth";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { useEscapeKey } from "@/lib/use-escape-key";
 import type { FeatureCollection } from "geojson";
-import { LOD1_ENABLED } from "@/lib/features";
 
 /**
  * Review step between the pending changes and an upload: what would be written,
@@ -43,13 +42,11 @@ import { LOD1_ENABLED } from "@/lib/features";
  */
 
 /**
- * The datasets this build can derive heights from. Production excludes
- * Stockholm LOD1 until its reuse terms are explicit, so it is omitted there.
- * The field stays editable, and typing over it sticks.
+ * The licensed national laser dataset this editor derives heights from. LOD1
+ * is never claimed by default, including in development. The field stays
+ * editable, and typing over it sticks.
  */
-const DEFAULT_SOURCE = LOD1_ENABLED
-  ? "Lantmateriet Laserdata, skog; Stockholm LOD1"
-  : "Lantmateriet Laserdata, skog";
+const DEFAULT_SOURCE = "Lantmateriet Laserdata, skog";
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -645,11 +642,7 @@ export function SubmitDialog({
                 id="changeset-source"
                 value={source}
                 onChange={(event) => setSource(event.target.value)}
-                placeholder={
-                  LOD1_ENABLED
-                    ? "e.g. Stockholm LOD1; Esri World Imagery"
-                    : "e.g. Lantmateriet Laserdata, skog"
-                }
+                placeholder="e.g. Lantmateriet Laserdata, skog"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-violet-500 focus:outline-none"
               />
             </section>

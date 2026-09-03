@@ -1,4 +1,7 @@
-# Building Explorer
+# Building Editor
+
+Separate buildings into parts, set heights and roofs, preview them in 3D, and submit changes to
+OpenStreetMap.
 
 Browse a map, click a building or one of its parts, inspect it in 3D.
 

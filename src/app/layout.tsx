@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Building Explorer",
+  title: "Building Editor",
   description:
-    "Browse OpenStreetMap, click a building, inspect it in 3D. Building data by Overture Maps.",
+    "Separate buildings into parts, set heights and roofs, preview them in 3D, and submit changes to OpenStreetMap.",
 };
 
 export default function RootLayout({

@@ -38,9 +38,9 @@ because a local file was _not_ uploaded is not configured — state it in the ho
 
 Stockholm LOD1 is development-only until its metadata states explicit redistribution and
 OSM-compatible reuse terms. `NODE_ENV=production` removes the toggle and advice, prevents all client
-requests, makes `/api/lod1/tile/...` return 404, and removes LOD1 from the default changeset source.
-`/data/lod1/` is also in `.vercelignore`, so a CLI deployment cannot accidentally upload a local
-import even though the directory is already gitignored.
+requests, and makes `/api/lod1/tile/...` return 404. No build includes LOD1 in the default changeset
+source. `/data/lod1/` is also in `.vercelignore`, so a CLI deployment cannot accidentally upload a
+local import even though the directory is already gitignored.
 
 ## The filesystem is not storage
 

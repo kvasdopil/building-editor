@@ -13,9 +13,8 @@ Related documents:
 
 - The dataset is "SBK 3D-Byggnader (LOD1) generaliserade" from Stockholm's data portal, imported to local z16 tiles by `scripts/import-lod1.mjs` and served from disk.
 - LOD1 is enabled only in development. Production builds omit its controls and advice, never request
-  it, return 404 from its tile route, exclude `data/lod1` from deployment, and omit it from the
-  default OSM changeset source until the city states explicit redistribution and OSM-compatible
-  reuse terms.
+  it, return 404 from its tile route, and exclude `data/lod1` from deployment. No build includes it
+  in the default OSM changeset source until the city states explicit OSM-compatible reuse terms.
 - It produces **suggestions attached to individual buildings**. Every value is applied by an explicit press, is highlighted afterwards, and is revertable. There is no bulk apply and no automated upload.
 - Match quality is measured in both directions and shown. Advice from a LOD1 block that spans several OSM buildings is marked unreliable rather than hidden.
 
