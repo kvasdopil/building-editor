@@ -34,6 +34,14 @@ directory as deployment source, so an untracked `.env` reached the build and Nex
 `.env` and `.env.*` therefore belong in `.vercelignore` as well. A configuration that is only correct
 because a local file was _not_ uploaded is not configured — state it in the hosted environment.
 
+## LOD1 is excluded from production
+
+Stockholm LOD1 is development-only until its metadata states explicit redistribution and
+OSM-compatible reuse terms. `NODE_ENV=production` removes the toggle and advice, prevents all client
+requests, makes `/api/lod1/tile/...` return 404, and removes LOD1 from the default changeset source.
+`/data/lod1/` is also in `.vercelignore`, so a CLI deployment cannot accidentally upload a local
+import even though the directory is already gitignored.
+
 ## The filesystem is not storage
 
 The deployed project directory is not persistently writable, and instances are ephemeral and

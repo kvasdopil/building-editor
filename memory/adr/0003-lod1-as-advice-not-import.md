@@ -12,12 +12,19 @@ Related documents:
 ## Decision
 
 - The dataset is "SBK 3D-Byggnader (LOD1) generaliserade" from Stockholm's data portal, imported to local z16 tiles by `scripts/import-lod1.mjs` and served from disk.
+- LOD1 is enabled only in development. Production builds omit its controls and advice, never request
+  it, return 404 from its tile route, exclude `data/lod1` from deployment, and omit it from the
+  default OSM changeset source until the city states explicit redistribution and OSM-compatible
+  reuse terms.
 - It produces **suggestions attached to individual buildings**. Every value is applied by an explicit press, is highlighted afterwards, and is revertable. There is no bulk apply and no automated upload.
 - Match quality is measured in both directions and shown. Advice from a LOD1 block that spans several OSM buildings is marked unreliable rather than hidden.
 
 ## Why
 
 - Height data is what OSM most lacks here, and this dataset is authoritative: laser-measured ground, eaves, roof-median and ridge levels, from the city itself.
+- The city describes the dataset as open geodata, but its metadata names no license and records no
+  reuse terms. Public availability alone does not establish permission to redistribute transformed
+  tiles or incorporate derived values into OSM under ODbL.
 - Mechanically importing third-party geometry or attributes into OSM is contentious and often unwelcome; a per-building suggestion that a mapper checks against the 3D view keeps a human in the loop, which is also what the OSM import guidelines expect.
 - Generalized footprints mean a block can cover a terrace. Silently attributing a block's ridge height to one house in that terrace would inject plausible but wrong data, so the mismatch is surfaced instead.
 

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
+import { LOD1_ENABLED } from "@/lib/features";
 import { localTilePath } from "@/lib/local-data";
 import { tileRoute } from "@/lib/tile-route";
 
@@ -11,7 +12,7 @@ import { tileRoute } from "@/lib/tile-route";
 
 const EMPTY = { type: "FeatureCollection", features: [] } as const;
 
-export const GET = tileRoute(async (tile) => {
+const serveTile = tileRoute(async (tile) => {
   const file = localTilePath("lod1", tile, ".json");
   try {
     const body = await readFile(file, "utf8");
@@ -27,3 +28,11 @@ export const GET = tileRoute(async (tile) => {
     return NextResponse.json(EMPTY, { headers: { "x-lod1": "empty" } });
   }
 });
+
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ z: string; x: string; y: string }> },
+): Promise<Response> {
+  if (!LOD1_ENABLED) return new NextResponse(null, { status: 404 });
+  return serveTile(request, context);
+}

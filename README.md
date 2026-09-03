@@ -57,6 +57,10 @@ Measured on the Stockholm test area: 10 simultaneous requests for one tile produ
 
 Stockholm's **"SBK 3D-Byggnader (LOD1) generaliserade"** (from [the city's data portal](https://dataportalen.stockholm.se/dataportalen/GetMetaDataById?id=88d3b57c-a914-4922-97a6-a9a76b1e0175)) gives per-building ground, eaves, roof-median and ridge levels measured from airborne laser data. Import it into z16 tiles:
 
+LOD1 is a **local-development reference only**. Production builds do not fetch or display it, its
+tile route returns 404, and `data/lod1` is excluded from Vercel uploads until the city's metadata
+states explicit redistribution and OSM-compatible reuse terms.
+
 ```bash
 node scripts/import-lod1.mjs
 ```

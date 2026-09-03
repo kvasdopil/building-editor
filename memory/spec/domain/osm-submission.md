@@ -349,9 +349,10 @@ loaded.
 
 The submit dialog is the whole contract with the user before anything leaves the browser:
 
-- a changeset comment, defaulted from the plan itself, and an optional `source` that starts as
-  `Lantmateriet Laserdata, skog; Stockholm LOD1` — the two height datasets this editor works from —
-  and is editable, with an empty field leaving the tag out entirely;
+- a changeset comment, defaulted from the plan itself, and an optional editable `source`. Development
+  starts it as `Lantmateriet Laserdata, skog; Stockholm LOD1`; production, where LOD1 is disabled
+  pending explicit reuse terms, starts it as `Lantmateriet Laserdata, skog`. An empty field leaves
+  the tag out entirely;
 - every error and warning, each linking to the elements it is about;
 - per-element rows: action, target, version, tag diffs, how many nodes were reused versus created, which elements a node is now shared with, and every structural consequence in words (the multipolygon conversion, the nodes inserted into a wall);
 - the exact `osmChange` document, copyable and downloadable as `.osc` so the same edit can be opened and validated in JOSM.

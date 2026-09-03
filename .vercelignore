@@ -1,3 +1,5 @@
 .env
 .env.*
 
+# Local-only reference data; production code also rejects its tile route.
+/data/lod1/

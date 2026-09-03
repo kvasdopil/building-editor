@@ -14,6 +14,7 @@ import { Photoreal3D } from "./Photoreal3D";
 import { EDITABLE_DIMENSION_KEYS, OPTIONAL_ROOF_KEYS, type TagRow, TagRows } from "./TagRows";
 import type { BuildingProperties, BuildingSelection } from "@/lib/buildings";
 import { applyEditsToSelection, type EditsApi } from "@/lib/edits";
+import { LOD1_ENABLED } from "@/lib/features";
 import { boundsCenter, boundsRadiusMeters, elementBounds } from "@/lib/geometry";
 import { type Lod1Match, type Suggestion, suggestionsFor } from "@/lib/lod1";
 import type { LidarCloud } from "@/lib/lidar";
@@ -426,47 +427,54 @@ export function BuildingPanel({
               </dd>
             </div>
           </dl>
-          <p className="border-b border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
-            {selectedIsPart ? (
-              "LOD1 covers building outlines only — this part is measured from the laser"
-            ) : match ? (
-              <>
-                LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
-                {match.properties.category ? ` · ${match.properties.category}` : ""}
-                {!match.confident && (
-                  <span className="text-amber-700">
-                    {" "}
-                    · block is {(1 / Math.max(match.blockShare, 0.01)).toFixed(1)}× larger, so its
-                    heights cover several buildings — advice is unreliable
-                  </span>
-                )}
-              </>
-            ) : (
-              "No LOD1 building matches this footprint"
-            )}
-            {laserStatus && <span className="text-slate-400"> · {laserStatus}</span>}
-            {selectedTerrainStatus && (
-              <span className="text-slate-400">
-                {" "}
-                · terrain:{" "}
-                {selectedTerrainStatus.state === "loading"
-                  ? "reading…"
-                  : selectedTerrainStatus.state === "empty"
-                    ? "unavailable"
-                    : `${selectedTerrainStatus.groundZ?.toFixed(1)} m ground · `}
-                {selectedTerrainStatus.state === "loaded" && (
-                  <a
-                    href="https://mapterhorn.com/attribution/"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline hover:text-slate-600"
-                  >
-                    Mapterhorn z13
-                  </a>
-                )}
-              </span>
-            )}
-          </p>
+          {(LOD1_ENABLED || laserStatus || selectedTerrainStatus) && (
+            <p className="border-b border-slate-200 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
+              {LOD1_ENABLED &&
+                (selectedIsPart ? (
+                  "LOD1 covers building outlines only — this part is measured from the laser"
+                ) : match ? (
+                  <>
+                    LOD1 covers {Math.round(match.coverage * 100)}% of this footprint
+                    {match.properties.category ? ` · ${match.properties.category}` : ""}
+                    {!match.confident && (
+                      <span className="text-amber-700">
+                        {" "}
+                        · block is {(1 / Math.max(match.blockShare, 0.01)).toFixed(1)}× larger, so
+                        its heights cover several buildings — advice is unreliable
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  "No LOD1 building matches this footprint"
+                ))}
+              {laserStatus && (
+                <span className="text-slate-400">
+                  {LOD1_ENABLED ? " · " : ""}
+                  {laserStatus}
+                </span>
+              )}
+              {selectedTerrainStatus && (
+                <span className="text-slate-400">
+                  {LOD1_ENABLED || laserStatus ? " · terrain: " : "terrain: "}
+                  {selectedTerrainStatus.state === "loading"
+                    ? "reading…"
+                    : selectedTerrainStatus.state === "empty"
+                      ? "unavailable"
+                      : `${selectedTerrainStatus.groundZ?.toFixed(1)} m ground · `}
+                  {selectedTerrainStatus.state === "loaded" && (
+                    <a
+                      href="https://mapterhorn.com/attribution/"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline hover:text-slate-600"
+                    >
+                      Mapterhorn z13
+                    </a>
+                  )}
+                </span>
+              )}
+            </p>
+          )}
 
           <TagRows
             rows={rows}

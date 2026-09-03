@@ -289,6 +289,9 @@ that crosses back through the building is rejected without changing any pending 
 
 ## LOD1 advice and local edits
 
+This section describes the development build. Production builds disable LOD1 completely: they do
+not fetch it, render its outline, show its toggle or advice, or serve its tile data.
+
 Stockholm LOD1 (see ADR 0003) is matched to the selected building by greatest area overlap,
 requiring at least 40% of the OSM footprint to be covered. Coverage is computed **both ways**:
 when the OSM building accounts for less than half the LOD1 block, the block is generalized over
@@ -864,11 +867,11 @@ The map has two zoom-dependent states (see [ADR 0001](../../adr/0001-live-osm-da
 - **Normal basemap** — geographic context below z15.5, without a separate building overlay or edit targets.
 - **Live OSM API** — everything editable, at map zoom z >= 15.5, using fixed-grid z16 tiles and always through the cached proxy required by [ADR 0002](../../adr/0002-cached-rate-limited-osm-proxy.md).
 
-Local reference datasets sit beside them, imported to the same z16 grid and served from disk:
-Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)), the 2023 Stockholm
+Local development reference datasets sit beside them, imported to the same z16 grid and served from
+disk: Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)), the 2023 Stockholm
 laser point cloud ([ADR 0004](../../adr/0004-laser-point-cloud-as-raw-evidence.md)), and bounded
 imports from ICGC LiDAR Territorial ([ADR 0008](../../adr/0008-icgc-lidar-is-imported.md)). None is
-ever an edit target.
+ever an edit target. Production excludes LOD1 while retaining the licensed laser sources.
 
 Mapterhorn z13 terrain is read through the app's fixed-grid `/api/terrain` route and decoded in the
 3D preview. It defines ground elevation only and is never an edit target or a source of OSM height

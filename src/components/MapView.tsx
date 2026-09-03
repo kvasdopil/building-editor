@@ -32,6 +32,7 @@ import {
   usePendingGeometry,
 } from "@/lib/edits";
 import type { BuildingElement, BuildingSelection, LngLat } from "@/lib/buildings";
+import { LOD1_ENABLED } from "@/lib/features";
 import {
   boundsCenter,
   pointInRing,
@@ -213,7 +214,7 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
   );
 
   useEffect(() => {
-    if (!selection || !selectedId) return;
+    if (!LOD1_ENABLED || !selection || !selectedId) return;
     let cancelled = false;
     void Promise.all(
       lod1TilesFor(selection.selected).map((tile) =>
@@ -1177,11 +1178,25 @@ function footprintLayers({
 
 /** Sources and layers owned by the editor, installed above the remote vector basemap. */
 function editorStyle(): StyleSpecification {
+  const lod1Sources: StyleSpecification["sources"] = LOD1_ENABLED
+    ? { lod1: { type: "geojson", data: EMPTY } }
+    : {};
+  const lod1Layers: LayerSpecification[] = LOD1_ENABLED
+    ? [
+        {
+          id: "lod1-outline",
+          type: "line",
+          source: "lod1",
+          paint: { "line-color": "#d3d3d3", "line-width": 3, "line-opacity": 0.95 },
+        },
+      ]
+    : [];
+
   return {
     version: 8,
     sources: {
       live: { type: "geojson", data: EMPTY, attribution: "© OpenStreetMap contributors" },
-      lod1: { type: "geojson", data: EMPTY },
+      ...lod1Sources,
       selection: { type: "geojson", data: EMPTY },
       "selection-nodes": { type: "geojson", data: EMPTY },
       "selection-node-hover": { type: "geojson", data: EMPTY },
@@ -1199,12 +1214,7 @@ function editorStyle(): StyleSpecification {
       },
       ...footprintLayers({ id: "live-building", source: "live" }),
       ...footprintLayers({ id: "live-part", source: "live", part: true }),
-      {
-        id: "lod1-outline",
-        type: "line",
-        source: "lod1",
-        paint: { "line-color": "#d3d3d3", "line-width": 3, "line-opacity": 0.95 },
-      },
+      ...lod1Layers,
       {
         id: "selection-casing",
         type: "line",
@@ -1920,8 +1930,9 @@ export function MapView() {
    */
   const initialView = useRef<ViewHash | null>(null);
   if (initialView.current === null) {
-    initialView.current =
+    const requested =
       typeof window === "undefined" ? DEFAULT_VIEW : effectiveView(window.location.hash);
+    initialView.current = LOD1_ENABLED ? requested : { ...requested, lod1: DEFAULT_VIEW.lod1 };
   }
 
   // Applied after mount rather than as initial state, because the server never
@@ -3957,6 +3968,7 @@ export function MapView() {
 
   // The map and advice panel share the same best-overlap LOD1 match.
   useEffect(() => {
+    if (!LOD1_ENABLED) return;
     const map = mapRef.current;
     if (!map || !mapReady) return;
     const source = map.getSource<GeoJSONSource>("lod1");
@@ -4039,23 +4051,25 @@ export function MapView() {
               );
             })}
           </div>
-          <button
-            type="button"
-            onClick={() => setLod1Visible((visible) => !visible)}
-            disabled={!lod1Match}
-            aria-label={lod1Visible ? "Hide LOD1 outline" : "Show LOD1 outline"}
-            aria-pressed={lod1Visible && Boolean(lod1Match)}
-            title={lod1Match ? "Toggle the matched LOD1 outline" : "No matching LOD1 outline"}
-            className={`rounded-md px-2 py-1 text-sm font-medium transition-colors ${
-              !lod1Match
-                ? "cursor-not-allowed text-slate-400"
-                : lod1Visible
-                  ? "bg-slate-200 text-slate-900"
-                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-            }`}
-          >
-            LOD1
-          </button>
+          {LOD1_ENABLED && (
+            <button
+              type="button"
+              onClick={() => setLod1Visible((visible) => !visible)}
+              disabled={!lod1Match}
+              aria-label={lod1Visible ? "Hide LOD1 outline" : "Show LOD1 outline"}
+              aria-pressed={lod1Visible && Boolean(lod1Match)}
+              title={lod1Match ? "Toggle the matched LOD1 outline" : "No matching LOD1 outline"}
+              className={`rounded-md px-2 py-1 text-sm font-medium transition-colors ${
+                !lod1Match
+                  ? "cursor-not-allowed text-slate-400"
+                  : lod1Visible
+                    ? "bg-slate-200 text-slate-900"
+                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+              }`}
+            >
+              LOD1
+            </button>
+          )}
         </div>
         {/* Whatever the chosen underlay itself needs, kept off the first row so
             the switch stays in one place as its options come and go. */}
