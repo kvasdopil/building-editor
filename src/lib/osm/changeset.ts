@@ -7,6 +7,7 @@ import {
   geometryHasVertex,
   type GeometryEditMap,
   positionOnSegment,
+  removeGeometryRingNode,
 } from "../geometry-edits";
 import { openRing } from "../geometry";
 import { issue, type Issue } from "./issues";
@@ -17,7 +18,7 @@ import {
   nodeAt,
   NODE_REUSE_METERS,
 } from "./nodes";
-import { coordinateKey, formatCoordinate, roundToOsmGrid } from "./precision";
+import { coordinateKey, formatCoordinate, metersBetween, roundToOsmGrid } from "./precision";
 import { drawnId } from "./ref";
 import { OsmBuildingLookup } from "./building-lookup";
 import { relationMemberWays } from "./member-way";
@@ -478,6 +479,72 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     resolveVertices(path, ref, scope, false);
 
   /**
+   * Offer a local repair when two adjacent vertices resolve onto one OSM node.
+   * Keep the vertex closest to the node's actual upload position (normally the
+   * exact snap) and remove the other one. The geometry helper proves that this
+   * single removal leaves a valid simple ring before review exposes the Fix.
+   */
+  const addConsecutiveDuplicateRepair = (input: {
+    ref: string;
+    wayRef: string;
+    geometry: EditableGeometry;
+    polygonIndex: number;
+    ringIndex: number;
+    ring: LngLat[];
+    nodeIds: number[];
+  }) => {
+    const { ref, wayRef, geometry, polygonIndex, ringIndex, ring, nodeIds } = input;
+    // Extra multipolygon member ways have synthetic review refs that cannot be
+    // selected directly. Keep their existing blocking check until ownership can
+    // be represented without exposing that implementation detail in the UI.
+    if (wayRef !== ref) return;
+    const vertices = openRing(ring);
+    const openNodeIds = nodeIds.slice(0, -1);
+    for (let index = 1; index < openNodeIds.length; index++) {
+      const nodeId = openNodeIds[index];
+      if (nodeId !== openNodeIds[index - 1]) continue;
+      const nodePosition =
+        existingPositions.get(nodeId) ??
+        createdNodes.find((created) => created.id === nodeId)?.coordinates;
+      const previousDistance = nodePosition
+        ? metersBetween(roundToOsmGrid(vertices[index - 1]), nodePosition)
+        : 0;
+      const currentDistance = nodePosition
+        ? metersBetween(roundToOsmGrid(vertices[index]), nodePosition)
+        : 0;
+      // Equal coordinates are equivalent; remove the later one. For a near
+      // reuse, preserve whichever vertex best represents the reused node.
+      const nodeIndex = currentDistance >= previousDistance ? index : index - 1;
+      const coordinate = vertices[nodeIndex];
+      if (
+        !coordinate ||
+        !removeGeometryRingNode(geometry, polygonIndex, ringIndex, nodeIndex, coordinate)
+      ) {
+        return;
+      }
+      const found = issue(
+        "error",
+        "duplicated-way-nodes",
+        `${wayRef} lists the same node twice in a row.`,
+        [wayRef],
+        nodePosition ?? coordinate,
+      );
+      issues.push({
+        ...found,
+        fix: {
+          kind: "remove-ring-node",
+          entity: ref,
+          polygonIndex,
+          ringIndex,
+          nodeIndex,
+          coordinate,
+        },
+      });
+      return;
+    }
+  };
+
+  /**
    * Plan the elements for one polygonal geometry. A single ring is one way;
    * anything with holes or several polygons needs a multipolygon relation, and
    * an existing way then becomes its untagged outer member.
@@ -497,7 +564,13 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     const scope = groupOf(ref);
     const simple = polygons.length === 1 && polygons[0].length === 1;
 
-    const wayFor = (ring: LngLat[], wayRef: string, wayTags: Tags): ChangesetWay | null => {
+    const wayFor = (
+      ring: LngLat[],
+      wayRef: string,
+      wayTags: Tags,
+      polygonIndex: number,
+      ringIndex: number,
+    ): ChangesetWay | null => {
       const resolved = resolveRing(ring, wayRef, scope);
       if (resolved.nodes.length < 4) {
         issues.push(
@@ -517,6 +590,15 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         tags: wayTags,
       };
       ways.set(wayRef, way);
+      addConsecutiveDuplicateRepair({
+        ref,
+        wayRef,
+        geometry,
+        polygonIndex,
+        ringIndex,
+        ring,
+        nodeIds: resolved.nodes,
+      });
       if (wayRef === ref || wayRef === `${ref}#ring-1`) {
         entry.geometry = {
           reusedNodes: resolved.reused,
@@ -529,7 +611,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     };
 
     if (simple) {
-      wayFor(polygons[0][0], ref, tags);
+      wayFor(polygons[0][0], ref, tags, 0, 0);
       return;
     }
 
@@ -540,7 +622,7 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
       for (const [ringIndex, ring] of rings.entries()) {
         const isOuterOfExisting = existing && polygonIndex === 0 && ringIndex === 0;
         const wayRef = isOuterOfExisting ? ref : `${ref}#ring-${++ringNumber}`;
-        const way = wayFor(ring, wayRef, {});
+        const way = wayFor(ring, wayRef, {}, polygonIndex, ringIndex);
         if (!way) return;
         members.push({ type: "way", ref: way.id, role: ringIndex === 0 ? "outer" : "inner" });
       }

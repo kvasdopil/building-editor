@@ -516,12 +516,21 @@ including while the map bearing changes or a pending direction edit updates the 
 
 A part carrying its own non-empty `roof:shape`, `roof:height`, `roof:orientation`, or `roof:direction` resolves an
 independent roof plan and minimum rectangle from that part, inheriting any omitted roof values from
-the outline. A part without all four resolves the parent's roof plan, absolute eaves, apex,
+the outline. So does a part that states a top of its own — an explicit `height` or `building:levels`
+whose resulting top differs from the outline's by more than 1 cm — because a part that states its
+height is not a sparse copy of the outline tags: the Eiffel Tower's 3 m ticket kiosks carry no roof
+tags at all, and inheriting the tower's frame would give each of them the 0–330 m pyramid. Such a
+part still reads shape and profile from the outline, but measured against its own extent.
+A part with neither its own roof tags nor its own top resolves the parent's roof plan, absolute eaves, apex,
 direction/orientation, and parent-derived axis; it is extruded and cut under that shared surface. The parent roof
-shell renders once across untagged parts when part coverage suppresses the parent outline solid,
-rather than giving every part a separate ridge. Roof inheritance, planning, axis selection, clipping,
+shell renders once when part coverage suppresses the parent outline solid **and at least one part
+actually resolves to that shared plan**, rather than giving every part a separate ridge; a part
+merely missing `roof:shape` is not enough, or the shell would cover a whole building with a roof
+nothing under it shares. Roof inheritance, planning, axis selection, clipping,
 profiles and emitted surface/wall geometry live in `src/lib/roofs.ts`, separate from scene assembly so
-additional roof types can be added without changing facade orchestration.
+additional roof types can be added without changing facade orchestration. The
+[roof frame regression tests](../../../scripts/lib/roof-frame.test.mjs) cover which parts inherit the
+outline's frame and which keep their own top; run them with `node --test scripts/lib/roof-frame.test.mjs`.
 
 ## Laser point cloud
 
@@ -533,7 +542,7 @@ building sits at its own footprint's lowest Mapterhorn elevation relative to tha
 parts of one building share that base. OSM heights remain distances above the building base.
 
 The 3D view draws airborne laser points as coloured dots around the selected building (see
-ADR 0004), from three surveys that share one tile format and are tried in order per z16 tile:
+ADR 0004), from four surveys that share one tile format and are tried in order per z16 tile:
 
 - **Stockholm 2023**, 25 points/m², imported to `data/lidar` and served by `/api/lidar`. Dense, and
   coloured from the orthophoto, so the cloud reads as a photographic surface. Buildings are a
@@ -543,6 +552,12 @@ ADR 0004), from three surveys that share one tile format and are tried in order 
   [ADR 0008](../../adr/0008-icgc-lidar-is-imported.md)). It is classified and RGB-coloured. Its
   source id travels in the LDR1 header so pre-existing Stockholm tiles remain valid and the client
   can name the survey without a second route.
+- **IGN LiDAR HD**, at least 10 pulses/m², resolved through IGN's public WFS kilometre-tile index
+  and range-read from classified COPC files by `/api/ign` on demand (see
+  [ADR 0009](../../adr/0009-ign-lidar-hd-read-on-demand.md)). The app currently requests only the
+  metropolitan EPSG:2154 coverage. No credential or offline import is required. The viewer reads
+  whole COPC levels toward four points/m², caps each browser tile at 500,000 points, and colours
+  returns by class.
 - **Laserdata Skog**, 1.4 points/m², read on demand from Lantmäteriet by `/api/skog` (see
   [ADR 0005](../../adr/0005-national-laser-data-read-on-demand.md)). Covers the country. No colour
   and no building class, so dots are coloured by class — ground, water, bridge — with unclassified
@@ -560,8 +575,8 @@ pair further apart than 20 m or belonging to different surveys. A tile keeps its
 order the scanner produced them, so the links are not a nearest-neighbour graph: they draw the
 recording order itself, and make the acquisition structure of each survey visible. The imported
 Stockholm tiles retain it — links run in two families about 30 degrees apart in runs of roughly
-25-30 points, mixed evenly over the whole tile, at a median step of 0.9 m. The national Skog tiles
-do not: COPC stores its points in octree order, so the links there are short, near-random chains
+25-30 points, mixed evenly over the whole tile, at a median step of 0.9 m. The on-demand Skog and
+IGN tiles do not: COPC stores their points in octree order, so the links there are short, near-random chains
 with only a weak directional bias. The distinction matters when reading the cloud, because a
 "stripe" in Skog data is an artefact of the file layout, not of the flight.
 
@@ -571,7 +586,8 @@ unavailable without a selection. Whatever the chosen underlay needs sits on a se
 rather than beside the switch, so the switch keeps its place as its options come and go: `Photos`
 puts the four-way alignment button there, and `LiDAR` a **Color / Height / Normal / Diff** selector plus a
 **Lines** checkbox, which draws the links between consecutively recorded points; it starts off, so
-the mode opens on the bare dots.
+the mode opens on the bare dots. A colouring that needs controls of its own gets a third row under
+that one rather than crowding the selector: the height band is the only one so far.
 
 The whole view is in the URL hash alongside the selection, as `&`-separated segments — for example
 `#way/42764754&normals&lines=1&lod1=0`. The segment that parses as an OSM reference is the
@@ -600,6 +616,31 @@ heights of the points inside the current viewport, refitted when a movement sett
 frame, so zooming into a courtyard spreads the full sweep over its few metres instead of over the
 tallest roof in the padded cloud. Points and links share the ramp, so a link crossing a roof edge
 shows the step as a colour break.
+
+A two-handle slider on a third toolbar row narrows the ramp to a band of those heights and hides
+every point outside it, which is what makes a roof readable at all where trees stand over it or the
+ground falls away beneath it. Its ends are the fitted range itself, so it always offers exactly the
+heights that are there to look at, and the ramp is painted between the handles rather than described
+beside them. A pan or zoom refits the ends and clamps a chosen band into them; a band that ends up
+covering the new ends stops being a band, so the view leads again instead of freezing at numbers
+that were chosen somewhere else. Selecting another building clears it, because a band measured
+against one roof means nothing over the next.
+
+Both the band and the ramp are uniforms on the existing point program: a handle moves the two
+numbers the shader already divides by, and the excluded points are discarded in the fragment stage
+rather than removed from the buffer. Nothing is re-read, re-fitted or re-uploaded while a handle is
+dragged, which is the only reason a band over half a million points can follow the pointer. Links
+are discarded with their points — a link with one end outside the band goes with it — because the
+varying carrying the exclusion is interpolated rather than flat, so it stays above zero along all
+but the very tip of such a line.
+
+The controls are two stacked native range inputs (`RangeSlider`) rather than a hand-rolled track:
+keyboard stepping and the reader announcements come with them. Only their thumbs take the pointer,
+since two live tracks over the same pixels would give whichever is on top every press meant for the
+other, and the visible track is drawn behind. They count whole steps from the low end rather than
+carrying metres, because a native range snaps to a grid anchored at its minimum, and a fractional
+number of steps would leave the top handle short of the maximum — the one place it must reach, since
+that is what "show everything" means here.
 
 `Normal` runs the same ramp over the angle each link makes with the horizontal, from violet lying
 flat to red standing vertical, over a fixed 0 to 90 degree range. It is the raw inclination of the
@@ -693,7 +734,7 @@ about 140 ms to 8 ms, or 33 ms with the difference view open.
 
 Height reaches the map only as colour in every mode; position stays flat XY throughout.
 
-Both routes are read where available. Occupied one-meter dense-import coverage cells and their
+All applicable routes are read where available. Occupied one-meter dense-survey coverage cells and their
 immediate neighbors suppress national returns, so imported data wins over its actual coverage while
 Skog fills a Stockholm scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
 carries the LAS class in its low bits and a single-return flag in `0x80`.
@@ -706,13 +747,13 @@ inside footprint holes, or outside the selected footprint retain their source co
 
 LiDAR stays an overlay and never defines ground. For each survey, class-2 returns are compared with
 Mapterhorn at their coordinates; the median residual vertically translates that survey onto the
-terrain datum. The same correction applies to its roofs, preserving measured heights. If one
-survey has no ground returns it shares the other correction, and if neither does, published levels
-are shown without correction. Vendor-flagged noise (LAS class 7) is dropped at import.
+terrain datum. The same correction applies to its roofs, preserving measured heights. A survey
+without ground returns shares another available correction; if none has one, published levels are
+shown without correction. Vendor-flagged noise (LAS classes 7 and 18) is dropped.
 
 The inspector's LOD1 strip carries the cloud's status after the LOD1 sentence: `laser: reading…`
 while tiles are being read, `laser: 345,031 pts · Laserdata Skog` once they are, and
-`laser: no points` where neither survey covers the building. It is keyed to the building it
+`laser: no points` where no survey covers the building. It is keyed to the building it
 describes, so a selection whose lookup is still in flight shows nothing rather than the previous
 building's count. Without it a building still being read looks exactly like one with no data,
 which matters most for the national source, where a first read assembles tiles on demand.
@@ -720,7 +761,7 @@ which matters most for the national source, where a first read assembles tiles o
 The cloud is drawn as evidence first: a `height` that disagrees with the survey shows up as a roof
 floating above or sunk into the dots, and the mapper draws the conclusion. It is also measured, per
 element and per tag, into the roof advice described above ([ADR 0007](../../adr/0007-laser-roof-advice.md)). Points arrive after the buildings, are added to the standing scene without
-moving the camera, and are absent wherever neither source has points — where both tile routes
+moving the camera, and are absent wherever no source has points — where the tile routes
 answer an empty tile rather than an error, so a missing credential, a missing product permission
 and an upstream outage all look the same to the view: no dots.
 
@@ -903,7 +944,18 @@ Local development reference datasets sit beside them, imported to the same z16 g
 disk: Stockholm LOD1 blocks ([ADR 0003](../../adr/0003-lod1-as-advice-not-import.md)), the 2023 Stockholm
 laser point cloud ([ADR 0004](../../adr/0004-laser-point-cloud-as-raw-evidence.md)), and bounded
 imports from ICGC LiDAR Territorial ([ADR 0008](../../adr/0008-icgc-lidar-is-imported.md)). None is
-ever an edit target. Production excludes LOD1 while retaining the licensed laser sources.
+ever an edit target. IGN LiDAR HD is streamed on demand through the public kilometre-tile index and
+COPC files ([ADR 0009](../../adr/0009-ign-lidar-hd-read-on-demand.md)). Production excludes LOD1
+while retaining the licensed laser sources.
+
+A multipolygon relation is bigger than a tile more often than it looks: Palais de Chaillot
+(relation/6826569) is two detached wings 200 m apart, so the tile grid cuts between them. Each tile
+read only carries the member ways inside that tile's bbox, and the relation comes back from every
+tile it touches, once per tile, each time with a different subset of its outline. The loader
+therefore merges relation reads by unioning their member ways and reassembling the rings, rather
+than letting the last tile to arrive replace the feature: keying by OSM id alone left the map
+showing one wing, picked by fetch order. A tile read whose members close no outer ring contributes
+no feature at all, so nothing is ever drawn from a fragment.
 
 Mapterhorn z13 terrain is read through the app's fixed-grid `/api/terrain` route and decoded in the
 3D preview. It defines ground elevation only and is never an edit target or a source of OSM height

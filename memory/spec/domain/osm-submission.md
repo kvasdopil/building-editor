@@ -266,6 +266,10 @@ affected element, zooms to that coordinate and leaves a red marker on the map. A
 the unambiguous local backtrack `A → B → C → D` where C lies on A-B and removing B makes the entire
 ring simple; it removes that corner from the affected ring and immediately rebuilds the review.
 General bow-ties and repeated paths have more than one plausible repair and remain manual.
+When two consecutive local corners resolve onto the same OSM node, `duplicated-way-nodes` also offers
+**Fix** if removing the worse-matching corner leaves a simple ring. An exact node match wins over a
+near reuse; equal matches remove the later corner. The repair changes the local geometry, then
+immediately rebuilds node resolution and validation.
 
 ### What the checks are allowed to complain about
 

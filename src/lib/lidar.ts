@@ -1,10 +1,10 @@
 import type { BuildingElement } from "./buildings";
-import { type Bounds, elementBounds, padBounds } from "./geometry";
+import { type Bounds, boundsOverlap, elementBounds, padBounds } from "./geometry";
 import { LIDAR_SOURCE_ID, type RawTile, classOf, decodeTile } from "./lidar-format";
 import { type TileId, tileBounds, tilesForBounds } from "./osm/tiles";
 
 /**
- * Airborne laser point clouds for the selected building, from three sources that
+ * Airborne laser point clouds for the selected building, from four sources that
  * speak the same tile format (see `lidar-format.ts`):
  *
  * - `/api/lidar` — imported dense scans: Stockholm's 2023 survey or ICGC's
@@ -12,8 +12,10 @@ import { type TileId, tileBounds, tilesForBounds } from "./osm/tiles";
  * - `/api/skog` — Lantmäteriet's national "Laserdata Skog" at 1.4 points/m²,
  *   read on demand from upstream COPC files. Sparser and without colour, but
  *   covering the whole country.
+ * - `/api/ign` — IGN's classified LiDAR HD over metropolitan France, resolved
+ *   through its public WFS tile index and range-read from COPC files on demand.
  *
- * Both routes are read where available. Dense imported points suppress
+ * Every applicable route is read where available. Dense points suppress
  * overlapping Skog points spatially, rather than suppressing a whole tile — a
  * local scan can end halfway through a z16 tile. Heights stay as survey levels
  * here; the 3D overlay aligns each survey to Mapterhorn terrain separately.
@@ -34,14 +36,22 @@ const CLOUD_PADDING_M = 100;
 const DENSE_PRIORITY_CELL_M = 1;
 
 /** Which survey a cloud's points came from. Several can appear at a border. */
-export type LidarSurvey = "Stockholm 2023" | "Laserdata Skog" | "ICGC LiDAR Territorial 2021–2023";
+export type LidarSurvey =
+  | "Stockholm 2023"
+  | "Laserdata Skog"
+  | "ICGC LiDAR Territorial 2021–2023"
+  | "IGN LiDAR HD";
 export type LidarSource = LidarSurvey | "multiple surveys";
 
 const SURVEY_ID: Record<LidarSurvey, number> = {
   "Stockholm 2023": LIDAR_SOURCE_ID.STOCKHOLM_2023,
   "Laserdata Skog": LIDAR_SOURCE_ID.LASERDATA_SKOG,
   "ICGC LiDAR Territorial 2021–2023": LIDAR_SOURCE_ID.ICGC_TERRITORIAL,
+  "IGN LiDAR HD": LIDAR_SOURCE_ID.IGN_LIDAR_HD,
 };
+
+/** EPSG:2154 extent served by this integration; overseas grids use other CRSs. */
+const IGN_MAINLAND_EXTENT: Bounds = [-5.5, 41, 10, 51.5];
 
 /** Zero is the backward-compatible id of every pre-existing local tile. */
 function importedSurvey(raw: RawTile): LidarSurvey {
@@ -206,10 +216,13 @@ export interface LoadedTile {
 
 /** Every applicable survey for a tile; overlap is resolved after decoding. */
 async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[]> {
-  const routes = [
+  const routes: { route: string; source: LidarSurvey | null }[] = [
     { route: "lidar", source: null },
     { route: "skog", source: "Laserdata Skog" as const },
-  ] as const;
+  ];
+  if (boundsOverlap(tileBounds(tile), IGN_MAINLAND_EXTENT)) {
+    routes.splice(1, 0, { route: "ign", source: "IGN LiDAR HD" });
+  }
   const loaded = await Promise.all(
     routes.map(async ({ route, source }): Promise<LoadedTile | null> => {
       try {
@@ -230,8 +243,8 @@ async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[
 }
 
 /**
- * Fetch the laser cloud around one building. Returns null where no imported
- * survey has points and the Swedish national source is unavailable.
+ * Fetch the laser cloud around one building. Returns null where no applicable
+ * survey has points or its upstream source is unavailable.
  */
 export async function fetchLidarCloud(
   building: BuildingElement,

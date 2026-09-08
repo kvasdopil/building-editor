@@ -11,8 +11,10 @@ import { buildSurfaceGrid, gridToLonLat, surfaceGridImage } from "./surface-grid
 /**
  * What the LiDAR view shows. `colour` shows each point in the survey's own
  * orthophoto sample, `height` replaces that with a rainbow ramp over the
- * heights currently in view, which reads relief and roof shape that the flat
- * top-down view otherwise hides, and `diff` colours each point by how far it
+ * heights currently in view — or over a band of them chosen with
+ * `setHeightWindow`, which also hides everything outside it — reading relief
+ * and roof shape that the flat top-down view otherwise hides, and `diff`
+ * colours each point by how far it
  * sits above or below the roof this app models from the OSM tags. `surface`
  * sets the points aside and rasterises the outline into half-metre cells
  * instead, each filled with all three surface readings at once: hue for the
@@ -165,6 +167,20 @@ export class LidarMapLayer implements CustomLayerInterface {
   private mode: LidarColourMode = "colour";
   /** The ends of the ramp for the current mode, over the points in view. */
   private rampRange: [number, number] = [0, 1];
+  /** The lowest and highest survey height currently on screen, in metres. */
+  private viewHeightRange: [number, number] = [0, 1];
+  /**
+   * The band of heights the height mode shows, in metres, or `null` to show
+   * everything on screen. It narrows the ramp and hides the points outside it,
+   * both in the shader, so moving a handle costs a uniform rather than a pass
+   * over the cloud.
+   *
+   * Set from outside and never cleared here, not even with the cloud: the
+   * controls that offer it own when it ends, and one selection can hand the
+   * same cloud back several times as its siblings are picked.
+   */
+  private heightWindow: [number, number] | null = null;
+  private onHeightRange: ((range: [number, number]) => void) | null = null;
   private lonLat: { lon: Float64Array; lat: Float64Array } | null = null;
   private cloud: LidarCloud | null = null;
   private footprint: Footprint[] = [];
@@ -246,6 +262,27 @@ export class LidarMapLayer implements CustomLayerInterface {
   setLinksVisible(linksVisible: boolean): void {
     this.linksVisible = linksVisible;
     this.map?.triggerRepaint();
+  }
+
+  /**
+   * Narrow the height mode to a band of survey heights, or pass `null` to show
+   * the whole viewport again. Only the ramp uniform changes: the points, their
+   * heights and their links stay exactly as uploaded, so dragging a handle
+   * repaints without touching a buffer.
+   */
+  setHeightWindow(window: [number, number] | null): void {
+    this.heightWindow = window;
+    this.applyHeightRamp();
+    this.map?.triggerRepaint();
+  }
+
+  /**
+   * Report the heights on screen, so the controls can offer exactly the range
+   * that is there to look at. Called whenever the fit changes while the height
+   * mode is being shown.
+   */
+  setHeightRangeListener(listener: ((range: [number, number]) => void) | null): void {
+    this.onHeightRange = listener;
   }
 
   setColourMode(mode: LidarColourMode): void {
@@ -373,8 +410,22 @@ export class LidarMapLayer implements CustomLayerInterface {
     // Nothing in view keeps the previous ramp rather than collapsing it, and a
     // perfectly flat selection still needs a non-zero span to divide by.
     if (low === Infinity) return;
-    this.rampRange = [low, high - low > 0.01 ? high : low + 0.01];
+    const range: [number, number] = [low, high - low > 0.01 ? high : low + 0.01];
+    const [wasLow, wasHigh] = this.viewHeightRange;
+    this.viewHeightRange = range;
+    this.applyHeightRamp();
+    if (range[0] !== wasLow || range[1] !== wasHigh) this.onHeightRange?.(range);
     this.map?.triggerRepaint();
+  }
+
+  /**
+   * The height ramp spans the chosen window when there is one and the whole
+   * viewport otherwise. The two are kept apart because the viewport's own range
+   * is refitted under every pan, while the window is the user's and outlives it.
+   */
+  private applyHeightRamp(): void {
+    if (this.mode !== "height") return;
+    this.rampRange = this.heightWindow ?? this.viewHeightRange;
   }
 
   /**
@@ -422,6 +473,11 @@ export class LidarMapLayer implements CustomLayerInterface {
       in float a_height;
       in vec2 a_difference;
       out vec3 v_colour;
+      // 0 where the point belongs on screen, 1 where the height mode's band
+      // excludes it. Interpolated rather than flat on purpose: a link with one
+      // excluded end reads above zero along all but its very tip, so it goes
+      // with the point it was drawn to.
+      out float v_excluded;
 
       /** Pure hue, with the angle given in sixths of a turn from red. */
       vec3 hue_to_rgb(float sixths) {
@@ -479,8 +535,14 @@ export class LidarMapLayer implements CustomLayerInterface {
         gl_Position = u_matrix * vec4(a_position, 0.0, 1.0);
         gl_PointSize = u_point_size;
         float span = max(u_ramp_range.y - u_ramp_range.x, 0.01);
+        v_excluded = 0.0;
         if (u_mode == 1) {
-          v_colour = srgb_to_linear(violet_to_red((a_height - u_ramp_range.x) / span));
+          float t = (a_height - u_ramp_range.x) / span;
+          // The ramp's ends are also the band's ends, so a point outside them
+          // is one the controls asked not to see. Left in the buffer and
+          // dropped here, which is why narrowing the band costs no upload.
+          if (t < -0.001 || t > 1.001) v_excluded = 1.0;
+          v_colour = srgb_to_linear(violet_to_red(t));
         } else if (u_mode == 2) {
           // Nothing modelled under this point, so there is nothing for it to
           // agree or disagree with. Grey says that, where any ramp colour would
@@ -502,6 +564,7 @@ export class LidarMapLayer implements CustomLayerInterface {
       precision highp float;
       uniform float u_is_point;
       in vec3 v_colour;
+      in float v_excluded;
       out vec4 frag_colour;
 
       vec3 linear_to_srgb(vec3 value) {
@@ -512,6 +575,7 @@ export class LidarMapLayer implements CustomLayerInterface {
       }
 
       void main() {
+        if (v_excluded > 0.001) discard;
         // gl_PointCoord is only defined while drawing points; the round mask
         // has to be skipped when the same program draws the links.
         if (u_is_point > 0.5 && distance(gl_PointCoord, vec2(0.5)) > 0.5) discard;

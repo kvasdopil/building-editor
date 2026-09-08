@@ -39,6 +39,7 @@ export const LIDAR_SOURCE_ID = {
   STOCKHOLM_2023: 0,
   LASERDATA_SKOG: 1,
   ICGC_TERRITORIAL: 2,
+  IGN_LIDAR_HD: 3,
 } as const;
 
 export type LidarSourceId = (typeof LIDAR_SOURCE_ID)[keyof typeof LIDAR_SOURCE_ID];

@@ -3,6 +3,7 @@
 import type { Feature, FeatureCollection } from "geojson";
 import type { Bounds } from "../geometry";
 import { idbDelete, idbGet, idbPut, TILE_STORE } from "../idb";
+import { mergeTileReads } from "./parse";
 import { OSM_TILE_SCHEMA, type TileId, tileKey, tilesInBounds } from "./tiles";
 
 /**
@@ -55,7 +56,8 @@ export interface LoaderStatus {
 /**
  * Create a loader that fetches tiles for a viewport and reports the merged
  * feature collection. Features are keyed by OSM id, so a way appearing in two
- * tiles is stored once.
+ * tiles is stored once — and a relation appearing in two tiles is stored as the
+ * union of what each of them saw of it.
  */
 export function createTileLoader(
   onChange: (features: FeatureCollection, status: LoaderStatus) => void,
@@ -81,7 +83,12 @@ export function createTileLoader(
   const absorb = (collection: FeatureCollection) => {
     for (const feature of collection.features) {
       const id = feature.properties?.id;
-      if (typeof id === "string") features.set(id, feature);
+      if (typeof id !== "string") continue;
+      const known = features.get(id);
+      // A relation is read once per tile it touches, and each of those reads
+      // only sees the members inside that tile, so overwriting loses the parts
+      // the last tile missed. See `mergeTileReads`.
+      features.set(id, known ? mergeTileReads(known, feature) : feature);
     }
   };
 

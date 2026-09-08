@@ -1,7 +1,7 @@
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import type { BuildingProperties, LngLat } from "../buildings";
 import { pointInRing, ringCenter } from "../geometry";
-import type { RelationMemberWay } from "./member-way";
+import { type RelationMemberWay, relationMemberWays } from "./member-way";
 
 /**
  * Turns an OSM API `/map.json` response into building and building:part
@@ -219,6 +219,75 @@ function feature(
 }
 
 /**
+ * Assemble the rings a relation's member ways describe. A member is either a
+ * closed ring of its own or an open segment that only closes once joined to its
+ * neighbours, so outers and inners are stitched separately and each inner is
+ * then nested into whichever outer contains it. Null when no outer closes,
+ * which is how a relation read across a tile edge reports that it has nothing
+ * drawable yet rather than drawing a wrong shape.
+ */
+function multiPolygonFromMemberWays(members: RelationMemberWay[]): MultiPolygon | null {
+  const segmentsFor = (wantedRole: string) =>
+    members
+      .filter((member) => member.role === wantedRole)
+      .map((member) => member.coordinates)
+      .filter((points) => points.length >= 2);
+
+  const outers = assembleRings(segmentsFor("outer"));
+  if (outers.length === 0) return null;
+
+  const polygons: LngLat[][][] = outers.map((outer) => [outer]);
+  for (const inner of assembleRings(segmentsFor("inner"))) {
+    const center = ringCenter(inner);
+    const host = polygons.find((rings) => pointInRing(center, rings[0])) ?? polygons[0];
+    host.push(inner);
+  }
+  return { type: "MultiPolygon", coordinates: polygons };
+}
+
+/**
+ * Merge two tile reads of the same element, the newer read winning.
+ *
+ * A multipolygon relation whose members straddle a tile boundary comes back
+ * from every tile it touches, but each read only carries the members that
+ * tile's bbox reached: Palais de Chaillot is two detached wings 200 m apart, so
+ * the tile holding both reads it whole while the two tiles beside it each read
+ * a single wing. Taking the later read whole would drop whichever wing that
+ * tile missed, and which one survived would depend on the order tiles happened
+ * to arrive. Union the member ways instead and reassemble the rings from the
+ * union.
+ */
+export function mergeTileReads(previous: Feature, next: Feature): Feature {
+  // A version bump means the element changed upstream between the two reads, so
+  // the older one may describe members the relation no longer has.
+  if (previous.properties?.version !== next.properties?.version) return next;
+
+  const known = relationMemberWays(previous.properties?.member_ways);
+  const incoming = relationMemberWays(next.properties?.member_ways);
+  if (known.length === 0 || incoming.length === 0) return next;
+
+  const byId = new Map(known.map((member) => [member.id, member]));
+  for (const member of incoming) byId.set(member.id, member);
+  if (byId.size === incoming.length) return next;
+
+  // Follow the relation's own member order, so the merged list does not depend
+  // on which tile arrived first.
+  const refs = next.properties?.members;
+  const order = Array.isArray(refs)
+    ? (refs as { type: string; ref: number }[])
+        .filter((member) => member.type === "way")
+        .map((member) => member.ref)
+    : [...byId.keys()];
+  const members = order
+    .map((ref) => byId.get(ref))
+    .filter((member): member is RelationMemberWay => member !== undefined);
+
+  const geometry = multiPolygonFromMemberWays(members);
+  if (!geometry) return next;
+  return { ...next, geometry, properties: { ...next.properties, member_ways: members } };
+}
+
+/**
  * Extract buildings and parts as GeoJSON. Multipolygon relations are assembled
  * from their member ways; relation members outside the bbox are skipped rather
  * than drawn wrong.
@@ -241,29 +310,6 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
     const role = roleOf(tags);
     if (!role || tags.type !== "multipolygon") continue;
 
-    const segmentsFor = (wantedRole: string) =>
-      relation.members
-        .filter(
-          (m) =>
-            m.type === "way" &&
-            (m.role === wantedRole || (wantedRole === "outer" && m.role === "")),
-        )
-        .map((m) => ways.get(m.ref))
-        .filter((way): way is OsmWay => way !== undefined)
-        .map((way) => {
-          const points = way.nodes
-            .map((id) => nodes.get(id))
-            .filter((node): node is OsmNode => node !== undefined)
-            .map((node): LngLat => [node.lon, node.lat]);
-          if (points.length === way.nodes.length) consumedByRelation.add(way.id);
-          return points;
-        })
-        .filter((points) => points.length >= 2);
-
-    const outers = assembleRings(segmentsFor("outer"));
-    if (outers.length === 0) continue;
-    const inners = assembleRings(segmentsFor("inner"));
-
     const memberWays = relation.members
       .filter((member) => member.type === "way")
       .map((member): RelationMemberWay | null => {
@@ -284,22 +330,15 @@ export function osmToBuildings(response: OsmMapResponse): FeatureCollection {
       })
       .filter((member): member is RelationMemberWay => member !== null);
 
-    const polygons: LngLat[][][] = outers.map((outer) => [outer]);
-    for (const inner of inners) {
-      const center = ringCenter(inner);
-      const host = polygons.find((rings) => pointInRing(center, rings[0])) ?? polygons[0];
-      host.push(inner);
+    const geometry = multiPolygonFromMemberWays(memberWays);
+    if (!geometry) continue;
+    // Only the ways that became rings are the relation's outline. A member in
+    // some other role stays a feature of its own if it is tagged as one.
+    for (const member of memberWays) {
+      if (member.role === "outer" || member.role === "inner") consumedByRelation.add(member.id);
     }
-    features.push(
-      feature(
-        "relation",
-        relation,
-        role,
-        { type: "MultiPolygon", coordinates: polygons },
-        nodes,
-        memberWays,
-      ),
-    );
+
+    features.push(feature("relation", relation, role, geometry, nodes, memberWays));
   }
 
   for (const way of ways.values()) {

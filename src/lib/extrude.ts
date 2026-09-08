@@ -259,10 +259,13 @@ function extrudeBuildingWithParts(
     pickTargets.push(object);
     group.add(object);
   });
-  const hasSharedParts = parts.some((part) => {
-    const shape = part.properties.roof_shape;
-    return typeof shape !== "string" || shape.trim() === "";
-  });
+  // The outline's roof shell stands in for the omitted outline solid, so draw
+  // it only when a part actually rests on it. A part missing `roof:shape` is
+  // not enough: it may still be independent, and the shell then covers a whole
+  // building with a roof nothing under it shares.
+  const hasSharedParts = parts.some(
+    (part) => resolvedRoofPlan(part, building, metersPerLevel)?.shared === true,
+  );
   if (!outlineRendered && hasSharedParts) {
     const roof = sharedParentRoof(
       building,

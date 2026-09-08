@@ -2,7 +2,7 @@ import Flatten from "@flatten-js/core";
 import { ShapeUtils, Vector2 } from "three";
 import type { BuildingElement, BuildingProperties, Footprint, LngLat } from "./buildings";
 import { boundsCenter, elementBounds, openRing } from "./geometry";
-import { verticalExtent } from "./heights";
+import { levelHeight, verticalExtent } from "./heights";
 
 export type Point2 = [number, number];
 
@@ -145,10 +145,32 @@ export function roofPlan(
   };
 }
 
+/**
+ * A part that states a top of its own, different from the outline's, is not a
+ * sparse copy of the outline tags. Inheriting the outline's roof *frame* would
+ * stretch it to the outline's top: the Eiffel Tower's 3 m ticket kiosks carry
+ * no roof tags, and without this they take the tower's 0-330 m pyramid.
+ */
+function ownsVerticalExtent(
+  element: BuildingElement,
+  parent: BuildingElement,
+  metersPerLevel: number,
+): boolean {
+  if (
+    finiteNumber(element.properties.height) === undefined &&
+    finiteNumber(element.properties.num_floors) === undefined
+  )
+    return false;
+  const own = verticalExtent(element.properties, metersPerLevel);
+  const outline = verticalExtent(parent.properties, metersPerLevel);
+  return Math.abs(own.top - outline.top) > 0.01;
+}
+
 /** Footprint that owns the independent roof frame for an element. */
 export function roofFrameElement(
   element: BuildingElement,
   parent: BuildingElement,
+  metersPerLevel: number = levelHeight(parent.properties),
 ): BuildingElement {
   const ownShape =
     typeof element.properties.roof_shape === "string" &&
@@ -163,22 +185,28 @@ export function roofFrameElement(
     typeof element.properties.roof_direction === "string" &&
     element.properties.roof_direction.trim() !== "";
   const shared =
-    element.id !== parent.id && !ownShape && !ownHeight && !ownOrientation && !ownDirection;
+    element.id !== parent.id &&
+    !ownShape &&
+    !ownHeight &&
+    !ownOrientation &&
+    !ownDirection &&
+    !ownsVerticalExtent(element, parent, metersPerLevel);
   return shared ? parent : element;
 }
 
 /**
- * A part with its own shape, height, orientation, or direction is an independent roof.
- * Without any of them it is a clipping solid under the parent building's roof,
- * sharing the parent's height, profile and axis so adjacent untagged parts meet
- * on one continuous surface.
+ * A part with its own shape, height, orientation, direction — or simply its own
+ * top — is an independent roof; it still reads shape and profile from the
+ * outline, but measured against its own extent. Without any of them it is a
+ * clipping solid under the parent building's roof, sharing the parent's height,
+ * profile and axis so adjacent untagged parts meet on one continuous surface.
  */
 export function resolvedRoofPlan(
   element: BuildingElement,
   parent: BuildingElement,
   metersPerLevel: number,
 ): ResolvedRoofPlan | null {
-  const frameElement = roofFrameElement(element, parent);
+  const frameElement = roofFrameElement(element, parent, metersPerLevel);
   const shared = element.id !== parent.id && frameElement.id === parent.id;
   const extent = verticalExtent(
     frameElement.properties,

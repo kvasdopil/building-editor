@@ -107,6 +107,7 @@ import {
 import { sliceBuilding } from "@/lib/slice";
 import type { LidarCloud } from "@/lib/lidar";
 import { type LidarColourMode, LidarMapLayer } from "@/lib/lidar-map-layer";
+import RangeSlider from "./RangeSlider";
 import { type Lod1Match, lod1TilesFor, matchLod1 } from "@/lib/lod1";
 
 const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
@@ -194,6 +195,21 @@ const LIDAR_COLOUR_MODES: { mode: LidarColourMode; label: string; title: string 
       "the surface it holds: hue faces, saturation slopes, brightness rises",
   },
 ];
+
+/**
+ * The height ramp as CSS, so the band control is painted in the colours it
+ * governs: the same violet-through-red hue sweep the shader runs, sampled at
+ * the quarters. The excluded ends of the track stay grey, which is what the
+ * map does with the points there too.
+ */
+const LIDAR_HEIGHT_RAMP_CSS =
+  "linear-gradient(to right, hsl(270, 100%, 50%), hsl(202.5, 100%, 50%), " +
+  "hsl(135, 100%, 50%), hsl(67.5, 100%, 50%), hsl(0, 100%, 50%))";
+
+/** The finest band edge worth setting; heights are metres. */
+const LIDAR_HEIGHT_STEP_M = 0.1;
+
+const formatMetres = (value: number) => `${value.toFixed(1)} m`;
 
 function buildingColor(mode: ColorMode): ExpressionSpecification {
   return [
@@ -1358,6 +1374,14 @@ export function MapView() {
   const [lidar, setLidar] = useState(false);
   const [lidarColourMode, setLidarColourMode] = useState<LidarColourMode>("colour");
   const [lidarLines, setLidarLines] = useState(false);
+  /** The heights on screen, as the layer fits them; the band control's ends. */
+  const [lidarHeightRange, setLidarHeightRange] = useState<[number, number]>([0, 1]);
+  /** The band of heights shown, or `null` while everything on screen is. */
+  const [lidarHeightWindow, setLidarHeightWindow] = useState<[number, number] | null>(null);
+  /** Where the band's handles sit: its own ends, or the view's while it has none. */
+  const lidarHeightBand = lidarHeightWindow ?? lidarHeightRange;
+  /** Its row is a third one, which everything hung under the toolbar clears. */
+  const lidarHeightBandShown = lidar && lidarColourMode === "height";
 
   const mapUnderlay: MapUnderlay = photos ? "photos" : lidar ? "lidar" : "map";
   const setMapUnderlay = useCallback((underlay: MapUnderlay) => {
@@ -2327,7 +2351,7 @@ export function MapView() {
       const selectedId = selectionRef.current?.selected.id;
       if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
       setValidationLocation(null);
-      setNotice(`Removed the backtracking corner from ${fix.entity}`);
+      setNotice(`Removed the redundant corner from ${fix.entity}`);
     },
     [edits, refreshDisplayedFeatures],
   );
@@ -3890,6 +3914,8 @@ export function MapView() {
   const hadSelection = useRef(false);
   useEffect(() => {
     lidarLayerRef.current?.setCloud(null);
+    // A band chosen over one building's roof means nothing over the next one's.
+    setLidarHeightWindow(null);
     // Only a selection that goes away closes LiDAR. On the first run there is
     // no previous selection to have gone, and the hash may have just asked for
     // a cloud whose building is still being fetched.
@@ -3908,6 +3934,34 @@ export function MapView() {
   useEffect(() => {
     lidarLayerRef.current?.setColourMode(lidarColourMode);
   }, [lidarColourMode, mapReady]);
+
+  /**
+   * The band control offers exactly the heights on screen, so its ends move
+   * with the map. A band already chosen is clamped into the new ends rather
+   * than kept where nothing is, and one that ends up covering them entirely
+   * goes back to following the view instead of freezing at those numbers.
+   */
+  const onLidarHeightRange = useCallback((range: [number, number]) => {
+    setLidarHeightRange(range);
+    setLidarHeightWindow((band) => {
+      if (!band) return null;
+      const low = Math.max(band[0], range[0]);
+      const high = Math.min(band[1], range[1]);
+      if (!(low < high) || (low <= range[0] && high >= range[1])) return null;
+      return [low, high];
+    });
+  }, []);
+
+  useEffect(() => {
+    const layer = lidarLayerRef.current;
+    if (!layer || !mapReady) return;
+    layer.setHeightRangeListener(onLidarHeightRange);
+    return () => layer.setHeightRangeListener(null);
+  }, [mapReady, onLidarHeightRange]);
+
+  useEffect(() => {
+    lidarLayerRef.current?.setHeightWindow(lidarHeightWindow);
+  }, [lidarHeightWindow, mapReady]);
 
   useEffect(() => {
     lidarLayerRef.current?.setLinksVisible(lidarLines);
@@ -4119,12 +4173,47 @@ export function MapView() {
             )}
           </div>
         )}
+        {/* The height band, on its own row because only one colouring has one
+            and the row above is already full. */}
+        {lidarHeightBandShown && (
+          <div
+            title={
+              "Show only the heights between the two handles. The ends are the " +
+              "lowest and highest point on screen, and follow the map."
+            }
+            className="flex items-center gap-2 border-t border-slate-100 px-1 pt-1.5 pb-0.5"
+          >
+            <span className="w-11 shrink-0 text-right text-[10px] text-slate-500 tabular-nums">
+              {formatMetres(lidarHeightBand[0])}
+            </span>
+            <RangeSlider
+              className="w-36"
+              min={lidarHeightRange[0]}
+              max={lidarHeightRange[1]}
+              low={lidarHeightBand[0]}
+              high={lidarHeightBand[1]}
+              step={LIDAR_HEIGHT_STEP_M}
+              onChange={(low, high) =>
+                setLidarHeightWindow(
+                  low <= lidarHeightRange[0] && high >= lidarHeightRange[1] ? null : [low, high],
+                )
+              }
+              lowLabel="Lowest height shown"
+              highLabel="Highest height shown"
+              format={formatMetres}
+              fillStyle={{ background: LIDAR_HEIGHT_RAMP_CSS }}
+            />
+            <span className="w-11 shrink-0 text-[10px] text-slate-500 tabular-nums">
+              {formatMetres(lidarHeightBand[1])}
+            </span>
+          </div>
+        )}
       </div>
 
       {live && (
         <div
           className={`absolute z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
-            photos || lidar ? "top-[5.75rem]" : "top-16"
+            lidarHeightBandShown ? "top-[7.5rem]" : photos || lidar ? "top-[5.75rem]" : "top-16"
           } ${selection ? "" : "right-3"}`}
           style={selection ? { right: `calc(${sidebarWidth}% + 1rem)` } : undefined}
         >

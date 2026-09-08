@@ -221,11 +221,19 @@ function checkPlan(plan: ChangesetPlan): Issue[] {
     const ring = way.nodes.slice(0, -1);
     for (let i = 1; i < ring.length; i++) {
       if (ring[i] === ring[i - 1]) {
-        issues.push(
-          issue("error", "duplicated-way-nodes", `${way.ref} lists the same node twice in a row.`, [
-            way.ref,
-          ]),
+        const plannedRepair = plan.issues.some(
+          (found) => found.check === "duplicated-way-nodes" && found.entities.includes(way.ref),
         );
+        if (!plannedRepair) {
+          issues.push(
+            issue(
+              "error",
+              "duplicated-way-nodes",
+              `${way.ref} lists the same node twice in a row.`,
+              [way.ref],
+            ),
+          );
+        }
         break;
       }
     }

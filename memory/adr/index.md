@@ -20,3 +20,6 @@ Related documents:
 - [0006 - Mapterhorn defines the 3D ground datum](0006-mapterhorn-defines-3d-ground.md): Why z13 terrain supplies every building and scene elevation while LiDAR stays a vertically aligned overlay. Read this before changing 3D ground or point-cloud alignment.
 - [0007 - The laser measures roof tags, and shows how far off it is](0007-laser-roof-advice.md): Why the point cloud now advises `height`, `roof:height` and `roof:shape` per element, and which of those the fit error is allowed to choose. Read this before changing how a tag is derived from the cloud.
 - [0008 - ICGC LiDAR is imported through the dense-survey path](0008-icgc-lidar-is-imported.md): Why Catalonia's ordinary LAZ sheets are imported into the existing `/api/lidar` format instead of range-read on demand. Read this before changing ICGC coverage or source identification.
+- [0009 - IGN LiDAR HD is read on demand](0009-ign-lidar-hd-read-on-demand.md): Why France's public
+  kilometre COPC sheets are resolved through WFS and range-read into cached z16 tiles. Read this
+  before changing French LiDAR coverage, projection, or upstream access.
