@@ -280,7 +280,21 @@ not turn into a lecture about somebody else's work, still less block an upload:
 - **Ring checks run on the element the change is about**, never on its neighbours or its untouched
   siblings.
 - **`part-outside-outline` is an error for a part we write and a warning for one we inherit.**
+- **Parent height is a group-level upload requirement.** Every building with parts in a group
+  touched by the changeset must carry a finite, positive `height` or `building:levels`, even when
+  only a part is edited. The parent's pending edits count; the renderer's fallback storey and a
+  part's own height do not. Report one `part-parent-missing-height` error per parent, identifying
+  that outline so it can be edited. Buildings without parts and unrelated loaded groups are
+  unaffected. A written part whose parent cannot be resolved from the loaded data gets a
+  `part-parent-not-found` error instead, even if the part itself has a height. When at least one
+  associated part has an explicit positive `height` or `building:levels`, the missing-height error
+  offers the existing **Fix** action: set the parent `height` to the maximum effective part top and
+  immediately rebuild validation. It offers no guessed fix when every part also lacks height data.
 - Uppercase in a key is not suspicious: `ref:SE:raa` and `name:en` are ordinary OSM. Whitespace is.
+
+The [parent height regression tests](../../../scripts/lib/parent-height.test.mjs) cover missing,
+invalid and pending parent heights, level-derived height, missing parents and validation scope.
+Run them with `node --test scripts/lib/parent-height.test.mjs`.
 
 ### Errors
 

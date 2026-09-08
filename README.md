@@ -252,6 +252,12 @@ the submitted comment is cleared, and the affected tiles are refetched past ever
 shows what OSM now holds. The next review regenerates its description from its new changes. The rules
 behind all of it live in [the submission spec](memory/spec/domain/osm-submission.md).
 
+For every building with parts involved in the upload, its parent outline must have a positive
+`height` or `building:levels`. Missing parent height or an unloaded/unresolved parent blocks upload;
+adding the parent's height to the same pending changes clears the check. When its parts have usable
+height data, **Fix** sets the parent to the tallest part using the same action as the existing
+part-above-parent warning.
+
 When a part reaches above the parent outline's `height`, that review warning offers **Fix**. It sets
 the outline's `height` to the maximum effective top height across all of the building's parts and
 re-runs the checks immediately. An overlapping-volume warning also offers **Fix** when one shorter

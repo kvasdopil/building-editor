@@ -576,9 +576,9 @@ function checkBuilding(
 
   const metersPerLevel = levelHeight(building.properties);
   const buildingTop = verticalExtent(building.properties, metersPerLevel).top;
-  const hasBuildingHeight =
-    typeof building.properties.height === "number" ||
-    typeof building.properties.num_floors === "number";
+  const hasBuildingHeight = [building.properties.height, building.properties.num_floors].some(
+    (value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
   const partTops = new Map(
     parts.map((part) => [
       part.id,
@@ -591,6 +591,29 @@ function checkBuilding(
   );
   // Avoid exposing floating-point multiplication noise in an OSM length tag.
   const maximumPartHeight = String(Number(maximumPartTop.toFixed(6)));
+  const hasMeasuredPartTop = parts.some((part) =>
+    [part.properties.height, part.properties.num_floors].some(
+      (value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+    ),
+  );
+  if (parts.length > 0 && !hasBuildingHeight) {
+    const finding = issue(
+      "error",
+      "part-parent-missing-height",
+      `${building.id} is the parent of building parts but has no usable height; add a positive \`height\` or \`building:levels\` to the parent before uploading.`,
+      [building.id],
+      ringCenter(building.polygons[0].outer),
+    );
+    if (hasMeasuredPartTop) {
+      finding.fix = {
+        kind: "set-tag",
+        entity: building.id,
+        key: "height",
+        value: maximumPartHeight,
+      };
+    }
+    issues.push(finding);
+  }
 
   for (const part of parts) {
     const inside = overlapFraction(part, building);
@@ -733,6 +756,19 @@ export function validateChangeset(input: ValidationInput): ValidationResult {
         ),
       );
       continue;
+    }
+    // The lookup returns an unparented part as its own building for selection;
+    // that fallback cannot establish a parent's height for upload validation.
+    if (selection.building.properties.role === "part") {
+      issues.push(
+        issue(
+          "error",
+          "part-parent-not-found",
+          `${entry.ref} has no parent building in the loaded data; load or define its parent outline and give it a height before uploading.`,
+          [entry.ref],
+          ringCenter(selection.selected.polygons[0].outer),
+        ),
+      );
     }
     buildings.set(selection.building.id, {
       building: selection.building,
