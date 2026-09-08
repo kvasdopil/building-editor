@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
@@ -367,10 +368,10 @@ export function BuildingPanel({
 
   return (
     <aside
-      className={`absolute inset-y-0 right-0 z-20 flex min-w-0 flex-col bg-white shadow-2xl ${resizingWidth ? "cursor-col-resize select-none" : ""}`}
-      style={{ width: `${widthPercent}%` }}
+      className={`absolute inset-y-0 right-0 z-20 flex min-w-0 flex-col bg-white shadow-2xl max-md:inset-x-0 max-md:top-auto max-md:h-1/2 max-md:w-full ${resizingWidth ? "cursor-col-resize select-none" : ""} md:w-[var(--building-panel-width)]`}
+      style={{ "--building-panel-width": `${widthPercent}%` } as CSSProperties}
     >
-      <div className="absolute inset-y-0 left-0 z-30 w-px">
+      <div className="absolute inset-y-0 left-0 z-30 w-px max-md:hidden">
         <button
           type="button"
           aria-label="Resize map and sidebar"
@@ -397,8 +398,8 @@ export function BuildingPanel({
         className={`flex min-h-0 flex-1 flex-col ${resizing ? "cursor-row-resize select-none" : ""}`}
       >
         <div
-          className="flex min-h-0 shrink-0 flex-col overflow-hidden"
-          style={{ height: `${viewerHeight}%` }}
+          className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden md:h-[var(--viewer-height)]"
+          style={{ "--viewer-height": `${viewerHeight}%` } as CSSProperties}
         >
           <div className="relative min-h-0 flex-1">
             <Building3D
@@ -414,14 +415,16 @@ export function BuildingPanel({
             />
           </div>
 
-          <Photoreal3D
-            center={boundsCenter(elementBounds(edited.selected))}
-            camera={camera}
-            radius={boundsRadiusMeters(elementBounds(edited.selected))}
-          />
+          <div className="max-md:hidden">
+            <Photoreal3D
+              center={boundsCenter(elementBounds(edited.selected))}
+              camera={camera}
+              radius={boundsRadiusMeters(elementBounds(edited.selected))}
+            />
+          </div>
         </div>
 
-        <div className="relative z-10 h-px shrink-0">
+        <div className="relative z-10 h-px shrink-0 max-md:hidden">
           <button
             type="button"
             aria-label="Resize 3D view and properties"
@@ -441,7 +444,7 @@ export function BuildingPanel({
           <hr className="pointer-events-none absolute inset-x-0 top-0 m-0 h-px border-0 bg-slate-200 peer-hover:bg-violet-400 peer-focus-visible:bg-violet-500" />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto max-md:hidden">
           <dl className="border-b border-slate-100 text-xs">
             <div className="flex items-start">
               <dt className="w-2/5 px-4 py-1.5 font-medium text-slate-500">feature</dt>

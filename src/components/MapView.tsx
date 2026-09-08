@@ -4061,7 +4061,7 @@ export function MapView() {
       </div>
 
       <div
-        className={`absolute top-3 z-30 flex flex-col items-stretch gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md ${selection ? "" : "right-3"}`}
+        className={`absolute top-3 z-30 flex flex-col items-stretch gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-md max-md:hidden ${selection ? "" : "right-3"}`}
         style={selection ? { right: `calc(${sidebarWidth}% + 1rem)` } : undefined}
       >
         <div className="flex items-center gap-1">
@@ -4212,7 +4212,7 @@ export function MapView() {
 
       {live && (
         <div
-          className={`absolute z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md ${
+          className={`absolute z-30 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 shadow-md max-md:hidden ${
             lidarHeightBandShown ? "top-[7.5rem]" : photos || lidar ? "top-[5.75rem]" : "top-16"
           } ${selection ? "" : "right-3"}`}
           style={selection ? { right: `calc(${sidebarWidth}% + 1rem)` } : undefined}
@@ -4248,7 +4248,7 @@ export function MapView() {
       )}
 
       {!changesOpen && (
-        <div className="absolute top-3 left-3 z-30 flex items-center gap-2">
+        <div className="absolute top-3 left-3 z-30 flex items-center gap-2 max-md:hidden">
           <button
             type="button"
             onClick={() => {

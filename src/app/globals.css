@@ -155,3 +155,11 @@ body {
 .map-shell.building-panel-open .maplibregl-ctrl-bottom-right {
   right: var(--building-panel-width);
 }
+
+/* A selected building on mobile splits the screen into map above and 3D below. */
+@media (max-width: 767px) {
+  .map-shell.building-panel-open .maplibregl-ctrl-bottom-right {
+    right: 0.75rem;
+    bottom: calc(50% + 0.75rem);
+  }
+}

@@ -32,6 +32,11 @@ layer is strictly top-down: it projects longitude and latitude into Web Mercator
 height for positioning, and remains under the editor overlays. Closing the selection exits LiDAR
 mode because its point set is defined by the selected parent building.
 
+On mobile, the map has no building-colors legend, editing toolbar, pending-change count, or
+Map/Photos/LiDAR selector. Selecting a building splits the viewport horizontally: the map occupies
+the upper half and the local 3D extrusion preview occupies the lower half. The inspector,
+photorealistic Google 3D preview, and panel splitters are not shown in this mobile layout.
+
 ## Height rules (authoritative)
 
 - `height` (m) wins.
