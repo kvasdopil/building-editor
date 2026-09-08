@@ -592,9 +592,9 @@ function sampledRoof(
   if (ridge - eaves <= 0) return undefined;
   const footprints = planFootprints(grid.frame, polygons);
   if (footprints.length === 0) return undefined;
-  // Without the skeleton engine a hipped roof builds as a pyramid, and the
+  // Without the skeleton engine a skeleton roof builds as a pyramid, and the
   // number would belong to a roof nobody is being offered.
-  if (shape === "hipped" && !hippedRoofGeometryReady()) return undefined;
+  if (["hipped", "mansard"].includes(shape) && !hippedRoofGeometryReady()) return undefined;
 
   let best: Float64Array | undefined;
   let bestMiss = Number.POSITIVE_INFINITY;

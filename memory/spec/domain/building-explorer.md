@@ -426,7 +426,7 @@ For both buildings and parts, `height`, `building:levels`, `min_height`, `buildi
 `roof:levels`, and `roof:height` always have inspector rows, including a **not set** row when absent.
 Building outlines and parts additionally always expose `roof:shape` as a select: **none** removes the tag,
 **pyramid** writes the standard `pyramidal` value, **hipped** writes `hipped`, **gabled** writes
-`gabled`, **gambrel** writes `gambrel`, **round** writes `round`, **skillion** writes `skillion`,
+`gabled`, **gambrel** writes `gambrel`, **mansard** writes `mansard`, **round** writes `round`, **skillion** writes `skillion`,
 **dome** writes `dome`, and **onion** writes `onion`. A
 non-standard existing value remains available as its current value so opening the select never rewrites it. Hovering
 their value reveals an edit icon. It opens a numeric modal using the user-facing labels `height`,
@@ -488,8 +488,15 @@ CGAL/Wasm engine initializes once when the 3D viewer mounts. Until it is ready, 
 simple skeleton cannot be constructed, the same footprint uses the existing pyramidal roof as a safe
 fallback instead of disappearing.
 
+A mansard roof uses the same complete-footprint straight skeleton and fallback as a hipped roof, but
+each face has a hard profile break 30% of the propagation distance from its eave. The lower panel
+reaches 60% of `roof:height` at that break, producing a steep lower pitch; the remaining 70% of the
+run supplies the shallow upper 40% rise to the skeleton ridge. Triangles are split at the break so
+the crease remains visible rather than being interpolated away.
+
 Gabled, gambrel and round roofs on a convex outline derive a deterministic main axis from the
-footprint's minimum-area oriented bounding rectangle. With no valid `roof:orientation`, or with `along`, the rectangle's longest edge
+footprint's minimum-area oriented bounding rectangle. With no valid `roof:orientation`, or with
+`along`, the rectangle's longest edge
 is the ridge direction; `across` rotates the ridge onto its shorter edge. Other values are preserved
 as source tags but render with the OSM `along` default. A gabled roof is two planar
 slopes from that ridge to the two transverse rectangle edges. A gambrel roof divides each gabled half

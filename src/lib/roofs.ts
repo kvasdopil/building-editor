@@ -14,6 +14,7 @@ export interface RoofFootprint {
 export type RoofShape =
   | "pyramidal"
   | "hipped"
+  | "mansard"
   | "dome"
   | "onion"
   | "gabled"
@@ -111,19 +112,21 @@ export function roofPlan(
       ? "pyramidal"
       : rawShape === "hipped"
         ? "hipped"
-        : rawShape === "dome" || rawShape === "sphere"
-          ? "dome"
-          : rawShape === "onion"
-            ? "onion"
-            : rawShape === "gabled"
-              ? "gabled"
-              : rawShape === "gambrel"
-                ? "gambrel"
-                : rawShape === "round"
-                  ? "round"
-                  : rawShape === "skillion"
-                    ? "skillion"
-                    : null;
+        : rawShape === "mansard"
+          ? "mansard"
+          : rawShape === "dome" || rawShape === "sphere"
+            ? "dome"
+            : rawShape === "onion"
+              ? "onion"
+              : rawShape === "gabled"
+                ? "gabled"
+                : rawShape === "gambrel"
+                  ? "gambrel"
+                  : rawShape === "round"
+                    ? "round"
+                    : rawShape === "skillion"
+                      ? "skillion"
+                      : null;
   if (shape === null) return null;
 
   const requestedHeight = finiteNumber(properties.roof_height) ?? finiteNumber(parent?.roof_height);
@@ -358,15 +361,39 @@ function skeletonFace(vertices: StraightSkeletonVertex[]): StraightSkeletonVerte
   return face;
 }
 
-/**
- * Lift every face of an interior straight skeleton into one equal-pitch roof
- * facet. Reflex footprint corners become valleys, so L, H and T outlines stay
- * one continuous hipped roof instead of being decomposed into rectangles.
- */
-export function hippedRoofSurface(
+type SkeletonProgress = (progress: number) => number;
+
+function clipSkeletonTriangle(
+  triangle: StraightSkeletonVertex[],
+  threshold: number,
+  keepBelow: boolean,
+): StraightSkeletonVertex[] {
+  const result: StraightSkeletonVertex[] = [];
+  const inside = (vertex: StraightSkeletonVertex) =>
+    keepBelow ? vertex[2] <= threshold + 1e-9 : vertex[2] >= threshold - 1e-9;
+  for (let index = 0; index < triangle.length; index++) {
+    const start = triangle[index];
+    const end = triangle[(index + 1) % triangle.length];
+    const startInside = inside(start);
+    const endInside = inside(end);
+    if (startInside) result.push(start);
+    if (startInside === endInside) continue;
+    const progress = (threshold - start[2]) / (end[2] - start[2]);
+    result.push([
+      start[0] + (end[0] - start[0]) * progress,
+      start[1] + (end[1] - start[1]) * progress,
+      threshold,
+    ]);
+  }
+  return result;
+}
+
+function straightSkeletonRoofSurface(
   footprints: RoofFootprint[],
   eaves: number,
   top: number,
+  heightAtProgress: SkeletonProgress,
+  creaseProgress?: number,
 ): RoofSurface | null {
   if (!straightSkeletonBuilder || footprints.length === 0 || top <= eaves) return null;
 
@@ -399,19 +426,33 @@ export function hippedRoofSurface(
         );
         if (triangles.length === 0) return null;
 
-        for (const triangle of triangles) {
-          const triangleIndices = triangle.map((index) => {
-            const [x, y, time] = face[index];
+        const addPolygon = (polygon: StraightSkeletonVertex[]) => {
+          if (polygon.length < 3) return;
+          const polygonIndices = polygon.map(([x, y, time]) => {
             const progress = Math.max(0, Math.min(1, time / maximumTime));
-            return pushVertex(positions, [x, eaves + progress * roofHeight, y]);
+            const heightProgress = Math.max(0, Math.min(1, heightAtProgress(progress)));
+            return pushVertex(positions, [x, eaves + heightProgress * roofHeight, y]);
           });
-          pushUpwardTriangle(
-            indices,
-            positions,
-            triangleIndices[0],
-            triangleIndices[1],
-            triangleIndices[2],
-          );
+          for (let index = 1; index < polygonIndices.length - 1; index++) {
+            pushUpwardTriangle(
+              indices,
+              positions,
+              polygonIndices[0],
+              polygonIndices[index],
+              polygonIndices[index + 1],
+            );
+          }
+        };
+
+        for (const triangle of triangles) {
+          const triangleVertices = triangle.map((index) => face[index]);
+          if (creaseProgress === undefined) {
+            addPolygon(triangleVertices);
+            continue;
+          }
+          const threshold = maximumTime * creaseProgress;
+          addPolygon(clipSkeletonTriangle(triangleVertices, threshold, true));
+          addPolygon(clipSkeletonTriangle(triangleVertices, threshold, false));
         }
       }
     }
@@ -425,6 +466,47 @@ export function hippedRoofSurface(
     indices: Uint32Array.from(indices),
     center: roofCenter(footprints.map((footprint) => footprint.outer)),
   };
+}
+
+/**
+ * Lift every face of an interior straight skeleton into one equal-pitch roof
+ * facet. Reflex footprint corners become valleys, so L, H and T outlines stay
+ * one continuous hipped roof instead of being decomposed into rectangles.
+ */
+export function hippedRoofSurface(
+  footprints: RoofFootprint[],
+  eaves: number,
+  top: number,
+): RoofSurface | null {
+  return straightSkeletonRoofSurface(footprints, eaves, top, (progress) => progress);
+}
+
+/** Streets.gl's mansard break: 30% of the run reaches 60% of the roof rise. */
+export const MANSARD_BREAK_PROGRESS = 0.3;
+export const MANSARD_BREAK_HEIGHT = 0.6;
+
+export function mansardRoofProgress(progress: number): number {
+  const clamped = Math.max(0, Math.min(1, progress));
+  return clamped <= MANSARD_BREAK_PROGRESS
+    ? (clamped / MANSARD_BREAK_PROGRESS) * MANSARD_BREAK_HEIGHT
+    : MANSARD_BREAK_HEIGHT +
+        ((clamped - MANSARD_BREAK_PROGRESS) / (1 - MANSARD_BREAK_PROGRESS)) *
+          (1 - MANSARD_BREAK_HEIGHT);
+}
+
+/** A hipped straight-skeleton roof with a steep lower and shallow upper pitch. */
+export function mansardRoofSurface(
+  footprints: RoofFootprint[],
+  eaves: number,
+  top: number,
+): RoofSurface | null {
+  return straightSkeletonRoofSurface(
+    footprints,
+    eaves,
+    top,
+    mansardRoofProgress,
+    MANSARD_BREAK_PROGRESS,
+  );
 }
 
 /** Number of curved bands between a dome's eaves and apex. */
@@ -1769,6 +1851,8 @@ export function roofSurface(
   const outlines = footprints.map((footprint) => footprint.outer);
   if (plan.shape === "hipped")
     return hippedRoofSurface(footprints, eaves, top) ?? pyramidalRoofSurface(outlines, eaves, top);
+  if (plan.shape === "mansard")
+    return mansardRoofSurface(footprints, eaves, top) ?? pyramidalRoofSurface(outlines, eaves, top);
   if (plan.shape === "dome") return domedRoofSurface(outlines, eaves, top);
   if (plan.shape === "onion") return onionRoofSurface(outlines, eaves, top);
   if (plan.shape === "gabled")

@@ -299,6 +299,7 @@ function RoofShapeSelect({
     "",
     "pyramidal",
     "hipped",
+    "mansard",
     "gabled",
     "gambrel",
     "round",
@@ -322,6 +323,7 @@ function RoofShapeSelect({
       <option value="">none</option>
       <option value="pyramidal">pyramid</option>
       <option value="hipped">hipped</option>
+      <option value="mansard">mansard</option>
       <option value="gabled">gabled</option>
       <option value="gambrel">gambrel</option>
       <option value="round">round</option>

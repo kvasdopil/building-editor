@@ -59,7 +59,7 @@ test("roof orientation and skillion direction change the support height", () => 
 });
 
 test("curved roofs lower the base only by the local roof drop", () => {
-  for (const shape of ["round", "dome", "onion", "gambrel", "pyramidal", "hipped"]) {
+  for (const shape of ["round", "dome", "onion", "gambrel", "pyramidal", "hipped", "mansard"]) {
     const height = minimumRoofHeight(lower(shape), parent, overlap, 4);
     assert.ok(height > 12 && height < 20, `${shape}: ${height}`);
   }

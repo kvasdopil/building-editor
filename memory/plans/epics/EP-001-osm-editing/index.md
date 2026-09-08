@@ -205,6 +205,11 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   through as inner rings. The browser-only Wasm engine initializes once at the 3D-view boundary, and
   invalid or still-unavailable skeleton geometry falls back to the existing pyramidal surface.
 
+- **Mansard roofs (2026-09-08).** `roof:shape=mansard` reuses the complete-footprint straight
+  skeleton with a hard break at 30% of each face's run and 60% of its rise, matching Streets.gl's
+  steep-lower/shallow-upper proportions. Concave outlines and holes retain the hipped topology, and
+  unavailable or invalid skeleton geometry falls back to the existing pyramidal surface.
+
 - **Overlapping-volume fix (2026-08-23).** The `overlapping-volumes` warning now offers a
   deterministic **Fix** when the shorter part starts at ground and the other part has a higher top.
   It sets the higher part's `min_height` to the shorter part's effective top, then the existing
