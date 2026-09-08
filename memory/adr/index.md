@@ -23,3 +23,7 @@ Related documents:
 - [0009 - IGN LiDAR HD is read on demand](0009-ign-lidar-hd-read-on-demand.md): Why France's public
   kilometre COPC sheets are resolved through WFS and range-read into cached z16 tiles. Read this
   before changing French LiDAR coverage, projection, or upstream access.
+- [0010 - Concave gabled and gambrel roofs build on the straight skeleton](0010-concave-gabled-roofs-on-the-skeleton.md):
+  Why an inward-turning gabled or gambrel outline is built on the interior straight skeleton with its
+  capped walls suppressed, while every convex outline keeps the bounding-rectangle sweep. Read this
+  before changing how a roof shape becomes geometry.

@@ -488,8 +488,8 @@ CGAL/Wasm engine initializes once when the 3D viewer mounts. Until it is ready, 
 simple skeleton cannot be constructed, the same footprint uses the existing pyramidal roof as a safe
 fallback instead of disappearing.
 
-Gabled, gambrel and round roofs derive a deterministic main axis from the footprint's minimum-area oriented
-bounding rectangle. With no valid `roof:orientation`, or with `along`, the rectangle's longest edge
+Gabled, gambrel and round roofs on a convex outline derive a deterministic main axis from the
+footprint's minimum-area oriented bounding rectangle. With no valid `roof:orientation`, or with `along`, the rectangle's longest edge
 is the ridge direction; `across` rotates the ridge onto its shorter edge. Other values are preserved
 as source tags but render with the OSM `along` default. A gabled roof is two planar
 slopes from that ridge to the two transverse rectangle edges. A gambrel roof divides each gabled half
@@ -502,6 +502,29 @@ strip is intersected with the actual polygon before triangulation, so concave fo
 multipolygons and holes cut the roof rather than receiving a bounding-box cap. Boundary segments are
 split at the same profile samples and get vertical fill from the flat eaves extrusion to the slope or
 arch, producing closed gable, gambrel and arched end walls.
+
+A gabled or gambrel outline that turns inward — an L, T, H or U plan, or one carrying a courtyard
+hole — builds on the same interior straight skeleton as a hipped roof instead, because one
+bounding-rectangle ridge spans the empty notch and runs across the wings rather than along them. The
+walls a gable replaces are read from the skeleton itself: a face that collapses to a point at half
+its own edge's length is where a hip end would sit, and measuring that apex against the edge rather
+than against the whole roof is what separates a narrow wing from a shallow bay window. Those walls
+are pushed outward along their own normals before the skeleton is built, so their hip faces land
+outside the outline; clipping the lifted skeleton back to the outline then cuts the ridge vertically
+at each of them, which is what a gable is. Moving a wall away never changes propagation time inside
+the outline, so the pitch is the one the tagged `roof:height` implies, identical to the hipped
+roof's. Every wing therefore carries the ridge to its own end wall at one equal pitch. A gambrel
+keeps its 15° panel rotation, but measures the break from the eaves against the outline's inradius
+rather than a rectangle's half width, so the break wraps every wing at a single height; each
+skeleton face is split along that break to keep it a hard crease, and the gable end walls inherit
+the split. The skeleton comes from the frame footprints and is clipped to the rendered ones, so a
+part sharing its outline's roof still lands on that outline's ridge.
+
+`roof:orientation=across` names a rectangle's shorter edge, which a branched ridge has not got, so
+an outline tagged `across` keeps the bounding-rectangle sweep. So does an outline with no capped
+wall, one whose skeleton cannot be built, and every convex outline including all rectangles, which
+render exactly as they did before. The CGAL/Wasm engine is browser-only, so the roof advice CLI and
+the first render frame before the engine finishes loading also use the bounding-rectangle sweep.
 
 A skillion roof is one clipped plane. Its high boundary reaches total `height` and its downhill
 boundary meets the facade at `height - roof:height`. A valid numeric `roof:direction` from 0° through

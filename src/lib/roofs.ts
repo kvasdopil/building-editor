@@ -1110,6 +1110,495 @@ function axialRoofSurface(
   };
 }
 
+/** A skeleton face whose apex sits at half its own base length caps a wing. */
+const GABLE_CAP_RATIO_TOLERANCE = 0.12;
+/** Below this a propagation time reads as sitting on the eaves. */
+const SKELETON_EAVES_TIME = 1e-6;
+
+interface SkeletonFacet {
+  /** Face outline in order, each vertex carrying its propagation time. */
+  corners: StraightSkeletonVertex[];
+  /** Index into the counter-clockwise outer ring of the edge that swept it. */
+  edge: number | null;
+  apexTime: number;
+}
+
+interface SkeletonFacets {
+  facets: SkeletonFacet[];
+  /** The open counter-clockwise outer ring the edge indices refer to. */
+  outer: Point2[];
+  maximumTime: number;
+}
+
+function pointKey(x: number, y: number): string {
+  return `${x.toFixed(6)}/${y.toFixed(6)}`;
+}
+
+/** Endpoint-order independent key, since a face reports its edge either way. */
+function undirectedEdgeKey(first: Point2, second: Point2): string {
+  const start = pointKey(first[0], first[1]);
+  const end = pointKey(second[0], second[1]);
+  return start <= end ? `${start}|${end}` : `${end}|${start}`;
+}
+
+/**
+ * Build a skeleton and attribute every face to the outer edge that swept it.
+ * A face carries exactly two eaves-level vertices and those are its generating
+ * edge's endpoints, which is what lets a gable suppress individual walls.
+ */
+function skeletonFacets(outer: Point2[], holes: Point2[][]): SkeletonFacets | null {
+  if (!straightSkeletonBuilder) return null;
+  const outerRing = skeletonRing(outer, true);
+  if (!outerRing) return null;
+  const holeRings: Point2[][] = [];
+  for (const hole of holes) {
+    const ring = skeletonRing(hole, false);
+    if (!ring) return null;
+    holeRings.push(ring);
+  }
+
+  let skeleton: ReturnType<StraightSkeletonBuilder["buildFromPolygon"]>;
+  try {
+    skeleton = straightSkeletonBuilder.buildFromPolygon([outerRing, ...holeRings]);
+  } catch {
+    return null;
+  }
+  if (!skeleton) return null;
+  const maximumTime = Math.max(...skeleton.vertices.map((vertex) => vertex[2]));
+  if (!Number.isFinite(maximumTime) || maximumTime <= 1e-9) return null;
+
+  const open = outerRing.slice(0, -1);
+  const edgeIndex = new Map<string, number>();
+  for (let index = 0; index < open.length; index++)
+    edgeIndex.set(undirectedEdgeKey(open[index], open[(index + 1) % open.length]), index);
+
+  const facets: SkeletonFacet[] = [];
+  for (const polygon of skeleton.polygons) {
+    const corners = skeletonFace(polygon.map((index) => skeleton.vertices[index]));
+    if (corners.length < 3) return null;
+    const base = corners.filter((vertex) => vertex[2] <= SKELETON_EAVES_TIME);
+    facets.push({
+      corners,
+      edge:
+        base.length === 2
+          ? (edgeIndex.get(undirectedEdgeKey([base[0][0], base[0][1]], [base[1][0], base[1][1]])) ??
+            null)
+          : null,
+      apexTime: Math.max(...corners.map((vertex) => vertex[2])),
+    });
+  }
+  return { facets, outer: open, maximumTime };
+}
+
+/**
+ * Outer edges that cap a wing of their own width: the face collapses to a point
+ * at half the edge's length, exactly where a hip end would sit. Measuring the
+ * apex against the edge itself rather than the whole roof keeps narrow wings and
+ * shallow bay windows apart, which a single global threshold cannot do.
+ */
+function gableCapEdges(built: SkeletonFacets): Set<number> {
+  const caps = new Set<number>();
+  for (const facet of built.facets) {
+    if (facet.edge === null || facet.corners.length !== 3) continue;
+    const start = built.outer[facet.edge];
+    const end = built.outer[(facet.edge + 1) % built.outer.length];
+    const length = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    if (length <= 1e-9) continue;
+    if (Math.abs(facet.apexTime / length - 0.5) <= GABLE_CAP_RATIO_TOLERANCE) caps.add(facet.edge);
+  }
+  // Suppressing every wall leaves nothing to slope from; that is a pyramid.
+  return caps.size > 0 && caps.size < built.outer.length ? caps : new Set();
+}
+
+/** True once a corner turns inward, where one bounding-rectangle ridge is wrong. */
+function hasReflexCorner(outer: Point2[]): boolean {
+  for (let index = 0; index < outer.length; index++) {
+    const previous = outer[(index - 1 + outer.length) % outer.length];
+    const point = outer[index];
+    const next = outer[(index + 1) % outer.length];
+    const incoming: Point2 = [point[0] - previous[0], point[1] - previous[1]];
+    const outgoing: Point2 = [next[0] - point[0], next[1] - point[1]];
+    if (cross2(incoming, outgoing) < -1e-9) return true;
+  }
+  return false;
+}
+
+/** A span that clears every skeleton apex the footprint can hold. */
+function capOffsetDistance(points: Point2[]): number {
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  return Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+}
+
+/**
+ * Push each capped edge outward along its own normal. Its neighbouring walls
+ * stretch with it, so the wing grows longer and its hip apex lands outside the
+ * original outline. Clipping the lifted skeleton back to the outline then cuts
+ * the ridge vertically at that wall, which is what a gable is. The suppressed
+ * walls move away from the interior, so propagation time inside the outline is
+ * unchanged and the pitch the tagged `roof:height` implies still holds.
+ */
+function ringWithCapsPushedOut(outer: Point2[], caps: Set<number>, distance: number): Point2[] {
+  const outward = (index: number): Point2 => {
+    const start = outer[index];
+    const end = outer[(index + 1) % outer.length];
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const length = Math.hypot(dx, dy);
+    // A counter-clockwise ring keeps its interior to the left of every edge.
+    return length <= 1e-9 ? [0, 0] : [dy / length, -dx / length];
+  };
+  const normals = outer.map((_, index) => (caps.has(index) ? outward(index) : ([0, 0] as Point2)));
+  return outer.map((point, index): Point2 => {
+    const before = normals[(index - 1 + outer.length) % outer.length];
+    const after = normals[index];
+    return [
+      point[0] + (before[0] + after[0]) * distance,
+      point[1] + (before[1] + after[1]) * distance,
+    ];
+  });
+}
+
+interface TimeField {
+  at(point: Point2): number;
+  gradient: Point2;
+}
+
+/**
+ * Propagation time over a face is the distance to that face's own generating
+ * edge, so it stays affine and can be read at the points a clip introduces.
+ */
+function facetTimeField(corners: StraightSkeletonVertex[]): TimeField | null {
+  const origin = corners[0];
+  for (let first = 1; first < corners.length; first++) {
+    for (let second = first + 1; second < corners.length; second++) {
+      const ux = corners[first][0] - origin[0];
+      const uy = corners[first][1] - origin[1];
+      const vx = corners[second][0] - origin[0];
+      const vy = corners[second][1] - origin[1];
+      const determinant = ux * vy - uy * vx;
+      if (Math.abs(determinant) <= 1e-12) continue;
+      const du = corners[first][2] - origin[2];
+      const dv = corners[second][2] - origin[2];
+      const gradient: Point2 = [
+        (du * vy - dv * uy) / determinant,
+        (dv * ux - du * vx) / determinant,
+      ];
+      return {
+        at: (point) =>
+          origin[2] + gradient[0] * (point[0] - origin[0]) + gradient[1] * (point[1] - origin[1]),
+        gradient,
+      };
+    }
+  }
+  return null;
+}
+
+/** A half-plane wide enough to cut any face, bounded by one time isoline. */
+function isolineHalfPlane(
+  field: TimeField,
+  level: number,
+  reference: Point2,
+  reach: number,
+  above: boolean,
+): Flatten.Polygon | null {
+  const [gx, gy] = field.gradient;
+  const squared = gx * gx + gy * gy;
+  if (squared <= 1e-18) return null;
+  const magnitude = Math.sqrt(squared);
+  const shift = (level - field.at(reference)) / squared;
+  const base: Point2 = [reference[0] + gx * shift, reference[1] + gy * shift];
+  const sign = above ? 1 : -1;
+  const corner = (alongScale: number, normalScale: number): Point2 => [
+    base[0] + ((-gy / magnitude) * alongScale - (sign * gx * normalScale) / magnitude) * reach,
+    base[1] + ((gx / magnitude) * alongScale - (sign * gy * normalScale) / magnitude) * reach,
+  ];
+  return new Flatten.Polygon(
+    oriented([corner(-1, 0), corner(1, 0), corner(1, -1), corner(-1, -1)], true),
+  );
+}
+
+/** Split a face wherever the profile creases, so the break stays a hard edge. */
+function piecesCutAtCreases(
+  island: Flatten.Polygon,
+  field: TimeField,
+  levels: number[],
+  reference: Point2,
+  reach: number,
+): Flatten.Polygon[] {
+  let pieces = [island];
+  for (const level of levels) {
+    const next: Flatten.Polygon[] = [];
+    for (const piece of pieces) {
+      let cut = false;
+      for (const above of [false, true]) {
+        const half = isolineHalfPlane(field, level, reference, reach, above);
+        if (!half) continue;
+        const part = Flatten.BooleanOperations.intersect(piece, half);
+        if (part.isEmpty()) continue;
+        for (const sub of part.splitToIslands()) next.push(sub);
+        cut = true;
+      }
+      if (!cut) next.push(piece);
+    }
+    pieces = next;
+  }
+  return pieces;
+}
+
+/** Distance from a point to the nearest footprint wall. */
+function distanceToRings(point: Point2, rings: Point2[][]): number {
+  let best = Infinity;
+  for (const ring of rings) {
+    for (let index = 0; index < ring.length; index++) {
+      const start = ring[index];
+      const end = ring[(index + 1) % ring.length];
+      const dx = end[0] - start[0];
+      const dy = end[1] - start[1];
+      const squared = dx * dx + dy * dy;
+      const along =
+        squared <= 1e-18
+          ? 0
+          : Math.max(
+              0,
+              Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / squared),
+            );
+      best = Math.min(
+        best,
+        Math.hypot(point[0] - (start[0] + dx * along), point[1] - (start[1] + dy * along)),
+      );
+    }
+  }
+  return best;
+}
+
+/** Height fraction from eaves to ridge for a normalized propagation time. */
+interface SkeletonProfile {
+  at(timeProgress: number): number;
+  /** Normalized times where the profile creases and the mesh must split. */
+  creases: number[];
+}
+
+/** A gabled roof rises straight from every eave to the ridge. */
+function gabledSkeletonProfile(): SkeletonProfile {
+  return { at: (progress) => progress, creases: [] };
+}
+
+/**
+ * A gambrel breaks each slope once. The run here is the footprint's inradius
+ * rather than a rectangle's half width, so the break sits a fixed distance above
+ * the eaves and wraps every wing at one height instead of per bounding box.
+ */
+function gambrelSkeletonProfile(run: number, rise: number): SkeletonProfile {
+  const pitch = Math.atan2(rise, run);
+  const offset = Math.max(
+    0,
+    Math.min(GAMBREL_PITCH_OFFSET, pitch - 1e-6, Math.PI / 2 - pitch - 1e-6),
+  );
+  const tangent = Math.tan(offset);
+  const breakProgress = run <= 1e-9 ? 0.5 : (run - rise * tangent) / 2 / run;
+  const breakHeight = rise <= 1e-9 ? 0.5 : (rise + run * tangent) / 2 / rise;
+  if (!(breakProgress > 1e-6 && breakProgress < 1 - 1e-6)) return gabledSkeletonProfile();
+  return {
+    at: (progress) =>
+      progress <= breakProgress
+        ? (progress / breakProgress) * breakHeight
+        : breakHeight + ((progress - breakProgress) / (1 - breakProgress)) * (1 - breakHeight),
+    creases: [breakProgress],
+  };
+}
+
+/**
+ * Lift one clipped, crease-free piece of a skeleton face and close the outline
+ * walls it sits on. A piece keys its vertices under its own prefix so ridges and
+ * gambrel breaks keep hard creases rather than averaging into a smooth shell.
+ */
+function addSkeletonPiece(
+  piece: Flatten.Polygon,
+  pieceKey: string,
+  heightAt: (point: Point2) => number,
+  rings: Point2[][],
+  eaves: number,
+  tolerance: number,
+  positions: number[],
+  indices: number[],
+  vertices: Map<string, number>,
+  walls: number[],
+): void {
+  const faces = ([...piece.faces] as Flatten.Face[])
+    .map((face) => ({ face, area: face.area() }))
+    .sort((first, second) => second.area - first.area);
+  const contour = faces[0]?.face.vertices.map((point): Point2 => [point.x, point.y]);
+  if (!contour || contour.length < 3) return;
+  const holes = faces
+    .slice(1)
+    .map(({ face }) => face.vertices.map((point): Point2 => [point.x, point.y]))
+    .filter((hole) => hole.length >= 3);
+
+  const triangles = ShapeUtils.triangulateShape(
+    contour.map(([x, y]) => new Vector2(x, y)),
+    holes.map((hole) => hole.map(([x, y]) => new Vector2(x, y))),
+  );
+  const points = [...contour, ...holes.flat()];
+  const indexFor = (point: Point2): number => {
+    const height = heightAt(point);
+    const key = `${pieceKey}/${point[0].toFixed(7)}/${point[1].toFixed(7)}/${height.toFixed(7)}`;
+    const existing = vertices.get(key);
+    if (existing !== undefined) return existing;
+    const index = pushVertex(positions, [point[0], height, point[1]]);
+    vertices.set(key, index);
+    return index;
+  };
+  for (const triangle of triangles)
+    pushUpwardTriangle(
+      indices,
+      positions,
+      indexFor(points[triangle[0]]),
+      indexFor(points[triangle[1]]),
+      indexFor(points[triangle[2]]),
+    );
+
+  // A piece edge running along a suppressed wall is a gable end: fill it in
+  // from the flat eaves to the slope, the way the band sweep fills its ends.
+  for (const ring of [contour, ...holes]) {
+    for (let index = 0; index < ring.length; index++) {
+      const start = ring[index];
+      const end = ring[(index + 1) % ring.length];
+      const middle: Point2 = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
+      if (distanceToRings(middle, rings) > tolerance) continue;
+      const startTop = heightAt(start);
+      const endTop = heightAt(end);
+      if (startTop <= eaves + 1e-6 && endTop <= eaves + 1e-6) continue;
+      walls.push(
+        start[0],
+        eaves,
+        start[1],
+        end[0],
+        eaves,
+        end[1],
+        end[0],
+        endTop,
+        end[1],
+        start[0],
+        eaves,
+        start[1],
+        end[0],
+        endTop,
+        end[1],
+        start[0],
+        startTop,
+        start[1],
+      );
+    }
+  }
+}
+
+/**
+ * Build a gabled or gambrel roof on the footprint's own straight skeleton.
+ * Capped walls are pushed out so their hips fall outside the outline, the lifted
+ * skeleton is clipped back to it, and every face is split at the profile's
+ * creases. A concave L, T or H outline therefore gets a ridge that follows each
+ * wing at one equal pitch, instead of a single bounding-rectangle ridge that
+ * runs across the wings and is then clipped.
+ *
+ * Returns null whenever the outline is one the bounding-rectangle sweep already
+ * handles, or the engine is missing, so that path stays the default.
+ */
+function skeletonGabledSurface(
+  footprints: RoofFootprint[],
+  frameFootprints: RoofFootprint[],
+  eaves: number,
+  top: number,
+  orientation: RoofOrientation,
+  profileFor: (run: number, rise: number) => SkeletonProfile,
+): RoofSurface | null {
+  // `across` names a rectangle's short axis, which a branched spine has not got.
+  if (!straightSkeletonBuilder || orientation !== "along") return null;
+  if (footprints.length === 0 || frameFootprints.length === 0 || top <= eaves) return null;
+
+  // The frame carries the roof, exactly as the bounding rectangle does, so a
+  // part sharing its outline's roof still lands on that outline's ridge.
+  const rings = footprints.flatMap((footprint) => [footprint.outer, ...footprint.holes]);
+  const outline = flattenFootprints(footprints);
+  if (outline.isEmpty() || !outline.isValid()) return null;
+
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const walls: number[] = [];
+  const vertices = new Map<string, number>();
+  let sawConcave = false;
+  let pieceIndex = 0;
+
+  try {
+    for (const frame of frameFootprints) {
+      const built = skeletonFacets(frame.outer, frame.holes);
+      if (!built) return null;
+      if (!hasReflexCorner(built.outer) && frame.holes.length === 0) return null;
+      sawConcave = true;
+
+      const caps = gableCapEdges(built);
+      if (caps.size === 0) return null;
+
+      const reach = capOffsetDistance(built.outer);
+      const pushed = skeletonFacets(ringWithCapsPushedOut(built.outer, caps, reach), frame.holes);
+      if (!pushed) return null;
+
+      // The unsuppressed skeleton states the outline's true ridge time, and the
+      // suppressed walls only move away, so this keeps the pitch the tag asks.
+      const run = built.maximumTime;
+      const profile = profileFor(run, top - eaves);
+      const tolerance = Math.max(reach, 1) * 1e-7;
+
+      for (const facet of pushed.facets) {
+        const field = facetTimeField(facet.corners);
+        if (!field) continue;
+        const face = new Flatten.Polygon(
+          oriented(
+            facet.corners.map(([x, y]): Point2 => [x, y]),
+            true,
+          ),
+        );
+        if (face.isEmpty()) continue;
+        const clipped = Flatten.BooleanOperations.intersect(outline, face);
+        if (clipped.isEmpty()) continue;
+        const reference: Point2 = [facet.corners[0][0], facet.corners[0][1]];
+        const heightAt = (point: Point2): number =>
+          eaves + profile.at(Math.max(0, Math.min(1, field.at(point) / run))) * (top - eaves);
+        for (const island of clipped.splitToIslands())
+          for (const cut of piecesCutAtCreases(
+            island,
+            field,
+            profile.creases.map((crease) => crease * run),
+            reference,
+            reach * 4,
+          ))
+            addSkeletonPiece(
+              cut,
+              `${pieceIndex++}`,
+              heightAt,
+              rings,
+              eaves,
+              tolerance,
+              positions,
+              indices,
+              vertices,
+              walls,
+            );
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  if (!sawConcave || indices.length === 0) return null;
+  return {
+    positions: Float32Array.from(positions),
+    indices: Uint32Array.from(indices),
+    wallPositions: walls.length > 0 ? Float32Array.from(walls) : undefined,
+    center: roofCenter(footprints.map((footprint) => footprint.outer)),
+  };
+}
+
 /** Two planar slopes meeting at the oriented ridge of the minimum rectangle. */
 export function gabledRoofSurface(
   footprints: RoofFootprint[],
@@ -1118,16 +1607,26 @@ export function gabledRoofSurface(
   top: number,
   orientation: RoofOrientation = "along",
 ): RoofSurface | null {
-  return axialRoofSurface(
-    footprints,
-    frameFootprints,
-    eaves,
-    top,
-    2,
-    (progress) => 1 - Math.abs(progress * 2 - 1),
-    false,
-    undefined,
-    orientation,
+  return (
+    skeletonGabledSurface(
+      footprints,
+      frameFootprints,
+      eaves,
+      top,
+      orientation,
+      gabledSkeletonProfile,
+    ) ??
+    axialRoofSurface(
+      footprints,
+      frameFootprints,
+      eaves,
+      top,
+      2,
+      (progress) => 1 - Math.abs(progress * 2 - 1),
+      false,
+      undefined,
+      orientation,
+    )
   );
 }
 
@@ -1172,6 +1671,15 @@ export function gambrelRoofSurface(
   top: number,
   orientation: RoofOrientation = "along",
 ): RoofSurface | null {
+  const skeleton = skeletonGabledSurface(
+    footprints,
+    frameFootprints,
+    eaves,
+    top,
+    orientation,
+    gambrelSkeletonProfile,
+  );
+  if (skeleton) return skeleton;
   return axialRoofSurface(
     footprints,
     frameFootprints,
