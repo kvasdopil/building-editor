@@ -21,6 +21,18 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
 import { ChangesSidebar } from "./ChangesSidebar";
 import { SubmitDialog } from "./SubmitDialog";
+import {
+  EDGE_SNAP_PIXELS,
+  drawingSnapModifiers,
+  drawingPreviewSegment,
+  resolveDrawingSnap,
+  nearestBoundary,
+  projectBoundaryRings,
+  type ProjectedBoundaryNode,
+  type BoundaryGroup,
+  type BoundarySnap,
+  type DrawingSnap,
+} from "@/lib/drawing-snap";
 import { addPartToBuilding } from "@/lib/add-part";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
 import {
@@ -243,7 +255,8 @@ function useLod1(selection: BuildingSelection | null): Lod1Match | null {
 interface HoleDraft {
   targetId: string | null;
   nodes: LngLat[];
-  snap: BoundarySnap | null;
+  snap: DrawingSnap | null;
+  cursor?: LngLat | null;
 }
 
 const EMPTY_HOLE_DRAFT: HoleDraft = { targetId: null, nodes: [], snap: null };
@@ -252,7 +265,8 @@ interface SliceDraft {
   targetId: string | null;
   mode: "open" | "loop" | null;
   nodes: LngLat[];
-  snap: BoundarySnap | null;
+  snap: DrawingSnap | null;
+  cursor?: LngLat | null;
 }
 
 const EMPTY_SLICE_DRAFT: SliceDraft = { targetId: null, mode: null, nodes: [], snap: null };
@@ -260,7 +274,8 @@ const EMPTY_SLICE_DRAFT: SliceDraft = { targetId: null, mode: null, nodes: [], s
 interface AddPartDraft {
   targetId: string | null;
   nodes: LngLat[];
-  snap: BoundarySnap | null;
+  snap: DrawingSnap | null;
+  cursor?: LngLat | null;
 }
 
 const EMPTY_ADD_PART_DRAFT: AddPartDraft = { targetId: null, nodes: [], snap: null };
@@ -425,7 +440,8 @@ function skillionDirectionFeatures(selection: BuildingSelection | null): Feature
 function draftFeatures(
   nodes: LngLat[],
   closePreview: boolean,
-  snap: BoundarySnap | null = null,
+  snap: DrawingSnap | null = null,
+  cursor?: LngLat | null,
 ): FeatureCollection {
   const features: Feature<Polygon | LineString | Point>[] = [];
   if (closePreview && nodes.length >= 3) {
@@ -449,10 +465,18 @@ function draftFeatures(
       geometry: { type: "Point", coordinates },
     });
   });
+  const cursorSegment = drawingPreviewSegment(nodes, cursor, snap);
+  if (cursorSegment) features.push(cursorSegment);
+  if (snap?.guides) {
+    features.push(...snap.guides);
+  }
   if (snap) {
     features.push({
       type: "Feature",
-      properties: { role: snap.kind === "node" ? "snap-node" : "snap-edge" },
+      properties: {
+        role:
+          snap.kind === "orthogonal" ? "node" : snap.kind === "node" ? "snap-node" : "snap-edge",
+      },
       geometry: { type: "Point", coordinates: snap.coordinates },
     });
   }
@@ -861,13 +885,6 @@ function edgeRunFor(selection: BuildingSelection, segment: SelectionSegment): Ed
   };
 }
 
-interface BoundarySnap {
-  targetId: string;
-  coordinates: LngLat;
-  distance: number;
-  kind: "edge" | "node";
-}
-
 const RIGHT_ANGLE_SNAP_TARGET = "right-angle";
 
 interface RightAngleSnap {
@@ -957,12 +974,6 @@ function rightAngleGizmo(map: MaplibreMap, snap: RightAngleSnap): FeatureCollect
   };
 }
 
-interface ProjectedBoundaryNode {
-  coordinates: LngLat;
-  x: number;
-  y: number;
-}
-
 interface SliceBoundaryCache {
   targetId: string;
   selection: BuildingSelection;
@@ -1005,89 +1016,17 @@ function buildingOuterBoundaryRings(selection: BuildingSelection): LngLat[][] {
   return selection.building.polygons.map((footprint) => footprint.outer);
 }
 
-function projectBoundaryRings(map: MaplibreMap, rings: LngLat[][]): ProjectedBoundaryNode[][] {
-  return rings.map((ring) =>
-    openRing(ring).map((coordinates) => {
-      const point = map.project(coordinates);
-      return { coordinates, x: point.x, y: point.y };
-    }),
-  );
-}
-
-function nearestProjectedBoundary(
-  projectedRings: ProjectedBoundaryNode[][],
-  click: { x: number; y: number },
-  targetId: string,
-  tolerance: number,
-  excludedVertex?: LngLat,
-): BoundarySnap | null {
-  let nearestNode: BoundarySnap | null = null;
-  let nearestEdge: BoundarySnap | null = null;
-  const nodeTolerance = Math.min(tolerance, 9);
-  const excludedKey = excludedVertex ? coordinateKey(roundToOsmGrid(excludedVertex)) : undefined;
-  for (const ring of projectedRings) {
-    for (const node of ring) {
-      if (excludedKey === coordinateKey(roundToOsmGrid(node.coordinates))) continue;
-      const distance = Math.hypot(click.x - node.x, click.y - node.y);
-      if (distance > nodeTolerance || (nearestNode && distance >= nearestNode.distance)) continue;
-      nearestNode = { targetId, coordinates: node.coordinates, distance, kind: "node" };
-    }
-    for (let index = 0; index < ring.length; index++) {
-      const start = ring[index];
-      const end = ring[(index + 1) % ring.length];
-      if (
-        excludedKey &&
-        (excludedKey === coordinateKey(roundToOsmGrid(start.coordinates)) ||
-          excludedKey === coordinateKey(roundToOsmGrid(end.coordinates)))
-      )
-        continue;
-      const dx = end.x - start.x;
-      const dy = end.y - start.y;
-      const lengthSquared = dx * dx + dy * dy;
-      const amount =
-        lengthSquared === 0
-          ? 0
-          : Math.max(
-              0,
-              Math.min(1, ((click.x - start.x) * dx + (click.y - start.y) * dy) / lengthSquared),
-            );
-      const x = start.x + amount * dx;
-      const y = start.y + amount * dy;
-      const distance = Math.hypot(click.x - x, click.y - y);
-      if (distance > tolerance || (nearestEdge && distance >= nearestEdge.distance)) continue;
-      nearestEdge = {
-        targetId,
-        coordinates: [
-          start.coordinates[0] + amount * (end.coordinates[0] - start.coordinates[0]),
-          start.coordinates[1] + amount * (end.coordinates[1] - start.coordinates[1]),
-        ],
-        distance,
-        kind: "edge",
-      };
-    }
-  }
-  return nearestNode ?? nearestEdge;
-}
-
-function nearestBuildingBoundary(
+function boundaryGroups(
   map: MaplibreMap,
   collection: FeatureCollection,
   click: { x: number; y: number },
-  tolerance = 12,
+  tolerance = EDGE_SNAP_PIXELS,
   target?: SliceBoundaryCache | null,
-  excludedVertex?: LngLat,
-): BoundarySnap | null {
+): BoundaryGroup[] {
   if (target) {
     target.projected ??= projectBoundaryRings(map, target.rings);
-    return nearestProjectedBoundary(
-      target.projected,
-      click,
-      target.targetId,
-      tolerance,
-      excludedVertex,
-    );
+    return [{ targetId: target.targetId, rings: target.projected }];
   }
-
   const candidateIds = map
     .queryRenderedFeatures(
       [
@@ -1099,24 +1038,26 @@ function nearestBuildingBoundary(
     .map((feature) => feature.properties.id)
     .filter((id): id is string => typeof id === "string");
   const ringsById = boundaryRingIndex(collection);
-  let nearestNode: BoundarySnap | null = null;
-  let nearestEdge: BoundarySnap | null = null;
-  for (const id of new Set(candidateIds)) {
+  return [...new Set(candidateIds)].flatMap((id) => {
     const rings = ringsById.get(id);
-    if (!rings) continue;
-    const nearest = nearestProjectedBoundary(
-      projectBoundaryRings(map, rings),
-      click,
-      id,
-      tolerance,
-      excludedVertex,
-    );
-    if (!nearest) continue;
-    if (nearest.kind === "node") {
-      if (!nearestNode || nearest.distance < nearestNode.distance) nearestNode = nearest;
-    } else if (!nearestEdge || nearest.distance < nearestEdge.distance) nearestEdge = nearest;
-  }
-  return nearestNode ?? nearestEdge;
+    return rings ? [{ targetId: id, rings: projectBoundaryRings(map, rings) }] : [];
+  });
+}
+
+function nearestBuildingBoundary(
+  map: MaplibreMap,
+  collection: FeatureCollection,
+  click: { x: number; y: number },
+  tolerance = EDGE_SNAP_PIXELS,
+  target?: SliceBoundaryCache | null,
+  excludedVertex?: LngLat,
+): BoundarySnap | null {
+  return nearestBoundary(
+    boundaryGroups(map, collection, click, tolerance, target),
+    click,
+    tolerance,
+    excludedVertex,
+  );
 }
 
 function applyLocalEdits(
@@ -2005,7 +1946,7 @@ export function MapView() {
   const updateHoleDraft = useCallback((draft: HoleDraft) => {
     holeDraftRef.current = draft;
     const source = mapRef.current?.getSource<GeoJSONSource>("hole-draft");
-    void source?.setData(draftFeatures(draft.nodes, true, draft.snap));
+    void source?.setData(draftFeatures(draft.nodes, true, draft.snap, draft.cursor));
   }, []);
 
   const cancelHoleDrawing = useCallback(() => {
@@ -2016,7 +1957,9 @@ export function MapView() {
   const updateSliceDraft = useCallback((draft: SliceDraft) => {
     sliceDraftRef.current = draft;
     const source = mapRef.current?.getSource<GeoJSONSource>("hole-draft");
-    void source?.setData(draftFeatures(draft.nodes, draft.mode === "loop", draft.snap));
+    void source?.setData(
+      draftFeatures(draft.nodes, draft.mode === "loop", draft.snap, draft.cursor),
+    );
   }, []);
 
   const prepareSliceBoundaryCache = useCallback((targetId: string): SliceBoundaryCache | null => {
@@ -2056,7 +1999,7 @@ export function MapView() {
   const updateAddPartDraft = useCallback((draft: AddPartDraft) => {
     addPartDraftRef.current = draft;
     const source = mapRef.current?.getSource<GeoJSONSource>("hole-draft");
-    void source?.setData(draftFeatures(draft.nodes, true, draft.snap));
+    void source?.setData(draftFeatures(draft.nodes, true, draft.snap, draft.cursor));
   }, []);
 
   const cancelAddPartDrawing = useCallback(() => {
@@ -2801,21 +2744,29 @@ export function MapView() {
     let pendingPoint: { x: number; y: number } | null = null;
     let mouseMoveFrame = 0;
 
+    const snapAt = (point: { x: number; y: number }, disabled = modifiers.disabled()) => {
+      const draft = holeDraftRef.current;
+      return resolveDrawingSnap(
+        map,
+        point,
+        draft.nodes,
+        draft.targetId
+          ? selectFromOsm(displayedFeaturesRef.current, draft.targetId)?.building
+          : selectionRef.current?.building,
+        null,
+        null,
+        disabled,
+        boundaryGroups(map, displayedFeaturesRef.current, point),
+      );
+    };
     const updateSnapAt = (point: { x: number; y: number }) => {
       const draft = holeDraftRef.current;
-      const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, point);
-      if (!draft.snap && !snap) return;
-      if (
-        draft.snap &&
-        snap &&
-        draft.snap.kind === snap.kind &&
-        draft.snap.targetId === snap.targetId &&
-        draft.snap.coordinates[0] === snap.coordinates[0] &&
-        draft.snap.coordinates[1] === snap.coordinates[1]
-      )
-        return;
-      updateHoleDraft({ ...draft, snap });
+      const snap = snapAt(point);
+      const cursor = map.unproject([point.x, point.y]);
+      updateHoleDraft({ ...draft, snap, cursor: [cursor.lng, cursor.lat] });
     };
+
+    const modifiers = drawingSnapModifiers(map, updateSnapAt);
 
     const onMouseMove = (event: MapMouseEvent) => {
       pendingPoint = { x: event.point.x, y: event.point.y };
@@ -2841,7 +2792,7 @@ export function MapView() {
       const rawPoint: LngLat = [event.lngLat.lng, event.lngLat.lat];
       const draft = holeDraftRef.current;
 
-      if (draft.nodes.length > 0) {
+      if (!event.originalEvent.shiftKey && draft.nodes.length > 0) {
         const first = map.project(draft.nodes[0]);
         if (Math.hypot(first.x - event.point.x, first.y - event.point.y) <= 12) {
           finishHoleDrawing();
@@ -2851,7 +2802,7 @@ export function MapView() {
 
       if (!draft.targetId) {
         const selectedId = selectionRef.current?.building.id;
-        const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+        const snap = snapAt(event.point, event.originalEvent.shiftKey);
         const hit =
           selectedId || snap
             ? undefined
@@ -2873,15 +2824,17 @@ export function MapView() {
           targetId: targetSelection.building.id,
           nodes: [snap?.coordinates ?? rawPoint],
           snap: null,
+          cursor: null,
         });
         return;
       }
 
-      const snap = nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+      const snap = snapAt(event.point, event.originalEvent.shiftKey);
       updateHoleDraft({
         ...draft,
         nodes: [...draft.nodes, snap?.coordinates ?? rawPoint],
         snap: null,
+        cursor: null,
       });
     };
 
@@ -2895,10 +2848,17 @@ export function MapView() {
       }
     };
 
+    const clearSnap = () => {
+      cancelPendingMouseMove();
+      updateHoleDraft({ ...holeDraftRef.current, snap: null, cursor: null });
+    };
+    canvas.addEventListener("mouseleave", clearSnap);
     map.on("mousemove", onMouseMove);
     map.on("click", onClick);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      modifiers.dispose();
+      canvas.removeEventListener("mouseleave", clearSnap);
       cancelPendingMouseMove();
       map.off("mousemove", onMouseMove);
       map.off("click", onClick);
@@ -2920,30 +2880,27 @@ export function MapView() {
     let pendingPoint: { x: number; y: number } | null = null;
     let mouseMoveFrame = 0;
 
+    const snapAt = (point: { x: number; y: number }, disabled = modifiers.disabled()) => {
+      const draft = sliceDraftRef.current;
+      return resolveDrawingSnap(
+        map,
+        point,
+        draft.nodes,
+        sliceBoundaryCacheRef.current?.selection.building,
+        null,
+        null,
+        disabled,
+        boundaryGroups(map, displayedFeaturesRef.current, point, 12, sliceBoundaryCacheRef.current),
+      );
+    };
     const updateSnapAt = (point: { x: number; y: number }) => {
       const draft = sliceDraftRef.current;
-      const boundaryCache =
-        sliceBoundaryCacheRef.current?.targetId === draft.targetId
-          ? sliceBoundaryCacheRef.current
-          : null;
-      const snap =
-        draft.mode === "loop"
-          ? null
-          : draft.targetId && !boundaryCache
-            ? null
-            : nearestBuildingBoundary(map, displayedFeaturesRef.current, point, 12, boundaryCache);
-      if (!draft.snap && !snap) return;
-      if (
-        draft.snap &&
-        snap &&
-        draft.snap.kind === snap.kind &&
-        draft.snap.targetId === snap.targetId &&
-        draft.snap.coordinates[0] === snap.coordinates[0] &&
-        draft.snap.coordinates[1] === snap.coordinates[1]
-      )
-        return;
-      updateSliceDraft({ ...draft, snap });
+      const snap = snapAt(point);
+      const cursor = map.unproject([point.x, point.y]);
+      updateSliceDraft({ ...draft, snap, cursor: [cursor.lng, cursor.lat] });
     };
+
+    const modifiers = drawingSnapModifiers(map, updateSnapAt);
 
     const onMouseMove = (event: MapMouseEvent) => {
       pendingPoint = { x: event.point.x, y: event.point.y };
@@ -2971,12 +2928,13 @@ export function MapView() {
     const clearSnap = () => {
       cancelPendingMouseMove();
       const draft = sliceDraftRef.current;
-      if (draft.snap) updateSliceDraft({ ...draft, snap: null });
+      if (draft.snap || draft.cursor) updateSliceDraft({ ...draft, snap: null, cursor: null });
     };
 
     const onClick = (event: MapMouseEvent) => {
       cancelPendingMouseMove();
-      const point: LngLat = [event.lngLat.lng, event.lngLat.lat];
+      const drawingSnap = snapAt(event.point, event.originalEvent.shiftKey);
+      const point: LngLat = drawingSnap?.coordinates ?? [event.lngLat.lng, event.lngLat.lat];
       const draft = sliceDraftRef.current;
 
       if (!draft.targetId) {
@@ -2985,17 +2943,20 @@ export function MapView() {
         // relation/1794585 can lock onto its neighboring way/111680989 instead.
         const selectedTargetId = selectionRef.current?.building.id;
         const selectedCache = selectedTargetId ? prepareSliceBoundaryCache(selectedTargetId) : null;
-        const selectedSnap = selectedCache
-          ? nearestBuildingBoundary(
-              map,
-              displayedFeaturesRef.current,
-              event.point,
-              12,
-              selectedCache,
-            )
-          : null;
-        const snap =
-          selectedSnap ?? nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point);
+        const selectedSnap =
+          !event.originalEvent.shiftKey && selectedCache
+            ? nearestBuildingBoundary(
+                map,
+                displayedFeaturesRef.current,
+                event.point,
+                12,
+                selectedCache,
+              )
+            : null;
+        const snap = event.originalEvent.shiftKey
+          ? null
+          : (selectedSnap ??
+            nearestBuildingBoundary(map, displayedFeaturesRef.current, event.point));
         if (snap) {
           const boundaryCache =
             selectedSnap && selectedCache
@@ -3010,6 +2971,7 @@ export function MapView() {
             mode: "open",
             nodes: [snap.coordinates],
             snap: null,
+            cursor: null,
           });
           setNotice("Add bends, then click another outline, hole, or part edge");
           return;
@@ -3029,7 +2991,7 @@ export function MapView() {
           setNotice("Could not find the target building");
           return;
         }
-        updateSliceDraft({ targetId: id, mode: "loop", nodes: [point], snap: null });
+        updateSliceDraft({ targetId: id, mode: "loop", nodes: [point], snap: null, cursor: null });
         setNotice("Draw a loop, then click its first node or press Enter");
         return;
       }
@@ -3047,6 +3009,7 @@ export function MapView() {
       if (draft.mode === "loop") {
         const first = map.project(draft.nodes[0]);
         if (
+          !event.originalEvent.shiftKey &&
           draft.nodes.length >= 3 &&
           Math.hypot(first.x - event.point.x, first.y - event.point.y) <= 12
         ) {
@@ -3057,7 +3020,7 @@ export function MapView() {
           setNotice("Every loop node must stay inside the same building");
           return;
         }
-        updateSliceDraft({ ...draft, nodes: [...draft.nodes, point], snap: null });
+        updateSliceDraft({ ...draft, nodes: [...draft.nodes, point], snap: null, cursor: null });
         return;
       }
 
@@ -3069,15 +3032,14 @@ export function MapView() {
         setNotice("Could not find the target building");
         return;
       }
-      const snap = nearestBuildingBoundary(
-        map,
-        displayedFeaturesRef.current,
-        event.point,
-        12,
-        boundaryCache,
-      );
-      if (snap) {
-        updateSliceDraft({ ...draft, nodes: [...draft.nodes, snap.coordinates], snap: null });
+      const snap = drawingSnap;
+      if (snap && snap.kind !== "orthogonal") {
+        updateSliceDraft({
+          ...draft,
+          nodes: [...draft.nodes, snap.coordinates],
+          snap: null,
+          cursor: null,
+        });
         finishSliceDrawing();
         return;
       }
@@ -3085,7 +3047,7 @@ export function MapView() {
         setNotice("Polyline nodes must stay inside the same building");
         return;
       }
-      updateSliceDraft({ ...draft, nodes: [...draft.nodes, point], snap: null });
+      updateSliceDraft({ ...draft, nodes: [...draft.nodes, point], snap: null, cursor: null });
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -3105,6 +3067,7 @@ export function MapView() {
     canvas.addEventListener("mouseleave", clearSnap);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      modifiers.dispose();
       map.off("mousemove", onMouseMove);
       map.off("move", invalidateProjectedBoundaries);
       map.off("click", onClick);
@@ -3137,31 +3100,24 @@ export function MapView() {
     let pendingPoint: { x: number; y: number } | null = null;
     let mouseMoveFrame = 0;
 
+    const snapAt = (point: { x: number; y: number }, disabled = modifiers.disabled()) => {
+      const draft = addPartDraftRef.current;
+      return resolveDrawingSnap(
+        map,
+        point,
+        draft.nodes,
+        boundaryCache.selection.building,
+        null,
+        draft.nodes.length ? nearestLod1Node(map, referenceNodes, point) : null,
+        disabled,
+        boundaryGroups(map, displayedFeaturesRef.current, point, 12, boundaryCache),
+      );
+    };
     const updateSnapAt = (point: { x: number; y: number }) => {
       const draft = addPartDraftRef.current;
-      const boundarySnap = nearestBuildingBoundary(
-        map,
-        displayedFeaturesRef.current,
-        point,
-        12,
-        boundaryCache,
-      );
-      // The first and last nodes still have to belong to the OSM outline.
-      // Once drawing has started, LOD1 corners guide exterior helper nodes.
-      const referenceSnap =
-        draft.nodes.length > 0 ? nearestLod1Node(map, referenceNodes, point) : null;
-      const snap = boundarySnap ?? referenceSnap;
-      if (!draft.snap && !snap) return;
-      if (
-        draft.snap &&
-        snap &&
-        draft.snap.kind === snap.kind &&
-        draft.snap.targetId === snap.targetId &&
-        draft.snap.coordinates[0] === snap.coordinates[0] &&
-        draft.snap.coordinates[1] === snap.coordinates[1]
-      )
-        return;
-      updateAddPartDraft({ ...draft, snap });
+      const snap = snapAt(point);
+      const cursor = map.unproject([point.x, point.y]);
+      updateAddPartDraft({ ...draft, snap, cursor: [cursor.lng, cursor.lat] });
     };
 
     const cancelPendingMouseMove = () => {
@@ -3171,6 +3127,8 @@ export function MapView() {
         mouseMoveFrame = 0;
       }
     };
+
+    const modifiers = drawingSnapModifiers(map, updateSnapAt);
 
     const onMouseMove = (event: MapMouseEvent) => {
       pendingPoint = { x: event.point.x, y: event.point.y };
@@ -3186,38 +3144,28 @@ export function MapView() {
     const clearSnap = () => {
       cancelPendingMouseMove();
       const draft = addPartDraftRef.current;
-      if (draft.snap) updateAddPartDraft({ ...draft, snap: null });
+      if (draft.snap || draft.cursor) updateAddPartDraft({ ...draft, snap: null, cursor: null });
     };
 
     const onClick = (event: MapMouseEvent) => {
       cancelPendingMouseMove();
       const draft = addPartDraftRef.current;
       const point = roundToOsmGrid([event.lngLat.lng, event.lngLat.lat]);
-      const previewPoint = draft.snap ? map.project(draft.snap.coordinates) : null;
-      const previewTolerance = draft.snap?.targetId === LOD1_SNAP_TARGET ? 9 : 12;
-      const visibleSnap =
-        draft.snap &&
-        previewPoint &&
-        Math.hypot(previewPoint.x - event.point.x, previewPoint.y - event.point.y) <=
-          previewTolerance
-          ? draft.snap
-          : null;
-      const boundarySnap = nearestBuildingBoundary(
-        map,
-        displayedFeaturesRef.current,
-        event.point,
-        12,
-        boundaryCache,
-      );
-      const snap = boundarySnap ?? visibleSnap;
-      const outlineSnap = snap?.targetId === boundaryCache.targetId ? snap : null;
+      const snap = snapAt(event.point, event.originalEvent.shiftKey);
+      const outlineSnap =
+        snap?.kind !== "orthogonal" && snap?.targetId === boundaryCache.targetId ? snap : null;
 
       if (draft.nodes.length === 0) {
         if (!outlineSnap) {
           setNotice("The first node must snap to the selected building outline");
           return;
         }
-        updateAddPartDraft({ ...draft, nodes: [outlineSnap.coordinates], snap: null });
+        updateAddPartDraft({
+          ...draft,
+          nodes: [outlineSnap.coordinates],
+          snap: null,
+          cursor: null,
+        });
         setNotice("Add exterior nodes, then return to a different point on the outline");
         return;
       }
@@ -3241,8 +3189,13 @@ export function MapView() {
       // especially on an edited outline or within a rounding step of its edge.
       // addPartToBuilding validates the entire finished ring: it rejects real
       // interior overlap and accepts only a connected outline expansion.
-      const nextPoint = snap?.targetId === LOD1_SNAP_TARGET ? snap.coordinates : point;
-      updateAddPartDraft({ ...draft, nodes: [...draft.nodes, nextPoint], snap: null });
+      const nextPoint = snap?.coordinates ?? point;
+      updateAddPartDraft({
+        ...draft,
+        nodes: [...draft.nodes, nextPoint],
+        snap: null,
+        cursor: null,
+      });
     };
 
     const invalidateProjectedBoundaries = () => {
@@ -3260,6 +3213,7 @@ export function MapView() {
     canvas.addEventListener("mouseleave", clearSnap);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      modifiers.dispose();
       map.off("mousemove", onMouseMove);
       map.off("move", invalidateProjectedBoundaries);
       map.off("click", onClick);
@@ -3443,8 +3397,10 @@ export function MapView() {
       setNotice(notice);
     };
 
-    const onDragMove = (event: MapMouseEvent) => {
+    let lastDragEvent: MapMouseEvent | null = null;
+    const onDragMove = (event: MapMouseEvent, snappingDisabled = event.originalEvent.shiftKey) => {
       if (!drag) return;
+      lastDragEvent = event;
       const activeDrag = drag;
       const snapCollection = activeDrag.created
         ? collectionWithGeometries(displayedFeaturesRef.current, activeDrag.originalGeometries)
@@ -3467,7 +3423,7 @@ export function MapView() {
           ? perpendicularCandidate
           : boundaryCandidate;
       const referenceNode = geometrySnap ? null : nearestLod1Node(map, referenceNodes, event.point);
-      const snap = geometrySnap ?? referenceNode;
+      const snap = snappingDisabled ? null : (geometrySnap ?? referenceNode);
       const boundarySnap = snap?.kind === "node" || snap?.kind === "edge" ? snap : null;
       const perpendicularSnap = snap?.kind === "right-angle" ? snap : null;
       const coordinates = roundToOsmGrid(snap?.coordinates ?? [event.lngLat.lng, event.lngLat.lat]);
@@ -3863,12 +3819,20 @@ export function MapView() {
       canvas.style.cursor = "";
     };
 
+    const onSnapModifier = (event: KeyboardEvent) => {
+      if (event.key !== "Shift" || !drag || !lastDragEvent) return;
+      onDragMove(lastDragEvent, event.type === "keydown");
+    };
+    window.addEventListener("keydown", onSnapModifier);
+    window.addEventListener("keyup", onSnapModifier);
     map.on("mousedown", onMouseDown);
     map.on("dblclick", onDoubleClick);
     map.on("mousemove", onHover);
     window.addEventListener("keydown", onKeyDown);
     canvas.addEventListener("mouseleave", clearNodeHover);
     return () => {
+      window.removeEventListener("keydown", onSnapModifier);
+      window.removeEventListener("keyup", onSnapModifier);
       map.off("mousedown", onMouseDown);
       map.off("dblclick", onDoubleClick);
       map.off("mousemove", onHover);

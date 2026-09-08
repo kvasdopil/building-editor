@@ -128,6 +128,32 @@ as a small square, and the evolving loop is drawn over the map. Clicking the fir
 Enter closes the loop once it has at least three vertices. The loop must be simple, non-trivial, and
 overlap some solid area of the target building.
 
+### Drawing snaps
+
+Cut hole, Slice (open paths and interior loops), and Add part share directional snapping.
+The longest nonzero outer side of the target building defines its dominant direction;
+new segments attract to that direction or its perpendicular within the same twelve-screen-pixel
+threshold as edges. Exact boundary nodes retain priority. Next, an intersection of either building
+axis through the
+previous node with a finite eligible boundary edge attracts within twelve screen pixels of the
+intersection itself. Such a snap preserves the boundary identity and shows both its cross and the
+parallel directional guides, allowing a Slice to finish or an Add part to attach there. Ordinary edge
+snaps, available LOD1 references, and unconstrained directional snaps follow in that order.
+Directional snaps show two short parallel violet lines around the endpoint, aligned with the segment.
+The preview and click use the same resolver. A transient segment connects the last placed node to
+the snapped endpoint or raw cursor on every pointer move, including while Shift is held. The cursor
+is never stored as a placed node; leaving the canvas or cancelling clears the segment. Holding Shift
+bypasses all drawing and node-drag snaps,
+including automatic proximity closure; Enter can still explicitly close a loop. Changing Shift updates
+the current preview without moving the pointer. Add part still requires boundary attachments, and an
+open Slice finishes only on a boundary, never on a directional helper snap.
+
+The [shared snapping module](../../../src/lib/drawing-snap.ts) owns boundary projection, target
+priority, directional intersections, and transient segment construction. The
+[snapping regression tests](../../../scripts/lib/drawing-snap.test.mjs) cover pixel thresholds,
+rotated axes, finite intersections, node priority, Shift bypass, and cursor preview separation.
+Run them with `node --test scripts/lib/drawing-snap.test.mjs`.
+
 Every mask vertex uses the same boundary snapping as the other geometry tools. Any visible building
 or part node takes priority within nine screen pixels; otherwise an edge attracts within twelve
 pixels. The preview distinguishes node and edge snaps, and a click stores the exact existing node
