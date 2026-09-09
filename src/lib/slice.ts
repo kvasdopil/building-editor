@@ -229,12 +229,29 @@ export function sliceBuilding(
     polygon: geometryPolygon(elementGeometry(element), projection),
   }));
 
+  // Parts normally sit inside the building outline, but real OSM geometry can
+  // disagree slightly at courtyards and other shared boundaries. A slice that
+  // stays inside an existing part is still meaningful even where the parent
+  // outline calls the same sliver a hole. Validate against everything Slice
+  // can divide instead of rejecting such a path against the outline alone.
+  let sliceablePolygon = buildingPolygon;
+  if (!closed) {
+    sliceablePolygon = buildingPolygon.clone();
+    try {
+      for (const { polygon } of partShapes) {
+        sliceablePolygon = Flatten.BooleanOperations.unify(sliceablePolygon, polygon);
+      }
+    } catch {
+      return null;
+    }
+  }
+
   // A closed path has to wind counter-clockwise: Flatten reads a clockwise face
   // as a hole, and then intersect and subtract both hand back the loop itself
   // instead of the two sides of the cut, duplicating the region.
   const points = (closed ? orientRing(nodes, "ccw") : nodes).map((node) => projection.point(node));
   const cuttingSegments = segments(points, closed);
-  if (cuttingSegments.some((segment) => !buildingPolygon.contains(segment))) return null;
+  if (cuttingSegments.some((segment) => !sliceablePolygon.contains(segment))) return null;
   if (!closed) {
     const boundaries = [buildingPolygon, ...partShapes.map((shape) => shape.polygon)];
     if (!onAnyBoundary(points[0], boundaries)) return null;

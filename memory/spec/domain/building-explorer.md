@@ -193,8 +193,11 @@ If it is within 9 pixels of a boundary node, a hollow square takes priority and 
 node's exact coordinate. A first boundary click starts an open slice: further clicks add polyline
 bends and clicking another point on the same building's outline, hole, or part edge completes it.
 A first click inside the footprint, away from every boundary, starts a closed-loop slice; clicking
-its first node or pressing Enter closes it after at least three nodes. Every segment must remain in
-the solid building footprint and the path must be simple.
+its first node or pressing Enter closes it after at least three nodes. Every open-slice segment must
+remain in the solid area covered by the building outline or one of its existing parts and the path
+must be simple. This union tolerates small disagreements between a parent courtyard and a part
+courtyard, including a cut that reaches, follows, and leaves the part's inner boundary. A closed
+tower loop must remain inside the solid building outline itself.
 
 If a building is already selected when the first Slice node is placed, its building group is tested
 first for both boundary snaps and interior-loop containment. Only a click that is not on or inside
