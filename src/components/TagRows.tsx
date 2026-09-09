@@ -189,13 +189,15 @@ function HeightDragButton({
   value,
   edited,
   minHeight,
+  maxHeight,
   onChange,
   onReset,
 }: {
-  tagKey: "height" | "roof:height";
+  tagKey: "height" | "min_height" | "roof:height";
   value: string;
   edited: boolean;
   minHeight?: string;
+  maxHeight?: string;
   onChange: (value: string) => void;
   onReset: () => void;
 }) {
@@ -219,7 +221,10 @@ function HeightDragButton({
       return;
     }
     const next = current.startValue + steps * HEIGHT_DRAG_STEP_M;
-    if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
+    if (tagKey === "min_height") {
+      const maximum = parseMeters(maxHeight);
+      if (next < 0 || (maximum !== undefined && next >= maximum)) return;
+    } else if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
     onChange(formatDraggedHeight(next));
   };
 
@@ -261,7 +266,10 @@ function HeightDragButton({
     event.preventDefault();
     const direction = event.key === "ArrowRight" ? 1 : -1;
     const next = snapDraggedHeight(parseMeters(value) ?? 0) + direction * HEIGHT_DRAG_STEP_M;
-    if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
+    if (tagKey === "min_height") {
+      const maximum = parseMeters(maxHeight);
+      if (next < 0 || (maximum !== undefined && next >= maximum)) return;
+    } else if (next <= Math.max(0, parseMeters(minHeight) ?? 0)) return;
     onChange(formatDraggedHeight(next));
   };
 
@@ -529,7 +537,9 @@ export function TagRows({
                   className="w-2/5 px-4 py-1.5 text-left font-medium break-words text-slate-500"
                 >
                   <span className="flex items-center gap-1">
-                    {(row.key === "height" || row.key === "roof:height") && (
+                    {(row.key === "height" ||
+                      row.key === "min_height" ||
+                      row.key === "roof:height") && (
                       <HeightDragButton
                         tagKey={row.key}
                         value={row.value}
@@ -537,6 +547,11 @@ export function TagRows({
                         minHeight={
                           row.key === "height"
                             ? rows.find((candidate) => candidate.key === "min_height")?.value
+                            : undefined
+                        }
+                        maxHeight={
+                          row.key === "min_height"
+                            ? rows.find((candidate) => candidate.key === "height")?.value
                             : undefined
                         }
                         onChange={(value) => onEdit(row.key, value)}

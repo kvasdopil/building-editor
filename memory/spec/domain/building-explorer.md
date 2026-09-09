@@ -463,12 +463,13 @@ Setting or removing `roof:shape` on a building part also removes `roof:shape` fr
 as a pending edit. A part with an explicitly edited roof type owns that roof definition; the outline
 must not retain a competing roof type.
 
-The `height` and `roof:height` rows also have a horizontal-arrow handle immediately before their
+The `height`, `min_height`, and `roof:height` rows also have a horizontal-arrow handle immediately before their
 property names. Dragging the handle left or right changes the effective value live in 0.5 m steps; the left and right arrow
 keys provide the same control when the handle is focused. It accepts unit-bearing source values by
 converting them to metres. A source value outside the 0.5 m grid is first rounded to the nearest step
-before the drag delta is applied. The control never steps to zero, below zero, or to/below
-`min_height`; roof height never steps to zero or below.
+before the drag delta is applied. Total height never steps to zero, below zero, or to/below
+`min_height`; `min_height` may reach zero but never the total height; roof height never steps to zero
+or below.
 
 When a building or part has a supported shape and a positive `roof:height`, its total `height` still
 marks the apex. The facade is a separate extrusion ending at `height - roof:height`. A pyramidal roof

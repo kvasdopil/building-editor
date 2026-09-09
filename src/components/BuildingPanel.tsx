@@ -351,7 +351,14 @@ export function BuildingPanel({
     );
 
     // The dimensions being edited all day live above the alphabet.
-    const pinned = ["height", "min_height", "roof:height", "roof:shape", "building:levels"];
+    const pinned = [
+      "height",
+      "min_height",
+      "roof:height",
+      "roof:shape",
+      "roof:direction",
+      "building:levels",
+    ];
     const rank = (row: TagRow) => {
       const index = pinned.indexOf(row.key);
       return index === -1 ? pinned.length : index;
