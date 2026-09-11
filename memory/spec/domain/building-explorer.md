@@ -282,10 +282,11 @@ changeset-upload feature exists.
 
 ## Adding an exterior building part
 
-At live-OSM zoom, **Add part** is enabled only while a `building=*` outline—not one of its parts—is
-selected. Activating it fixes that outline as the target and makes the geometry tools mutually
-exclusive. The first node must snap to an outer-ring edge or existing node, and the last node must
-snap to a different point on the same outline. Edge snaps use the same 12-pixel tolerance as Slice
+At live-OSM zoom, **Add part** is enabled while a `building=*` outline or one of its parts is
+selected. Activating it from a part immediately retargets selection to that part's parent outline,
+then fixes the outline as the target and makes the geometry tools mutually exclusive. The first node
+must snap to an outer-ring edge or existing node, and the last node must snap to a different point
+on the same outline. Edge snaps use the same 12-pixel tolerance as Slice
 and exact nodes take priority within nine pixels. A click honors the visible snap preview when it is
 still under the pointer; it must not discard that preview and independently classify the click as
 inside. When the matched LOD1 outline is visible, its vertices are additional nine-pixel snap targets

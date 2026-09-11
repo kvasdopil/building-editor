@@ -234,10 +234,15 @@ export function ChangesSidebar({
         {groups.map((group) => {
           const selected = group.entity === selectedId;
           return (
-            <section key={group.entity} className="border-b border-slate-200 last:border-0">
+            <section
+              key={group.entity}
+              className={`border-b border-slate-200 last:border-0 ${
+                selected ? "border-l-4 border-l-violet-700 bg-violet-50" : ""
+              }`}
+            >
               <div
                 className={`flex items-stretch border-b ${
-                  selected ? "border-violet-200 bg-violet-50" : "border-slate-200 bg-slate-50"
+                  selected ? "border-violet-300 bg-violet-200" : "border-slate-200 bg-slate-50"
                 }`}
               >
                 <a
@@ -263,7 +268,11 @@ export function ChangesSidebar({
                   aria-current={selected ? "location" : undefined}
                   className="group flex min-w-0 flex-1 items-center gap-1.5 px-4 py-1 text-[11px] transition-colors hover:bg-violet-50"
                 >
-                  <span className="truncate font-mono font-medium text-violet-700 decoration-violet-300 underline-offset-2 group-hover:text-violet-900 group-hover:underline">
+                  <span
+                    className={`truncate font-mono font-medium decoration-violet-300 underline-offset-2 group-hover:text-violet-900 group-hover:underline ${
+                      selected ? "text-violet-950" : "text-violet-700"
+                    }`}
+                  >
                     {group.entity}
                   </span>
                   <span className="shrink-0 text-slate-400" aria-hidden>
@@ -272,6 +281,11 @@ export function ChangesSidebar({
                   <span className="shrink-0 text-slate-500">
                     {group.changes.length} {group.changes.length === 1 ? "change" : "changes"}
                   </span>
+                  {selected && (
+                    <span className="rounded bg-violet-700 px-1 py-px text-[10px] font-semibold tracking-wide text-white uppercase">
+                      Selected
+                    </span>
+                  )}
                   <FiArrowRight
                     className="ml-auto h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700"
                     aria-hidden
@@ -283,7 +297,7 @@ export function ChangesSidebar({
                   aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
                   title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
                   className={`border-l px-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 ${
-                    selected ? "border-violet-200" : "border-slate-200"
+                    selected ? "border-violet-300" : "border-slate-200"
                   }`}
                 >
                   <FiTrash2 className="h-3.5 w-3.5" aria-hidden />

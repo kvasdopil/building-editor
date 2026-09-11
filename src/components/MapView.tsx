@@ -2712,22 +2712,34 @@ export function MapView() {
       return;
     }
     const selected = selectionRef.current;
-    if (!selected || selected.selected.id !== selected.building.id) {
-      setNotice("Select a building outline before adding a part");
+    if (!selected) {
+      setNotice("Select a building or part before adding a part");
       return;
     }
+    // A part is commonly the topmost map feature. Add part always expands its
+    // parent outline, so retarget it directly instead of requiring a click on
+    // a visible fragment of that parent first.
+    const target =
+      selected.selected.id === selected.building.id
+        ? selected
+        : { ...selected, selected: selected.building };
     cancelAddNode();
     cancelHoleDrawing();
     cancelSliceDrawing();
     setPhotoAdjustActive(false);
     setChangesOpen(false);
     addPartBoundaryCacheRef.current = {
-      targetId: selected.building.id,
-      selection: selected,
-      rings: buildingOuterBoundaryRings(selected),
+      targetId: target.building.id,
+      selection: target,
+      rings: buildingOuterBoundaryRings(target),
       projected: null,
     };
-    updateAddPartDraft({ targetId: selected.building.id, nodes: [], snap: null });
+    if (target !== selected) {
+      const map = mapRef.current;
+      if (map) setSelectionBearing(map.getBearing());
+      setSelection(target);
+    }
+    updateAddPartDraft({ targetId: target.building.id, nodes: [], snap: null });
     setAddPartActive(true);
     setNotice("Start on the selected building outline, draw outside, then return to the outline");
   }, [
@@ -4324,17 +4336,14 @@ export function MapView() {
             <button
               type="button"
               onClick={toggleAddPart}
-              disabled={
-                !addPartActive &&
-                (!live || !selection || selection.selected.id !== selection.building.id)
-              }
+              disabled={!addPartActive && (!live || !selection)}
               aria-label="Add part"
               aria-describedby="add-part-tooltip"
               aria-pressed={addPartActive}
               className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
                 addPartActive
                   ? "border-violet-700 bg-violet-700 text-white hover:bg-violet-800"
-                  : live && selection?.selected.id === selection?.building.id
+                  : live && selection
                     ? "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
                     : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
               }`}
