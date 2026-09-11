@@ -7,7 +7,7 @@
  */
 
 const DB_NAME = "building-editor";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export const TILE_STORE = "osm-tiles";
 export const EDIT_STORE = "edits";
@@ -18,6 +18,8 @@ export const EDIT_STORE = "edits";
  * it describes.
  */
 export const GEOMETRY_STORE = "geometry-edits";
+/** Atomic, persistent undo/redo history for all pending editor state. */
+export const EDIT_HISTORY_STORE = "edit-history";
 
 function open(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
@@ -31,7 +33,7 @@ function open(): Promise<IDBDatabase | null> {
         if (request.result.objectStoreNames.contains(TILE_STORE))
           request.result.deleteObjectStore(TILE_STORE);
       }
-      for (const store of [TILE_STORE, EDIT_STORE, GEOMETRY_STORE]) {
+      for (const store of [TILE_STORE, EDIT_STORE, GEOMETRY_STORE, EDIT_HISTORY_STORE]) {
         if (!request.result.objectStoreNames.contains(store))
           request.result.createObjectStore(store);
       }

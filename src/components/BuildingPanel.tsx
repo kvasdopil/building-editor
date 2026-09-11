@@ -93,6 +93,8 @@ export function BuildingPanel({
   onLidarDifferences,
   wantLidarDifferences,
   onSelectEntity,
+  onBeginEditGesture,
+  onEndEditGesture,
 }: {
   selection: BuildingSelection | null;
   widthPercent: number;
@@ -107,6 +109,8 @@ export function BuildingPanel({
   onLidarDifferences?: (buildingId: string, differences: Float32Array | null) => void;
   wantLidarDifferences?: boolean;
   onSelectEntity: (entityId: string) => void;
+  onBeginEditGesture?: (label: string) => void;
+  onEndEditGesture?: () => void;
 }) {
   const match = lod1Match;
   const [camera, setCamera] = useState<CameraView | null>(null);
@@ -521,6 +525,8 @@ export function BuildingPanel({
             onApplyLaserRoof={laserAdvice.length > 0 ? applyLaserRoof : undefined}
             parentId={parentId}
             onSelectParent={parentId ? () => onSelectEntity(parentId) : undefined}
+            onBeginEditGesture={onBeginEditGesture}
+            onEndEditGesture={onEndEditGesture}
           />
           <ExternalMapLinks
             center={boundsCenter(elementBounds(edited.selected))}

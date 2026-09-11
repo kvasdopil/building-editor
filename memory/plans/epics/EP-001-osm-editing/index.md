@@ -10,6 +10,7 @@ Related documents:
 - [Cached, rate-limited OSM proxy](../../../adr/0002-cached-rate-limited-osm-proxy.md): Mandatory access policy. Read it before adding any upstream request.
 - [Building Explorer domain spec](../../../spec/domain/building-explorer.md): Current normative behavior. Read it to see what each slice changes.
 - [OSM submission spec](../../../spec/domain/osm-submission.md): Normative changeset assembly and the pre-upload check list. Read it before touching FT-06 or FT-08.
+- [Feature plans](features/index.md): Detailed plans for active EP-001 slices. Read this before implementing topology-aware undo/redo or other work that spans the local edit model.
 
 ## Goal
 
@@ -40,6 +41,7 @@ A user pans to their area, sees current OSM buildings, edits heights, levels and
   second override on a part that no longer exists, then reloading, restored the part with its
   geometry and merged override ("3 properties across 1 OSM entity") and deleted the orphan from
   IndexedDB.
+- **[FT-11 Topology-aware undo and redo — compatibility foundation delivered.](features/FT-11-topology-aware-undo-redo/index.md)** Pending tags, geometry, and created parts now share one persistent, cursor-based undo/redo history with toolbar controls, keyboard shortcuts, redo-tail truncation, exact generated-id restoration, and explicit grouping for continuous tag drags. Browser verification covered edit, undo, redo, reload, correct upstream tag baselines, one-step height drags, and Add Part startup on `relation/1658671`. Submission now maps reordered relation rings by role and surviving cyclic node anchors. Semantic topology commands, refreshed-version rebase, and conflict recovery remain planned.
 - **FT-10 Changeset assembly and pre-upload checks — done.** Pending changes are structured into
   the elements a changeset would carry and reviewed before anything is sent: node identity resolved
   against loaded OSM nodes (exact reuse, 3 cm near-miss within the building group, drawn duplicates

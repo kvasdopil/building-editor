@@ -398,6 +398,24 @@ change pointing at nothing, and reused part ids would let it attach itself to th
 Restoring drawn parts therefore also continues the part-id counter past the highest restored id, and
 any tag override for a drawn part that did not come back is dropped on load.
 
+The combined pending state also has one persistent undo/redo journal. Every completed gesture or
+confirmed action is one atomic history entry, including all tag, geometry, shared-node, sibling, and
+created-part effects committed in that render. Undo and redo restore the complete entry together and
+survive reload with their cursor and redo tail intact; a new edit after undo discards that tail.
+Generated part ids stored in a redo entry are reused exactly. Upload success clears the history and
+cannot itself be undone. An active draw or drag owns its gesture until completion or cancellation,
+so editor undo is disabled while one is in progress. Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z and Ctrl+Y
+redo, except while a text-editing control owns the shortcut. Property removal, entity discard, and
+Revert all are normal undoable history entries.
+
+The inspector selection keeps upstream tags as its immutable revert baseline and layers pending tag
+edits only for display. Rebuilding selection after undo, redo, reload, navigation, or a geometry
+change therefore uses pending geometry plus raw OSM tags, never the fully tag-edited map collection.
+Otherwise a restored value would incorrectly become its own “original” value. Continuous pointer
+controls keep their history group open through the final browser render frame, because pointer-up
+may be batched with the drag's last value update; this guarantees the last increment stays in the
+same undo step.
+
 Tag edits are stored per OSM element in IndexedDB, applied over the source tags and
 re-normalized so the 3D view and height rules see them immediately, revertable per tag and per
 building. The selected building, its parts, and every neighboring context building render from

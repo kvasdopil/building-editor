@@ -20,7 +20,7 @@ import { normalizeOsmTags } from "./osm/parse";
  */
 
 /** Edited tag values, plus what OSM had, so an edit can be reverted exactly. */
-interface BuildingEdit {
+export interface BuildingEdit {
   /** Tag key -> new value. */
   changed: Record<string, string>;
   /** Tag key -> value in OSM when the edit was made; absent means unset. */
@@ -43,6 +43,8 @@ export interface EditsApi {
   revertTag(buildingId: string, key: string): void;
   revertBuilding(buildingId: string): void;
   revertAll(): void;
+  /** Replace the complete projection while restoring or traversing history. */
+  replaceAll(this: void, edits: EditMap): void;
   editCount: number;
 }
 
@@ -209,6 +211,15 @@ export function useBuildingEdits(): EditsApi {
     void idbClear(EDIT_STORE);
   }, []);
 
+  const replaceAll = useCallback((next: EditMap) => {
+    setEdits(next);
+    // Keep the legacy projection in step for one migration release. The
+    // journal is authoritative, but an older build must not see mixed state.
+    void idbClear(EDIT_STORE).then(() =>
+      Promise.all(Object.entries(next).map(([id, edit]) => idbPut(EDIT_STORE, id, edit))),
+    );
+  }, []);
+
   return {
     edits,
     ready,
@@ -216,6 +227,7 @@ export function useBuildingEdits(): EditsApi {
     revertTag,
     revertBuilding,
     revertAll,
+    replaceAll,
     editCount: Object.values(edits).reduce((n, e) => n + Object.keys(e.changed).length, 0),
   };
 }

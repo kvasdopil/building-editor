@@ -15,7 +15,7 @@ import {
   type StyleSpecification,
 } from "maplibre-gl";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { FiMove } from "react-icons/fi";
+import { FiCornerUpLeft, FiCornerUpRight, FiMove } from "react-icons/fi";
 import { PiExcludeBold, PiKnifeBold, PiPlusCircleBold, PiSelectionPlusBold } from "react-icons/pi";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { BuildingPanel } from "./BuildingPanel";
@@ -34,6 +34,7 @@ import {
   type DrawingSnap,
 } from "@/lib/drawing-snap";
 import { addPartToBuilding } from "@/lib/add-part";
+import { type MaterializedEditState, useEditHistory } from "@/lib/edit-history";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
 import {
   applyEditsToFeatureCollection,
@@ -1088,6 +1089,20 @@ function applyLocalEdits(
   );
 }
 
+/**
+ * Build editor selection from pending geometry while retaining upstream tags.
+ * BuildingPanel layers tag edits itself, so selecting from the fully rendered
+ * collection would mistake an edited tag for its own OSM baseline.
+ */
+function selectFromLocalGeometry(
+  collection: FeatureCollection,
+  elementId: string,
+  geometryEdits: GeometryEditMap,
+  createdParts: CreatedPartMap,
+): BuildingSelection | null {
+  return selectFromOsm(applyGeometryEdits(collection, geometryEdits, createdParts), elementId);
+}
+
 function pointInsideBuilding(point: LngLat, building: BuildingElement): boolean {
   return building.polygons.some(
     (polygon) =>
@@ -1437,6 +1452,7 @@ export function MapView() {
   const geometryEditsRef = useRef(geometryEdits);
   const createdPartsRef = useRef(createdParts);
   const edits = useBuildingEdits();
+  const { replaceAll: replaceAllEdits } = edits;
   const editsRef = useRef(edits.edits);
   cutHoleActiveRef.current = cutHoleActive;
   sliceActiveRef.current = sliceActive;
@@ -1563,7 +1579,12 @@ export function MapView() {
       // Sidebar navigation flies to the entity first; select it once its tile arrives.
       const wanted = pendingSelectRef.current;
       if (!wanted) return;
-      const found = selectFromOsm(displayed, wanted);
+      const found = selectFromLocalGeometry(
+        features,
+        wanted,
+        geometryEditsRef.current,
+        createdPartsRef.current,
+      );
       if (found) {
         pendingSelectRef.current = null;
         setSelectionBearing(instance.getBearing());
@@ -1610,7 +1631,15 @@ export function MapView() {
       // entity when both geometries cover the click point.
       const hit = hits.find((feature) => feature.properties.role === "part") ?? hits[0];
       const id = hit?.properties.id;
-      const next = typeof id === "string" ? selectFromOsm(displayedFeaturesRef.current, id) : null;
+      const next =
+        typeof id === "string"
+          ? selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              id,
+              geometryEditsRef.current,
+              createdPartsRef.current,
+            )
+          : null;
       if (addNodeActiveRef.current && !next) return;
       if (next) {
         setSelectionBearing(instance.getBearing());
@@ -1852,7 +1881,12 @@ export function MapView() {
         properties: {},
         polygons: toFootprints(feature.geometry),
       });
-      const alreadyLoaded = selectFromOsm(displayedFeaturesRef.current, target);
+      const alreadyLoaded = selectFromLocalGeometry(
+        liveFeaturesRef.current,
+        target,
+        geometryEditsRef.current,
+        createdPartsRef.current,
+      );
       pendingSelectRef.current = alreadyLoaded ? null : target;
       if (alreadyLoaded) {
         setSelectionBearing(map.getBearing());
@@ -1887,7 +1921,12 @@ export function MapView() {
         return;
       }
       const map = mapRef.current;
-      const next = selectFromOsm(displayedFeaturesRef.current, entity);
+      const next = selectFromLocalGeometry(
+        liveFeaturesRef.current,
+        entity,
+        geometryEditsRef.current,
+        createdPartsRef.current,
+      );
       if (!map || !next) return;
       setSelectionBearing(map.getBearing());
       setSelection(next);
@@ -1961,7 +2000,12 @@ export function MapView() {
   /** Switch between an already loaded part and its parent without another request. */
   const selectLoadedEntity = useCallback((entityId: string) => {
     const map = mapRef.current;
-    const next = selectFromOsm(displayedFeaturesRef.current, entityId);
+    const next = selectFromLocalGeometry(
+      liveFeaturesRef.current,
+      entityId,
+      geometryEditsRef.current,
+      createdPartsRef.current,
+    );
     if (!map || !next) return;
     setSelectionBearing(map.getBearing());
     setSelection(next);
@@ -2000,7 +2044,12 @@ export function MapView() {
       (visibleSelection.building.id === targetId ||
         visibleSelection.parts.some((part) => part.id === targetId))
         ? visibleSelection
-        : selectFromOsm(displayedFeaturesRef.current, targetId);
+        : selectFromLocalGeometry(
+            liveFeaturesRef.current,
+            targetId,
+            geometryEditsRef.current,
+            createdPartsRef.current,
+          );
     if (!selection) return null;
     const cache: SliceBoundaryCache = {
       // A part edge may be the first hit, but every slice belongs to the
@@ -2070,6 +2119,85 @@ export function MapView() {
 
   const geometryReady = usePendingGeometry(geometryEdits, createdParts, restorePendingGeometry);
 
+  const pendingState = useMemo<MaterializedEditState>(
+    () => ({ edits: edits.edits, geometryEdits, createdParts }),
+    [createdParts, edits.edits, geometryEdits],
+  );
+  const applyHistoryState = useCallback(
+    (state: MaterializedEditState) => {
+      const selectedId = selectionRef.current?.selected.id;
+      editsRef.current = state.edits;
+      geometryEditsRef.current = state.geometryEdits;
+      createdPartsRef.current = state.createdParts;
+      replaceAllEdits(state.edits);
+      setGeometryEdits(state.geometryEdits);
+      setCreatedParts(state.createdParts);
+      nextPartIdRef.current = Object.keys(state.createdParts).reduce(
+        (next, id) => Math.max(next, Math.abs(drawnId(id) ?? 0) + 1),
+        nextPartIdRef.current,
+      );
+      refreshDisplayedFeatures(state.geometryEdits, state.createdParts);
+      if (selectedId) {
+        // Selection is the raw-tag baseline consumed by BuildingPanel. Reusing
+        // the fully displayed collection here would make a redone value look
+        // like its own OSM original, so its revert label and later edits would
+        // inherit the wrong baseline.
+        setSelection(
+          selectFromLocalGeometry(
+            liveFeaturesRef.current,
+            selectedId,
+            state.geometryEdits,
+            state.createdParts,
+          ),
+        );
+      }
+    },
+    [refreshDisplayedFeatures, replaceAllEdits],
+  );
+  const editHistory = useEditHistory({
+    current: pendingState,
+    ready: edits.ready && geometryReady,
+    apply: applyHistoryState,
+  });
+  const { clear: clearEditHistory } = editHistory;
+  const editHistoryBlocked =
+    cutHoleActive ||
+    sliceActive ||
+    addPartActive ||
+    addNodeActive ||
+    dragActiveRef.current ||
+    editHistory.grouping;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+      )
+        return;
+      if (
+        dragActiveRef.current ||
+        cutHoleActiveRef.current ||
+        sliceActiveRef.current ||
+        addPartActiveRef.current ||
+        addNodeActiveRef.current ||
+        editHistory.grouping
+      )
+        return;
+      const key = event.key.toLowerCase();
+      const redo = key === "y" || (key === "z" && event.shiftKey);
+      if (key !== "z" && key !== "y") return;
+      if (redo ? !editHistory.canRedo : !editHistory.canUndo) return;
+      event.preventDefault();
+      if (redo) editHistory.redo();
+      else editHistory.undo();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editHistory]);
+
   /**
    * Drop tag overrides whose drawn element is gone. Storage can be unavailable,
    * and an older session may have left overrides behind; either way the override
@@ -2121,13 +2249,14 @@ export function MapView() {
     createdPartsRef.current = {};
     setGeometryEdits({});
     setCreatedParts({});
+    clearEditHistory();
     refreshDisplayedFeatures({}, {});
     setSelection(null);
 
     // Per element rather than one enclosing box: two edits far apart would
     // otherwise ask for every tile between them.
     for (const area of areas) loaderRef.current?.refresh(padBounds(area, 30));
-  }, [edits, refreshDisplayedFeatures]);
+  }, [clearEditHistory, edits, refreshDisplayedFeatures]);
 
   const revertAllChanges = useCallback(() => {
     const selectedId = selection?.selected.id;
@@ -2137,8 +2266,10 @@ export function MapView() {
     createdPartsRef.current = {};
     setGeometryEdits({});
     setCreatedParts({});
-    const displayed = refreshDisplayedFeatures({}, {});
-    setSelection(selectedId ? selectFromOsm(displayed, selectedId) : null);
+    refreshDisplayedFeatures({}, {});
+    setSelection(
+      selectedId ? selectFromLocalGeometry(liveFeaturesRef.current, selectedId, {}, {}) : null,
+    );
   }, [edits, refreshDisplayedFeatures, selection]);
 
   /**
@@ -2161,8 +2292,17 @@ export function MapView() {
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
       setCreatedParts(nextCreatedParts);
-      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
-      setSelection(selectedId ? selectFromOsm(displayed, selectedId) : null);
+      refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      setSelection(
+        selectedId
+          ? selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              selectedId,
+              nextGeometryEdits,
+              nextCreatedParts,
+            )
+          : null,
+      );
     },
     [edits, refreshDisplayedFeatures, selection],
   );
@@ -2182,9 +2322,17 @@ export function MapView() {
       };
       createdPartsRef.current = nextCreatedParts;
       setCreatedParts(nextCreatedParts);
-      const displayed = refreshDisplayedFeatures(geometryEditsRef.current, nextCreatedParts);
+      refreshDisplayedFeatures(geometryEditsRef.current, nextCreatedParts);
       const selectedId = selection?.selected.id;
-      if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+      if (selectedId)
+        setSelection(
+          selectFromLocalGeometry(
+            liveFeaturesRef.current,
+            selectedId,
+            geometryEditsRef.current,
+            nextCreatedParts,
+          ),
+        );
     },
     [refreshDisplayedFeatures, selection],
   );
@@ -2199,7 +2347,12 @@ export function MapView() {
       const parentId =
         typeof feature.properties.parent_id === "string"
           ? feature.properties.parent_id
-          : selectFromOsm(displayedFeaturesRef.current, entity)?.building.id;
+          : selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              entity,
+              geometryEditsRef.current,
+              createdPartsRef.current,
+            )?.building.id;
       if (!parentId || parentId === entity) return;
       const parent = displayedFeaturesRef.current.features.find(
         (candidate) => candidate.properties?.id === parentId,
@@ -2261,9 +2414,17 @@ export function MapView() {
         );
         geometryEditsRef.current = nextGeometryEdits;
         setGeometryEdits(nextGeometryEdits);
-        const displayed = refreshDisplayedFeatures(nextGeometryEdits, createdPartsRef.current);
+        refreshDisplayedFeatures(nextGeometryEdits, createdPartsRef.current);
         const selectedId = selection?.selected.id;
-        if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+        if (selectedId)
+          setSelection(
+            selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              selectedId,
+              nextGeometryEdits,
+              createdPartsRef.current,
+            ),
+          );
         return;
       }
       edits.revertTag(entity, property);
@@ -2347,9 +2508,17 @@ export function MapView() {
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
       setCreatedParts(nextCreatedParts);
-      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
       const selectedId = selectionRef.current?.selected.id;
-      if (selectedId) setSelection(selectFromOsm(displayed, selectedId));
+      if (selectedId)
+        setSelection(
+          selectFromLocalGeometry(
+            liveFeaturesRef.current,
+            selectedId,
+            nextGeometryEdits,
+            nextCreatedParts,
+          ),
+        );
       setValidationLocation(null);
       setNotice(`Removed the redundant corner from ${fix.entity}`);
     },
@@ -2362,7 +2531,12 @@ export function MapView() {
     setSubmitOpen(false);
     setValidationLocation(at);
     if (entity) {
-      const next = selectFromOsm(displayedFeaturesRef.current, entity);
+      const next = selectFromLocalGeometry(
+        liveFeaturesRef.current,
+        entity,
+        geometryEditsRef.current,
+        createdPartsRef.current,
+      );
       if (next && map) {
         setSelectionBearing(map.getBearing());
         setSelection(next);
@@ -2390,7 +2564,12 @@ export function MapView() {
       setNotice("Could not find the target building");
       return;
     }
-    const targetSelection = selectFromOsm(displayedFeaturesRef.current, targetId);
+    const targetSelection = selectFromLocalGeometry(
+      liveFeaturesRef.current,
+      targetId,
+      geometryEditsRef.current,
+      createdPartsRef.current,
+    );
     const buildingCut = subtractMaskFromGeometry(feature.geometry, nodes);
     if (!buildingCut) {
       setNotice("The cutting mask must be a simple, non-trivial loop");
@@ -2457,8 +2636,13 @@ export function MapView() {
     createdPartsRef.current = nextCreatedParts;
     setGeometryEdits(nextGeometryEdits);
     setCreatedParts(nextCreatedParts);
-    const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
-    const nextSelection = selectFromOsm(displayed, targetId);
+    refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+    const nextSelection = selectFromLocalGeometry(
+      liveFeaturesRef.current,
+      targetId,
+      nextGeometryEdits,
+      nextCreatedParts,
+    );
     if (nextSelection) {
       setSelectionBearing(map.getBearing());
       setSelection(nextSelection);
@@ -2484,7 +2668,12 @@ export function MapView() {
     const target =
       sliceBoundaryCacheRef.current?.targetId === targetId
         ? sliceBoundaryCacheRef.current.selection
-        : selectFromOsm(displayedFeaturesRef.current, targetId);
+        : selectFromLocalGeometry(
+            liveFeaturesRef.current,
+            targetId,
+            geometryEditsRef.current,
+            createdPartsRef.current,
+          );
     if (!target) {
       setNotice("Could not find the target building");
       return;
@@ -2547,8 +2736,13 @@ export function MapView() {
     createdPartsRef.current = nextCreatedParts;
     setGeometryEdits(nextGeometryEdits);
     setCreatedParts(nextCreatedParts);
-    const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
-    const nextSelection = selectFromOsm(displayed, targetId);
+    refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+    const nextSelection = selectFromLocalGeometry(
+      liveFeaturesRef.current,
+      targetId,
+      nextGeometryEdits,
+      nextCreatedParts,
+    );
     if (nextSelection) {
       setSelectionBearing(map.getBearing());
       setSelection(nextSelection);
@@ -2575,7 +2769,12 @@ export function MapView() {
       const target =
         addPartBoundaryCacheRef.current?.targetId === targetId
           ? addPartBoundaryCacheRef.current.selection
-          : selectFromOsm(displayedFeaturesRef.current, targetId);
+          : selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              targetId,
+              geometryEditsRef.current,
+              createdPartsRef.current,
+            );
       if (!target || target.selected.id !== target.building.id) {
         setNotice("Select a building outline before adding a part");
         return;
@@ -2643,8 +2842,13 @@ export function MapView() {
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
       setCreatedParts(nextCreatedParts);
-      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
-      const nextSelection = selectFromOsm(displayed, targetId);
+      refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      const nextSelection = selectFromLocalGeometry(
+        liveFeaturesRef.current,
+        targetId,
+        nextGeometryEdits,
+        nextCreatedParts,
+      );
       if (nextSelection) {
         setSelectionBearing(map.getBearing());
         setSelection(nextSelection);
@@ -2787,7 +2991,12 @@ export function MapView() {
         point,
         draft.nodes,
         draft.targetId
-          ? selectFromOsm(displayedFeaturesRef.current, draft.targetId)?.building
+          ? selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              draft.targetId,
+              geometryEditsRef.current,
+              createdPartsRef.current,
+            )?.building
           : selectionRef.current?.building,
         null,
         null,
@@ -2851,7 +3060,12 @@ export function MapView() {
         const targetSelection =
           selectionRef.current?.building.id === id
             ? selectionRef.current
-            : selectFromOsm(displayedFeaturesRef.current, id);
+            : selectFromLocalGeometry(
+                liveFeaturesRef.current,
+                id,
+                geometryEditsRef.current,
+                createdPartsRef.current,
+              );
         if (!targetSelection) {
           setNotice("Could not find the target building");
           return;
@@ -3428,8 +3642,15 @@ export function MapView() {
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
       setCreatedParts(nextCreatedParts);
-      const displayed = refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
-      setSelection(selectFromOsm(displayed, targetId));
+      refreshDisplayedFeatures(nextGeometryEdits, nextCreatedParts);
+      setSelection(
+        selectFromLocalGeometry(
+          liveFeaturesRef.current,
+          targetId,
+          nextGeometryEdits,
+          nextCreatedParts,
+        ),
+      );
       setNotice(notice);
     };
 
@@ -4263,6 +4484,38 @@ export function MapView() {
         <div className="absolute top-3 left-3 z-30 flex items-center gap-2 max-md:hidden">
           <button
             type="button"
+            onClick={editHistory.undo}
+            disabled={!editHistory.canUndo || editHistoryBlocked}
+            aria-label={
+              editHistory.undoLabel ? `Undo: ${editHistory.undoLabel}` : "Nothing to undo"
+            }
+            title={editHistory.undoLabel ? `Undo: ${editHistory.undoLabel}` : "Nothing to undo"}
+            className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+              editHistory.canUndo && !editHistoryBlocked
+                ? "border-slate-200 bg-white text-slate-800 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-800"
+                : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+            }`}
+          >
+            <FiCornerUpLeft className="h-4 w-4" aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={editHistory.redo}
+            disabled={!editHistory.canRedo || editHistoryBlocked}
+            aria-label={
+              editHistory.redoLabel ? `Redo: ${editHistory.redoLabel}` : "Nothing to redo"
+            }
+            title={editHistory.redoLabel ? `Redo: ${editHistory.redoLabel}` : "Nothing to redo"}
+            className={`flex h-9 w-9 items-center justify-center rounded-lg border shadow-md transition-colors ${
+              editHistory.canRedo && !editHistoryBlocked
+                ? "border-slate-200 bg-white text-slate-800 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-800"
+                : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+            }`}
+          >
+            <FiCornerUpRight className="h-4 w-4" aria-hidden />
+          </button>
+          <button
+            type="button"
             onClick={() => {
               cancelAddNode();
               cancelAddPartDrawing();
@@ -4465,6 +4718,8 @@ export function MapView() {
         onLidarDifferences={onLidarDifferences}
         wantLidarDifferences={lidar && lidarColourMode === "diff"}
         onSelectEntity={selectLoadedEntity}
+        onBeginEditGesture={editHistory.beginGroup}
+        onEndEditGesture={editHistory.endGroup}
       />
     </div>
   );

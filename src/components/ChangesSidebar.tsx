@@ -439,15 +439,15 @@ export function ChangesSidebar({
         {confirmEntity === null ? (
           <p>
             This will discard {entries.length} pending {entries.length === 1 ? "change" : "changes"}{" "}
-            across {entityCount} OSM {entityCount === 1 ? "entity" : "entities"}. This cannot be
-            undone.
+            across {entityCount} OSM {entityCount === 1 ? "entity" : "entities"}. You can undo this
+            action afterward.
           </p>
         ) : (
           <p>
             This will discard {confirmCount} pending {confirmCount === 1 ? "change" : "changes"} on{" "}
             <span className="font-mono">{confirmEntity}</span>
-            {confirmEntity in createdParts ? ", removing the drawn part itself" : ""}. This cannot
-            be undone.
+            {confirmEntity in createdParts ? ", removing the drawn part itself" : ""}. You can undo
+            this action afterward.
           </p>
         )}
       </ConfirmDialog>

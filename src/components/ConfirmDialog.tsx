@@ -4,11 +4,7 @@ import type { ReactNode } from "react";
 import { FiAlertTriangle } from "react-icons/fi";
 import { useEscapeKey } from "@/lib/use-escape-key";
 
-/**
- * A modal for the two actions in this app that cannot be undone by pressing the
- * button again: discarding every pending change, and writing a changeset to a map
- * other people read. Both deserve the same pause, so they share one.
- */
+/** Shared pause before discarding local work or publishing it to OSM. */
 export function ConfirmDialog({
   open,
   title,

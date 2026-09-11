@@ -192,6 +192,8 @@ function HeightDragButton({
   maxHeight,
   onChange,
   onReset,
+  onBeginGesture,
+  onEndGesture,
 }: {
   tagKey: "height" | "min_height" | "roof:height";
   value: string;
@@ -200,6 +202,8 @@ function HeightDragButton({
   maxHeight?: string;
   onChange: (value: string) => void;
   onReset: () => void;
+  onBeginGesture?: () => void;
+  onEndGesture?: () => void;
 }) {
   const drag = useRef<{
     pointerId: number;
@@ -232,6 +236,7 @@ function HeightDragButton({
     if (event.button !== 0) return;
     event.preventDefault();
     event.currentTarget.focus();
+    onBeginGesture?.();
     drag.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -259,6 +264,7 @@ function HeightDragButton({
     }
     drag.current = null;
     setDragging(false);
+    onEndGesture?.();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -379,9 +385,13 @@ const ROOF_DIRECTION_DRAG_DEAD_ZONE_PX = 6;
 function RoofDirectionDragButton({
   resolveLook,
   onChange,
+  onBeginGesture,
+  onEndGesture,
 }: {
   resolveLook: (bearing: number) => string;
   onChange: (value: string) => void;
+  onBeginGesture?: () => void;
+  onEndGesture?: () => void;
 }) {
   const drag = useRef<{
     pointerId: number;
@@ -395,6 +405,7 @@ function RoofDirectionDragButton({
     if (event.button !== 0) return;
     event.preventDefault();
     event.currentTarget.focus();
+    onBeginGesture?.();
     drag.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -427,6 +438,7 @@ function RoofDirectionDragButton({
     }
     drag.current = null;
     setDragging(false);
+    onEndGesture?.();
   };
 
   return (
@@ -495,6 +507,8 @@ export function TagRows({
   onApplyLaserRoof,
   parentId,
   onSelectParent,
+  onBeginEditGesture,
+  onEndEditGesture,
 }: {
   rows: TagRow[];
   onApply: (suggestion: Suggestion) => void;
@@ -507,6 +521,8 @@ export function TagRows({
   onApplyLaserRoof?: () => void;
   parentId?: string | null;
   onSelectParent?: () => void;
+  onBeginEditGesture?: (label: string) => void;
+  onEndEditGesture?: () => void;
 }) {
   const [editing, setEditing] = useState<EditDraft | null>(null);
   const error = editing ? editError(editing, rows) : null;
@@ -556,6 +572,8 @@ export function TagRows({
                         }
                         onChange={(value) => onEdit(row.key, value)}
                         onReset={() => onRevert(row.key)}
+                        onBeginGesture={() => onBeginEditGesture?.(`Change ${row.key}`)}
+                        onEndGesture={onEndEditGesture}
                       />
                     )}
                     <span>{row.key}</span>
@@ -586,6 +604,8 @@ export function TagRows({
                           onChange={(value) => {
                             if (value !== row.value) onEdit(row.key, value);
                           }}
+                          onBeginGesture={() => onBeginEditGesture?.("Change roof direction")}
+                          onEndGesture={onEndEditGesture}
                         />
                         <button
                           type="button"

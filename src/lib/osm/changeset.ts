@@ -735,19 +735,34 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
           }
         }
 
+        // Boolean geometry libraries may reorder polygons and holes even when
+        // every original boundary node survives unchanged. Pair rings by their
+        // ordered anchors rather than array position; array position carries no
+        // OSM topology and made harmless multipolygon reordering unuploadable.
+        const unmatchedEdited = [...editedRings];
         const ringPairs =
           !ambiguousMove && rawRings.length === editedRings.length
-            ? rawRings.map((rawRing, index) => {
-                const editedRing = editedRings[index];
-                if (rawRing.role !== editedRing.role) return null;
+            ? rawRings.map((rawRing) => {
                 const anchors = openRing(effectiveRing(rawRing.coordinates, movedByCoordinate));
-                return editedMemberPath(editedRing.coordinates, anchors, true)
-                  ? { raw: rawRing, edited: editedRing }
-                  : null;
+                const matches = unmatchedEdited
+                  .map((edited, index) => ({ edited, index }))
+                  .filter(
+                    ({ edited }) =>
+                      edited.role === rawRing.role &&
+                      editedMemberPath(edited.coordinates, anchors, true) !== null,
+                  );
+                if (matches.length !== 1) return null;
+                const [{ edited, index }] = matches;
+                unmatchedEdited.splice(index, 1);
+                return { raw: rawRing, edited };
               })
             : [];
 
-        if (ringPairs.length === rawRings.length && ringPairs.every((pair) => pair !== null)) {
+        if (
+          ringPairs.length === rawRings.length &&
+          ringPairs.every((pair) => pair !== null) &&
+          unmatchedEdited.length === 0
+        ) {
           const mappedMembers: {
             member: (typeof memberWays)[number];
             coordinates: LngLat[];
