@@ -143,6 +143,7 @@ export function ChangesSidebar({
   edits,
   geometryEdits,
   createdParts,
+  geometryRevertReason,
   onClose,
   onNavigate,
   onRevertEntity,
@@ -156,6 +157,7 @@ export function ChangesSidebar({
   edits: EditMap;
   geometryEdits: GeometryEditMap;
   createdParts: CreatedPartMap;
+  geometryRevertReason: (entity: string) => string | null;
   onClose: () => void;
   onNavigate: (entity: string) => void;
   /** Discard everything pending on one entity, the drawn part itself included. */
@@ -233,6 +235,7 @@ export function ChangesSidebar({
         )}
         {groups.map((group) => {
           const selected = group.entity === selectedId;
+          const revertBlocked = geometryRevertReason(group.entity);
           return (
             <section
               key={group.entity}
@@ -294,15 +297,21 @@ export function ChangesSidebar({
                 <button
                   type="button"
                   onClick={() => setConfirmTarget({ entity: group.entity })}
+                  disabled={revertBlocked !== null}
                   aria-label={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                  title={`${entityAction(group.entity, createdParts)} ${group.entity}`}
-                  className={`border-l px-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 ${
+                  title={
+                    revertBlocked ?? `${entityAction(group.entity, createdParts)} ${group.entity}`
+                  }
+                  className={`border-l px-2 text-slate-400 transition-colors enabled:hover:bg-rose-50 enabled:hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40 ${
                     selected ? "border-violet-300" : "border-slate-200"
                   }`}
                 >
                   <FiTrash2 className="h-3.5 w-3.5" aria-hidden />
                 </button>
               </div>
+              {revertBlocked && (
+                <p className="px-4 py-1.5 text-[11px] text-slate-500">{revertBlocked}</p>
+              )}
               <table className="w-full table-fixed text-xs">
                 <tbody>
                   {group.changes.map((change) => (
@@ -353,15 +362,20 @@ export function ChangesSidebar({
                           )}
                           <button
                             type="button"
-                            disabled={change.locked !== null}
+                            disabled={
+                              change.locked !== null ||
+                              (change.property === "geometry" && revertBlocked !== null)
+                            }
                             onClick={() => onRemoveProperty(group.entity, change.property)}
                             aria-label={`Remove ${change.property} from the changeset`}
                             title={
-                              change.locked
-                                ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
-                                : change.original === undefined
-                                  ? `Drop ${change.property} from the changeset`
-                                  : `Revert to ${change.original}`
+                              change.property === "geometry" && revertBlocked
+                                ? revertBlocked
+                                : change.locked
+                                  ? `Cannot be removed on its own — it is ${change.locked}. Use the entity action instead.`
+                                  : change.original === undefined
+                                    ? `Drop ${change.property} from the changeset`
+                                    : `Revert to ${change.original}`
                             }
                             className={
                               change.locked !== null

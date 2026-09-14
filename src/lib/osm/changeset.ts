@@ -228,6 +228,19 @@ function editedMemberPath(
   anchors: LngLat[],
   closed: boolean,
 ): LngLat[] | null {
+  // Boolean operations may reverse winding. OSM member direction comes from
+  // its anchors; the assembled polygon's winding does not change ownership.
+  return (
+    orderedMemberPath(editedRing, anchors, closed) ??
+    orderedMemberPath([...editedRing].reverse(), anchors, closed)
+  );
+}
+
+function orderedMemberPath(
+  editedRing: LngLat[],
+  anchors: LngLat[],
+  closed: boolean,
+): LngLat[] | null {
   const ring = openRing(editedRing);
   if (ring.length === 0 || anchors.length < 2) return null;
 
@@ -293,14 +306,45 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
     { node: ExistingNode; into: ExistingNode; to: LngLat }
   >();
   const movedToKey = new Map<string, { node: ExistingNode; kind: "merge" | "move" }>();
+  const mergeTargets = new Map<number, number>();
+  const plannedDestinations = new Map<number, string>();
+  for (const override of Object.values(geometryEdits)) {
+    for (const move of override.movedNodes ?? []) {
+      const id = move.nodeId ?? nodeAt(index, roundToOsmGrid(move.from))?.id;
+      if (id !== undefined) plannedDestinations.set(id, coordinateKey(move.to));
+      if (id !== undefined && move.targetNodeId !== undefined)
+        mergeTargets.set(id, move.targetNodeId);
+    }
+  }
+  const mergeTarget = (id: number): ExistingNode | undefined => {
+    const visited = new Set<number>();
+    while (mergeTargets.has(id)) {
+      if (visited.has(id)) return undefined;
+      visited.add(id);
+      id = mergeTargets.get(id)!;
+    }
+    return index.byId.get(id);
+  };
   for (const [ref, override] of Object.entries(geometryEdits)) {
     for (const move of override.movedNodes ?? []) {
       const from = roundToOsmGrid(move.from);
       const to = roundToOsmGrid(move.to);
-      const node = nodeAt(index, from);
+      const node = move.nodeId === undefined ? nodeAt(index, from) : index.byId.get(move.nodeId);
       // Nothing upstream stands there, so the vertex was drawn in this session:
       // there is no node to move and it resolves as a new one like any other.
-      if (!node) continue;
+      if (!node) {
+        if (move.nodeId !== undefined)
+          issues.push(
+            issue(
+              "error",
+              "node-version-unknown",
+              `Node ${move.nodeId} is no longer in the loaded data. Reload its area before editing it.`,
+              [ref],
+              to,
+            ),
+          );
+        continue;
+      }
       // Older wall-drag state copied every node in a wall run onto every
       // footprint touched by any node in that run. Ignore only those stale
       // copies: a real claim either comes from an element that owned the OSM
@@ -319,7 +363,27 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         );
         continue;
       }
-      const occupant = nodeAt(index, to);
+      const rawOccupant = nodeAt(index, to);
+      const occupant =
+        move.targetNodeId === undefined
+          ? rawOccupant &&
+            (!plannedDestinations.has(rawOccupant.id) ||
+              plannedDestinations.get(rawOccupant.id) === coordinateKey(to))
+            ? rawOccupant
+            : null
+          : mergeTarget(move.targetNodeId);
+      if (move.targetNodeId !== undefined && !occupant) {
+        issues.push(
+          issue(
+            "error",
+            "node-move-conflict",
+            `Node ${node.id} has an unresolved merge target. Undo the merge and try again.`,
+            [ref],
+            to,
+          ),
+        );
+        continue;
+      }
       if (occupant && occupant.id !== node.id) {
         const previous = mergedExistingNodes.get(node.id);
         if (previous && previous.into.id !== occupant.id) {
@@ -714,7 +778,13 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         (raw.geometry.type === "Polygon" || raw.geometry.type === "MultiPolygon") &&
         memberWays.length > 0 &&
         Array.isArray(members) &&
-        members.length > 0
+        members.length > 0 &&
+        members.every(
+          (member) =>
+            member.type !== "way" ||
+            !["", "outer", "inner"].includes(member.role) ||
+            memberWays.some((way) => way.id === member.ref && way.version > 0),
+        )
       ) {
         const rawRings = roleRingsOf(raw.geometry);
         const editedRings = roleRingsOf(override.geometry);

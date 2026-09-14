@@ -408,6 +408,13 @@ so editor undo is disabled while one is in progress. Cmd/Ctrl+Z undoes, Cmd/Ctrl
 redo, except while a text-editing control owns the shortcut. Property removal, entity discard, and
 Revert all are normal undoable history entries.
 
+Per-entity and geometry-row discard are disabled when applied history shows that the footprint was
+changed together with other footprints. The sidebar explains the dependency and directs the mapper
+to chronological Undo or Revert all; independent tag removals remain available. This preserves the
+atomicity of Slice and shared-node drags. Geometry commits are checked before recording history under
+the [submission topology rules](osm-submission.md#node-insertion-into-shared-walls); rejection keeps
+the draft available for correction or cancellation and does not publish partial effects.
+
 The inspector selection keeps upstream tags as its immutable revert baseline and layers pending tag
 edits only for display. Rebuilding selection after undo, redo, reload, navigation, or a geometry
 change therefore uses pending geometry plus raw OSM tags, never the fully tag-edited map collection.

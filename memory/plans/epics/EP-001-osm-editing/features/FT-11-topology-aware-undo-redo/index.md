@@ -50,6 +50,16 @@ protection, and removal of the compatibility projection stores. Until those land
 entries are materialized snapshots and the current conservative submission mapper remains the
 topology safety boundary.
 
+Follow-up (2026-09-14): the compatibility path now preserves node moves through Slice, captures
+upstream node ids and merge-survivor ids on drags, composes wall moves simultaneously on the OSM
+coordinate grid, and reconciles retained claims after legacy parent-only reverts. Compound snapshot
+entries now prevent independent footprint discard. Geometry commits run topology assembly before
+publishing state, with missing boundary members rejected and reversed ring winding mapped safely.
+The full semantic journal and rebase design below remains planned; this follow-up does not claim to
+implement it. `scripts/lib/geometry-transaction.test.mjs` covers the production planners with synthetic
+relations, including slice/drag/undo/redo/reload and partial-revert recovery. The reported browser
+state for `relation/21254745` has not been captured, so it is not a claimed exact reproduction.
+
 ## Scope
 
 Included:

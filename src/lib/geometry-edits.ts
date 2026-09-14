@@ -6,7 +6,7 @@ import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson"
 import type { BuildingProperties, LngLat } from "./buildings";
 import { closeRing, closestPointOnSegment, openRing, segmentsIntersect } from "./geometry";
 import { normalizeOsmTags } from "./osm/parse";
-import { coordinateKey, METERS_PER_DEG_LAT, metersBetween } from "./osm/precision";
+import { coordinateKey, METERS_PER_DEG_LAT, metersBetween, roundToOsmGrid } from "./osm/precision";
 import { drawnId } from "./osm/ref";
 
 export type EditableGeometry = Polygon | MultiPolygon;
@@ -59,6 +59,10 @@ export function nearestRightAnglePoint(
 
 /** An existing OSM node dragged from one position to another. */
 export interface NodeMove {
+  /** Stable upstream identity, captured at commit time; absent in legacy edits. */
+  nodeId?: number;
+  /** Surviving node after a deliberate merge, even if that node later moves. */
+  targetNodeId?: number;
   /** Where the node sits in OSM, which is what identifies it. */
   from: LngLat;
   to: LngLat;
@@ -139,7 +143,7 @@ export function applyGeometryEdits(
 }
 
 function sameCoordinate(a: readonly number[], b: LngLat): boolean {
-  return a[0] === b[0] && a[1] === b[1];
+  return coordinateKey([a[0], a[1]]) === coordinateKey(b);
 }
 
 /**
@@ -152,10 +156,48 @@ export function recordNodeMove(
   from: LngLat,
   to: LngLat,
 ): NodeMove[] {
-  const earlier = moves?.find((move) => sameCoordinate(move.to, from));
-  const origin = earlier ? earlier.from : from;
-  const rest = (moves ?? []).filter((move) => move !== earlier);
-  return sameCoordinate(origin, to) ? rest : [...rest, { from: origin, to }];
+  return recordNodeMoves(moves, [{ from, to }]);
+}
+
+/** Compose a gesture simultaneously, including all sources of a merged vertex. */
+export function recordNodeMoves(previous: NodeMove[] = [], gesture: NodeMove[]): NodeMove[] {
+  const originKey = (move: NodeMove) =>
+    move.nodeId === undefined ? coordinateKey(move.from) : `node/${move.nodeId}`;
+  const destinations = new Map(gesture.map((move) => [coordinateKey(move.from), move]));
+  const consumed = new Set<string>();
+  const updated = new Set<NodeMove>();
+  const next = previous.map((move) => {
+    const key = coordinateKey(move.to);
+    const update = destinations.get(key);
+    if (!update) return move;
+    consumed.add(key);
+    const result = { ...move, to: roundToOsmGrid(update.to) };
+    updated.add(result);
+    return result;
+  });
+  for (const move of gesture) {
+    if (
+      !consumed.has(coordinateKey(move.from)) ||
+      (move.nodeId !== undefined && !next.some((record) => record.nodeId === move.nodeId))
+    ) {
+      next.push(move);
+      updated.add(move);
+    }
+  }
+  // Only an explicit gesture may supersede a claim. Preserve untouched legacy
+  // conflicts for validation rather than silently choosing the last entry.
+  const updatedOrigins = new Set([...updated].map(originKey));
+  const unique = new Map<string, NodeMove>();
+  for (const move of next) {
+    if (updatedOrigins.has(originKey(move)) && !updated.has(move)) continue;
+    const from = roundToOsmGrid(move.from);
+    const to = roundToOsmGrid(move.to);
+    const key = `${originKey(move)}:${coordinateKey(to)}:${move.targetNodeId ?? ""}`;
+    unique.set(key, { ...move, from, to });
+  }
+  return [...unique.values()].filter(
+    (move) => move.targetNodeId !== undefined || !sameCoordinate(move.from, move.to),
+  );
 }
 
 /** Whether polygonal geometry contains a vertex at this exact OSM coordinate. */

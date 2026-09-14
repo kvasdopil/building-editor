@@ -38,8 +38,8 @@ new node, while the upload never attempts to modify a nonexistent node at the pr
 ### Moving or merging a node
 
 **A freely dragged corner moves its node; it never replaces it.** Position alone cannot tell a moved vertex
-from a new one, so each drag is recorded on the geometry override as a `from`/`to` pair, and the
-upload turns that into a `modify` on the node itself.
+from a new one, so each drag records the upstream node id and its `from`/`to` pair on the geometry
+override. Legacy pairs without ids remain readable. Upload turns that into a `modify` on the node itself.
 
 This is the only way a drag can keep the promise the shared-vertex expansion makes. Replacing the
 node creates one at the new corner and leaves the old one behind: orphaned in OSM, stripped of any
@@ -52,13 +52,16 @@ all of them, loaded or not. It is also what JOSM does, and why OSM node history 
   and indexed alongside the node (`osm/nodes.ts`). A node whose version is not in the loaded data is
   never moved: that is a blocking `node-version-unknown`, not a guess.
 - **Dragging the same node twice is one move**, from where OSM has it, and dragging it back to where
-  it started is no move at all.
+  it started is no move at all. Shared-vertex matching and move composition use the OSM coordinate
+  grid, including vertices returned through boolean geometry projection. All nodes in a wall gesture
+  compose simultaneously; one node landing on another node's vacated position does not merge them.
 - **A node dragged exactly onto another node merges into the target node.** Edited way and relation-
   member node lists use the target node id instead of moving the source node onto it, so no stacked
   nodes are written. An adjacent duplicate in one ring collapses to the surviving corner. Owners not
   present in the loaded building/part collection are not rewritten and may continue to reference the
   source node; the editor never deletes a source node whose complete upstream ownership it has not
-  loaded.
+  loaded. A recorded merge retains its surviving node id when that corner is dragged again, so the
+  source is not accidentally resurrected as a second node at the survivor's new position.
 - **A node that has been dragged away is no longer at its old position.** Another vertex landing on
   the vacated spot resolves as a new node, not as the one that left.
 - **Ways an upload would rewrite identically are left out.** Moving a node changes the node, not the
@@ -72,9 +75,11 @@ uses it. Each affected existing entity receives a geometry override at the same 
 each records the same move; a drawn part updates its own geometry and records nothing, having no
 upstream node to move. The scope is deliberately the loaded building/part collection—the editor
 cannot update an owner whose geometry it has not read—but moving the node rather than replacing it
-is what makes that scope a display limit rather than a data one. Reverting one affected building's
-override therefore leaves the corner moved for the others and for that building too, since it is one
-node; the map keeps showing the reverted building unmoved until its tile is reloaded.
+is what makes that scope a display limit rather than a data one. A footprint belonging to an applied
+compound geometry entry cannot be reverted independently; the Changes sidebar explains that the
+complete edit must be undone. For legacy states already split by a parent-only revert, an explicit
+drag reconciles other retained claims for that same node and materializes loaded missing owners.
+Slice replacements preserve prior node-move records instead of dropping their upstream identity.
 
 MapLibre's rendered point coordinate is only a hit-test result, not node identity: projection can
 round it away from the exact source coordinate. A draggable handle therefore carries polygon, ring
@@ -111,6 +116,19 @@ same cyclic order. New vertices between two consecutive surviving anchors belong
 This works for both closed member rings and rings assembled from multiple open members, including an
 Add part detour outside the old segment. Removing or reordering an existing boundary node is still
 blocked because ownership would no longer be deterministic.
+
+Relation ring matching accepts reversed winding as well as reordered polygons and holes, while
+preserving the original member-way direction on export. Every boundary member must be loaded with
+its version. Geometry gestures (including Slice, Add part, Cut hole, node/wall edits, and geometry
+fixes) run the topology assembly checks before publishing their effects. Unsupported member mapping
+or conflicting node destinations reject the entire gesture, leaving pending edits, generated ids,
+transferred roof tags, and history untouched. Unrelated pre-existing errors do not block an edit to
+another building; upload retains the full safety checks.
+
+Offline coverage in `scripts/lib/geometry-transaction.test.mjs` exercises the actual UI planners for
+slice, repeated drags, legacy partial-revert recovery, history serialization, merge survival, reversed
+rings, and rejected topology. Its relation is synthetic; it is not a captured browser state for
+`relation/21254745`.
 
 ### Ids for drawn elements
 

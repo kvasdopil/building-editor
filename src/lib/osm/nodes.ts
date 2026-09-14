@@ -39,6 +39,7 @@ export interface ExistingNode {
 }
 
 interface NodeIndex {
+  byId: Map<number, ExistingNode>;
   /** Exact position -> node. Two ways sharing a wall share these entries. */
   byKey: Map<string, ExistingNode>;
   /** The same nodes bucketed into ~1 m cells, for near-miss lookups. */
@@ -61,6 +62,7 @@ function bucketKey(lon: number, lat: number): string {
 export const NODE_REUSE_METERS = 0.03;
 
 export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
+  const byId = new Map<number, ExistingNode>();
   const byKey = new Map<string, ExistingNode>();
   const buckets = new Map<string, ExistingNode[]>();
 
@@ -77,7 +79,7 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
       if (typeof id !== "number") continue;
       const coordinatesAtNode = roundToOsmGrid(coordinates[index]);
       const key = coordinateKey(coordinatesAtNode);
-      const known = byKey.get(key);
+      const known = byId.get(id);
       if (known) {
         for (const ownerId of ownerIds) {
           if (!known.ownerIds.includes(ownerId)) known.ownerIds.push(ownerId);
@@ -92,7 +94,8 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
         tags: nodeTags[id] ?? {},
         ownerIds: [...ownerIds],
       };
-      byKey.set(key, node);
+      if (!byKey.has(key)) byKey.set(key, node);
+      byId.set(id, node);
       const bucket = bucketKey(coordinatesAtNode[0], coordinatesAtNode[1]);
       const cell = buckets.get(bucket);
       if (cell) cell.push(node);
@@ -133,7 +136,7 @@ export function buildNodeIndex(collection: FeatureCollection): NodeIndex {
     });
   }
 
-  return { byKey, buckets };
+  return { byId, byKey, buckets };
 }
 
 /**

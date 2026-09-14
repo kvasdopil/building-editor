@@ -87,6 +87,43 @@ function changedKeys<T>(before: Record<string, T>, after: Record<string, T>): st
   );
 }
 
+/** A footprint cannot be discarded independently of a compound geometry edit. */
+export function geometryRevertReason(
+  document: EditHistoryDocument | null,
+  state: MaterializedEditState,
+  entity: string,
+): string | null {
+  if (!state.geometryEdits[entity] && !state.createdParts[entity]) return null;
+  for (const entry of document?.entries.slice(0, document.cursor) ?? []) {
+    const affected = new Set([
+      ...changedKeys(entry.before.geometryEdits, entry.after.geometryEdits),
+      ...changedKeys(entry.before.createdParts, entry.after.createdParts).filter(
+        (id) =>
+          JSON.stringify(entry.before.createdParts[id]?.geometry) !==
+          JSON.stringify(entry.after.createdParts[id]?.geometry),
+      ),
+    ]);
+    if (affected.has(entity) && affected.size > 1) {
+      return `This footprint belongs to “${entry.label}”, which changed ${affected.size} footprints together. Close Changes and use Undo to revert the complete edit, or Revert all.`;
+    }
+  }
+  // Imported snapshots may not describe the operation, but parent links still
+  // prove that removing only one footprint would split the pending topology.
+  const parentId = state.createdParts[entity]?.properties.parent_id;
+  if (
+    Object.entries(state.createdParts).some(
+      ([id, part]) =>
+        id !== entity &&
+        (part.properties.parent_id === entity ||
+          state.createdParts[entity]?.properties.parent_id === id),
+    ) ||
+    (typeof parentId === "string" && state.geometryEdits[parentId])
+  ) {
+    return "This footprint shares pending geometry with its parent or parts. Close Changes and use Undo to revert the complete edit, or Revert all.";
+  }
+  return null;
+}
+
 /** Human-readable history labels derived from the atomic state transition. */
 export function describeEdit(before: MaterializedEditState, after: MaterializedEditState): string {
   const created = changedKeys(before.createdParts, after.createdParts);
@@ -294,6 +331,8 @@ export function useEditHistory({
       beginGroup,
       endGroup,
       clear,
+      geometryRevertReason: (entity: string) =>
+        geometryRevertReason(documentRef.current, currentRef.current, entity),
     }),
     [beginGroup, clear, document, endGroup, grouping, moveTo],
   );

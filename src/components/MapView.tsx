@@ -35,6 +35,11 @@ import {
 } from "@/lib/drawing-snap";
 import { addPartToBuilding } from "@/lib/add-part";
 import { type MaterializedEditState, useEditHistory } from "@/lib/edit-history";
+import {
+  geometryTransactionIssue,
+  planGeometryGesture,
+  planSliceGeometry,
+} from "@/lib/geometry-transaction";
 import { installDevRafShim } from "@/lib/dev-raf-shim";
 import {
   applyEditsToFeatureCollection,
@@ -80,11 +85,9 @@ import {
   moveSharedGeometryVertices,
   nearestRightAnglePoint,
   type NodeMove,
-  recordNodeMove,
   removeGeometryRingNode,
   segmentNormal,
   subtractMaskFromGeometry,
-  weldNewVertices,
   weldVerticesIntoGeometries,
 } from "@/lib/geometry-edits";
 import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/client";
@@ -2160,6 +2163,24 @@ export function MapView() {
     apply: applyHistoryState,
   });
   const { clear: clearEditHistory } = editHistory;
+  const geometryRevertReason = editHistory.geometryRevertReason;
+  const acceptGeometryTransaction = useCallback(
+    (nextGeometryEdits: GeometryEditMap, nextCreatedParts: CreatedPartMap) => {
+      const before = {
+        edits: editsRef.current,
+        geometryEdits: geometryEditsRef.current,
+        createdParts: createdPartsRef.current,
+      };
+      const problem = geometryTransactionIssue(liveFeaturesRef.current, before, {
+        ...before,
+        geometryEdits: nextGeometryEdits,
+        createdParts: nextCreatedParts,
+      });
+      if (problem) setNotice(problem);
+      return problem === null;
+    },
+    [],
+  );
   const editHistoryBlocked =
     cutHoleActive ||
     sliceActive ||
@@ -2280,6 +2301,11 @@ export function MapView() {
    */
   const revertEntity = useCallback(
     (entity: string) => {
+      const blocked = geometryRevertReason(entity);
+      if (blocked) {
+        setNotice(blocked);
+        return;
+      }
       const selectedId = selection?.selected.id;
       edits.revertBuilding(entity);
       const nextCreatedParts: CreatedPartMap = Object.fromEntries(
@@ -2304,7 +2330,7 @@ export function MapView() {
           : null,
       );
     },
-    [edits, refreshDisplayedFeatures, selection],
+    [edits, geometryRevertReason, refreshDisplayedFeatures, selection],
   );
 
   /**
@@ -2409,6 +2435,11 @@ export function MapView() {
         return;
       }
       if (property === "geometry") {
+        const blocked = geometryRevertReason(entity);
+        if (blocked) {
+          setNotice(blocked);
+          return;
+        }
         const nextGeometryEdits: GeometryEditMap = Object.fromEntries(
           Object.entries(geometryEditsRef.current).filter(([id]) => id !== entity),
         );
@@ -2429,7 +2460,7 @@ export function MapView() {
       }
       edits.revertTag(entity, property);
     },
-    [edits, refreshDisplayedFeatures, selection, updateDrawnPartTags],
+    [edits, geometryRevertReason, refreshDisplayedFeatures, selection, updateDrawnPartTags],
   );
 
   /** Change what one pending property will be written as. */
@@ -2504,6 +2535,7 @@ export function MapView() {
           },
         };
       }
+      if (!acceptGeometryTransaction(nextGeometryEdits, nextCreatedParts)) return;
       geometryEditsRef.current = nextGeometryEdits;
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
@@ -2522,7 +2554,7 @@ export function MapView() {
       setValidationLocation(null);
       setNotice(`Removed the redundant corner from ${fix.entity}`);
     },
-    [edits, refreshDisplayedFeatures],
+    [acceptGeometryTransaction, edits, refreshDisplayedFeatures],
   );
 
   /** Close review, select the affected element, and mark the exact failing point. */
@@ -2632,6 +2664,7 @@ export function MapView() {
         movedNodes: previous?.movedNodes,
       };
     }
+    if (!acceptGeometryTransaction(nextGeometryEdits, nextCreatedParts)) return;
     geometryEditsRef.current = nextGeometryEdits;
     createdPartsRef.current = nextCreatedParts;
     setGeometryEdits(nextGeometryEdits);
@@ -2654,7 +2687,7 @@ export function MapView() {
         ? "Building footprint cut"
         : `Building footprint and ${partCuts.size} underlying ${partCuts.size === 1 ? "part" : "parts"} cut`,
     );
-  }, [refreshDisplayedFeatures, updateHoleDraft]);
+  }, [acceptGeometryTransaction, refreshDisplayedFeatures, updateHoleDraft]);
 
   const finishSliceDrawing = useCallback(() => {
     const map = mapRef.current;
@@ -2688,50 +2721,21 @@ export function MapView() {
       return;
     }
 
-    const nextGeometryEdits = { ...geometryEditsRef.current };
-    const nextCreatedParts = { ...createdPartsRef.current };
-    for (const [id, geometry] of Object.entries(result.replacements)) {
-      const created = nextCreatedParts[id];
-      if (created) nextCreatedParts[id] = { ...created, geometry };
-      else nextGeometryEdits[id] = { geometry, kind: "slice" };
-    }
-    for (const addition of result.additions) {
-      const id = drawnRef("way", nextPartIdRef.current++);
-      nextCreatedParts[id] = createPartFeature(id, targetId, addition.geometry, addition.tags);
-    }
-    if (target.parts.length === 0) clearTransferredRoofTags(target.building);
-
-    // A cut ends on a wall, and a wall is rarely one element's alone: the
-    // outline and the part on the other side own it too. Give them the new
-    // corner as well, or the pieces only look joined to their neighbours.
-    const group = [target.building, ...target.parts];
-    const untouched = Object.fromEntries(
-      group
-        .filter((element) => !(element.id in result.replacements))
-        .map((element) => [element.id, geometryOf(element)] as const),
+    const {
+      geometryEdits: nextGeometryEdits,
+      createdParts: nextCreatedParts,
+      nextPartId,
+    } = planSliceGeometry(
+      { geometryEdits: geometryEditsRef.current, createdParts: createdPartsRef.current },
+      target.building,
+      target.parts,
+      result,
+      nextPartIdRef.current,
     );
-    const welds = weldNewVertices({
-      candidates: untouched,
-      existing: group.flatMap((element) => geometryVertices(geometryOf(element))),
-      produced: [
-        ...Object.values(result.replacements),
-        ...result.additions.map((addition) => addition.geometry),
-      ],
-      tolerance: NODE_REUSE_METERS,
-    });
-    for (const [id, geometry] of Object.entries(welds)) {
-      const created = nextCreatedParts[id];
-      if (created) nextCreatedParts[id] = { ...created, geometry };
-      else {
-        const previous = nextGeometryEdits[id];
-        nextGeometryEdits[id] = {
-          geometry,
-          kind: previous?.kind ?? "glue",
-          movedNodes: previous?.movedNodes,
-        };
-      }
-    }
 
+    if (!acceptGeometryTransaction(nextGeometryEdits, nextCreatedParts)) return;
+    nextPartIdRef.current = nextPartId;
+    if (target.parts.length === 0) clearTransferredRoofTags(target.building);
     geometryEditsRef.current = nextGeometryEdits;
     createdPartsRef.current = nextCreatedParts;
     setGeometryEdits(nextGeometryEdits);
@@ -2753,7 +2757,12 @@ export function MapView() {
     setNotice(
       `${result.additions.length} new ${result.additions.length === 1 ? "part" : "parts"} added`,
     );
-  }, [clearTransferredRoofTags, refreshDisplayedFeatures, updateSliceDraft]);
+  }, [
+    acceptGeometryTransaction,
+    clearTransferredRoofTags,
+    refreshDisplayedFeatures,
+    updateSliceDraft,
+  ]);
 
   const finishAddPartDrawing = useCallback(
     (completedNodes?: LngLat[]) => {
@@ -2800,12 +2809,12 @@ export function MapView() {
       const nextCreatedParts = { ...createdPartsRef.current };
       const additions = result.base ? [result.base, result.addition] : [result.addition];
       const createdIds: string[] = [];
+      let nextPartId = nextPartIdRef.current;
       for (const addition of additions) {
-        const id = drawnRef("way", nextPartIdRef.current++);
+        const id = drawnRef("way", nextPartId++);
         createdIds.push(id);
         nextCreatedParts[id] = createPartFeature(id, targetId, addition.geometry, addition.tags);
       }
-      if (target.parts.length === 0) clearTransferredRoofTags(target.building);
 
       // The two attachment points belong to every part wall that follows the
       // same outline edge, not only to the expanded building and the new part.
@@ -2838,6 +2847,9 @@ export function MapView() {
         }
       }
 
+      if (!acceptGeometryTransaction(nextGeometryEdits, nextCreatedParts)) return;
+      nextPartIdRef.current = nextPartId;
+      if (target.parts.length === 0) clearTransferredRoofTags(target.building);
       geometryEditsRef.current = nextGeometryEdits;
       createdPartsRef.current = nextCreatedParts;
       setGeometryEdits(nextGeometryEdits);
@@ -2860,7 +2872,12 @@ export function MapView() {
         result.base ? "Part added with a new base part" : "Part added and outline expanded",
       );
     },
-    [clearTransferredRoofTags, refreshDisplayedFeatures, updateAddPartDraft],
+    [
+      acceptGeometryTransaction,
+      clearTransferredRoofTags,
+      refreshDisplayedFeatures,
+      updateAddPartDraft,
+    ],
   );
 
   const cancelAddNode = useCallback(() => {
@@ -3603,39 +3620,19 @@ export function MapView() {
       defaultKind: "reshape" | "add-node" = "reshape",
     ) => {
       const targetId = selection.selected.id;
-      const nextGeometryEdits: GeometryEditMap = { ...geometryEditsRef.current };
-      const nextCreatedParts = { ...createdPartsRef.current };
-      for (const [entity, geometry] of Object.entries(geometries)) {
-        const drawn = nextCreatedParts[entity];
-        // A drawn part has no upstream nodes, so nothing about it can be moved.
-        if (drawn) nextCreatedParts[entity] = { ...drawn, geometry };
-        else {
-          const previous = nextGeometryEdits[entity];
-          const displayed = displayedFeaturesRef.current.features.find(
-            (feature) => feature.properties?.id === entity,
-          );
-          const before =
-            displayed?.geometry.type === "Polygon" || displayed?.geometry.type === "MultiPolygon"
-              ? displayed.geometry
-              : null;
-          // A wall run can touch several footprints at different nodes. Record
-          // only the run nodes this footprint actually owned before the drag;
-          // otherwise a later move of another run node leaves a false, stale
-          // destination on this unrelated footprint.
-          const entityMoves = moves?.filter((move) =>
-            before ? geometryHasVertex(before, move.from) : geometryHasVertex(geometry, move.to),
-          );
-          nextGeometryEdits[entity] = {
-            geometry,
-            kind: previous?.kind ?? (gluedEntities.has(entity) ? "glue" : defaultKind),
-            movedNodes: entityMoves?.length
-              ? entityMoves.reduce(
-                  (recorded, move) => recordNodeMove(recorded, move.from, move.to),
-                  previous?.movedNodes,
-                )
-              : previous?.movedNodes,
-          };
-        }
+      const { geometryEdits: nextGeometryEdits, createdParts: nextCreatedParts } =
+        planGeometryGesture({
+          features: liveFeaturesRef.current,
+          geometryEdits: geometryEditsRef.current,
+          createdParts: createdPartsRef.current,
+          geometries,
+          moves,
+          gluedEntities,
+          kind: defaultKind,
+        });
+      if (!acceptGeometryTransaction(nextGeometryEdits, nextCreatedParts)) {
+        restorePreview();
+        return;
       }
 
       geometryEditsRef.current = nextGeometryEdits;
@@ -4110,6 +4107,7 @@ export function MapView() {
       canvas.style.cursor = "";
     };
   }, [
+    acceptGeometryTransaction,
     addNodeActive,
     addPartActive,
     cutHoleActive,
@@ -4125,7 +4123,10 @@ export function MapView() {
   // Clear the transient hint on its own, so it never sticks around.
   useEffect(() => {
     if (!notice) return;
-    const timer = setTimeout(() => setNotice(null), 2500);
+    const timer = setTimeout(
+      () => setNotice(null),
+      notice.startsWith("Edit not applied.") ? 12000 : 2500,
+    );
     return () => clearTimeout(timer);
   }, [notice]);
 
@@ -4475,9 +4476,9 @@ export function MapView() {
       )}
 
       {notice && (
-        <div className="pointer-events-none absolute top-16 left-1/2 z-30 -translate-x-1/2 rounded-full bg-slate-900/75 px-4 py-1.5 text-sm text-white shadow">
+        <output className="pointer-events-none absolute top-16 left-1/2 z-30 w-max max-w-[min(90vw,36rem)] -translate-x-1/2 rounded-lg bg-slate-900/90 px-4 py-1.5 text-sm text-white shadow">
           {notice}
-        </div>
+        </output>
       )}
 
       {!changesOpen && (
@@ -4677,6 +4678,7 @@ export function MapView() {
         edits={edits.edits}
         geometryEdits={geometryEdits}
         createdParts={createdParts}
+        geometryRevertReason={geometryRevertReason}
         onClose={() => setChangesOpen(false)}
         onNavigate={navigateToEditedEntity}
         onRevertEntity={revertEntity}
