@@ -261,7 +261,7 @@ register and offers no broken button.
 A purple **X changes** button opens the pending-change sidebar; **Review & submit to OSM** at its
 foot builds the changeset and opens the review dialog, which is also where you sign in. **Upload**
 sends it: create changeset, upload, close, all through this app's own routes because the token is in an
-httpOnly cookie. It is enabled only with a signed-in account, zero errors and a comment; writing to the
+httpOnly cookie. It is enabled only with a signed-in account, zero unignored errors and a comment; writing to the
 real OSM additionally asks for a confirmation, since an accidental upload can only be reverted, never
 erased. Once a changeset lands, the pending changes are dropped and
 the submitted comment is cleared, and the affected tiles are refetched past every cache, so the map
@@ -269,7 +269,7 @@ shows what OSM now holds. The next review regenerates its description from its n
 behind all of it live in [the submission spec](memory/spec/domain/osm-submission.md).
 
 For every building with parts involved in the upload, its parent outline must have a positive
-`height` or `building:levels`. Missing parent height or an unloaded/unresolved parent blocks upload;
+`height` or `building:levels`. Missing parent height or an unloaded/unresolved parent blocks upload unless explicitly ignored;
 adding the parent's height to the same pending changes clears the check. When its parts have usable
 height data, **Fix** sets the parent to the tallest part using the same action as the existing
 part-above-parent warning.
@@ -279,6 +279,16 @@ the outline's `height` to the maximum effective top height across all of the bui
 re-runs the checks immediately. An overlapping-volume warning also offers **Fix** when one shorter
 part starts at 0 m and the other has a higher top: it sets the higher part's `min_height` to the
 shorter part's top, stacking the two volumes without changing either `height`.
+
+Small part overhangs offer **Fix tiny overhang**, which snaps offending corners onto the parent
+boundary and preserves shared nodes. **Show** points to the first repairable corner. See the
+[repair limits and regression tests](memory/spec/domain/osm-submission.md#tiny-part-overhang-repair)
+for the distance and area safeguards.
+
+Quality errors also offer **Ignore** and **Undo ignore**. Ignored findings remain visible, and
+**Upload anyway** submits the reviewed changes with those issues accepted. The choice resets when
+the review is reopened or its data changes. Missing upload data, API limits, empty changesets,
+and the required comment remain blocking.
 
 Three things happen when the changeset is assembled (`src/lib/osm/changeset.ts`):
 
@@ -307,7 +317,7 @@ Three things happen when the changeset is assembled (`src/lib/osm/changeset.ts`)
   the untagged `outer` member of a new `type=multipolygon` relation and moves the tags onto it —
   what the wiki prescribes and what JOSM's _create multipolygon_ does.
 
-Before that document can be sent it has to pass the checks. Errors block, warnings are for the
+Before that document can be sent it is checked. Unignored errors block, warnings are for the
 reviewer, and every rule that exists upstream is taken from upstream rather than invented: numeric
 formats from JOSM's `numeric.mapcss`, geometry rules from its `geometry.mapcss` and validation
 tests, coverage from [Simple 3D Buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings).

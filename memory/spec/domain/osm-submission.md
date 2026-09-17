@@ -13,7 +13,7 @@ Related documents:
 ## Scope
 
 The flow runs end to end: review, sign in, upload. What is _not_ automatic is the decision to write —
-the Upload button is gated on a signed-in account, zero errors, a comment, and, for a production host,
+the Upload button is gated on a signed-in account, zero unignored errors, a comment, and, for a production host,
 a confirmation.
 
 ## What a changeset must carry
@@ -277,7 +277,7 @@ so there is no partial state to reconcile.
 
 ## Pre-upload checks
 
-Errors block the upload; warnings are for a reviewer to accept or fix. Where an upstream rule exists we follow it rather than inventing one — numeric formats from JOSM's `numeric.mapcss`, geometry rules from its `geometry.mapcss` and validation tests, coverage from Simple 3D Buildings.
+Errors block the upload unless explicitly ignored in the review; warnings are for a reviewer to accept or fix. Quality findings about part containment, parent heights, intersecting or repeated way nodes, and tag values offer **Ignore** and **Undo ignore**. Ignored findings remain visible, and the action becomes **Upload anyway** with the ignored count repeated in production confirmation. Ignoring applies only to the current review and resets when edits or loaded data change, or the dialog is reopened. Missing upload identity, incomplete geometry, API limits, an empty changeset, and the required comment remain blocking. Where an upstream rule exists we follow it rather than inventing one — numeric formats from JOSM's `numeric.mapcss`, geometry rules from its `geometry.mapcss` and validation tests, coverage from Simple 3D Buildings.
 
 Geometry findings carry the exact location of the defect. **Show** closes the review, selects the
 affected element, zooms to that coordinate and leaves a red marker on the map. A
@@ -401,6 +401,28 @@ The submit dialog is the whole contract with the user before anything leaves the
 - a changeset comment, defaulted from the plan itself, and an optional editable `source` that starts
   as `Lantmateriet Laserdata, skog` in every build. LOD1 is never claimed by default while its
   OSM-compatible reuse terms remain unstated. An empty field leaves the tag out entirely;
-- every error and warning, each linking to the elements it is about;
+- every error and warning, each linking to the elements it is about; small outside-outline percentages retain one decimal place so a nonzero defect is not shown as 0%;
 - per-element rows: action, target, version, tag diffs, how many nodes were reused versus created, which elements a node is now shared with, and every structural consequence in words (the multipolygon conversion, the nodes inserted into a wall);
 - the exact `osmChange` document, copyable and downloadable as `.osc` so the same edit can be opened and validated in JOSM.
+
+### Tiny part overhang repair
+
+A `part-outside-outline` finding offers **Fix tiny overhang** when the outside area is
+under 0.5% of the part and no more than 2 m², and every outside corner is within 20 cm
+of the parent boundary. Percentage alone is insufficient: a low percentage on a large
+footprint can still represent a substantial protrusion. The fix projects outside corners
+onto the nearest outer or courtyard boundary, rounds destinations to OSM precision,
+and joins them into the host walls. Existing shared corners move in all loaded owners;
+existing node movement history is preserved, and drawn parts remain local creations.
+The repair never clips or deletes a part or removes its corners. It is withheld if it
+would leave outside area above 0.0001 m² or produce a nonsimple ring; applying it also
+checks affected shared owners. Repairs use the shared geometry transaction planner and
+pass the same topology gate as manual drags before entering undo/redo history.
+Geometry changes since the suggestion invalidate it.
+The review and map refresh after applying it, and **Show** targets the first repairable
+outside corner rather than the part center. Larger or unsupported defects remain available
+for manual review or explicit Ignore.
+
+The [containment repair tests](../../../scripts/lib/containment-repair.test.mjs) cover
+boundary joining, shared node moves, drawn parts, courtyard holes, conservative limits,
+and validator integration. They run with `yarn test`.

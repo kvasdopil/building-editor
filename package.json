@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "advice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/roof-advice.mjs",
-    "test": "node --test scripts/lib/drawing-snap.test.mjs scripts/lib/duplicate-way-node.test.mjs scripts/lib/edit-history.test.mjs scripts/lib/geometry-transaction.test.mjs scripts/lib/parent-height.test.mjs scripts/lib/relation-geometry.test.mjs scripts/lib/roof-frame.test.mjs scripts/lib/roof-skeleton.test.mjs scripts/lib/slice.test.mjs scripts/lib/tower-roof.test.mjs",
+    "test": "node --test scripts/lib/containment-repair.test.mjs scripts/lib/ignore-issue.test.mjs scripts/lib/drawing-snap.test.mjs scripts/lib/duplicate-way-node.test.mjs scripts/lib/edit-history.test.mjs scripts/lib/geometry-transaction.test.mjs scripts/lib/parent-height.test.mjs scripts/lib/relation-geometry.test.mjs scripts/lib/roof-frame.test.mjs scripts/lib/roof-skeleton.test.mjs scripts/lib/slice.test.mjs scripts/lib/tower-roof.test.mjs",
     "test:lidar": "node --test scripts/lib/icgc-lidar.test.mjs scripts/lib/ign-lidar.test.mjs",
     "lint": "oxlint .",
     "lint:format": "oxfmt . --check",

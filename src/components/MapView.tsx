@@ -94,6 +94,11 @@ import { createTileLoader, type LoaderStatus, type TileLoader } from "@/lib/osm/
 import { drawnId, drawnRef, parseOsmRef } from "@/lib/osm/ref";
 import { relationMemberWays } from "@/lib/osm/member-way";
 import { NODE_REUSE_METERS } from "@/lib/osm/nodes";
+import {
+  containmentGeometryKey,
+  containmentRepair,
+  applyContainmentRepair,
+} from "@/lib/osm/containment-repair";
 import type { IssueFix } from "@/lib/osm/issues";
 import { coordinateKey, METERS_PER_DEG_LAT, roundToOsmGrid } from "@/lib/osm/precision";
 import { selectFromOsm } from "@/lib/osm/select";
@@ -2502,6 +2507,53 @@ export function MapView() {
         (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon")
       ) {
         setNotice(`Could not find ${fix.entity}'s current outline`);
+        return;
+      }
+      if (fix.kind === "snap-part-to-outline") {
+        const parent = displayedFeaturesRef.current.features.find(
+          (item) => item.properties?.id === fix.parent,
+        );
+        if (
+          !parent ||
+          (parent.geometry.type !== "Polygon" && parent.geometry.type !== "MultiPolygon") ||
+          containmentGeometryKey(feature.geometry) !== fix.partGeometry ||
+          containmentGeometryKey(parent.geometry) !== fix.parentGeometry
+        ) {
+          setNotice("The outlines changed; review them again before applying this fix");
+          return;
+        }
+        const moves = containmentRepair(feature.geometry, parent.geometry);
+        const repaired =
+          moves &&
+          applyContainmentRepair(
+            displayedFeaturesRef.current,
+            geometryEditsRef.current,
+            createdPartsRef.current,
+            moves,
+            liveFeaturesRef.current,
+          );
+        if (!repaired) {
+          setNotice("This overhang cannot be snapped safely; inspect the outline instead");
+          return;
+        }
+        if (!acceptGeometryTransaction(repaired.geometryEdits, repaired.createdParts)) return;
+        geometryEditsRef.current = repaired.geometryEdits;
+        createdPartsRef.current = repaired.createdParts;
+        setGeometryEdits(repaired.geometryEdits);
+        setCreatedParts(repaired.createdParts);
+        refreshDisplayedFeatures(repaired.geometryEdits, repaired.createdParts);
+        const selectedId = selectionRef.current?.selected.id;
+        if (selectedId)
+          setSelection(
+            selectFromLocalGeometry(
+              liveFeaturesRef.current,
+              selectedId,
+              repaired.geometryEdits,
+              repaired.createdParts,
+            ),
+          );
+        setValidationLocation(null);
+        setNotice(`Snapped the tiny overhang on ${fix.entity} to ${fix.parent}`);
         return;
       }
       const geometry = removeGeometryRingNode(

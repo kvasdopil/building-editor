@@ -35,7 +35,16 @@ export interface GeometryIssueFix {
   coordinate: LngLat;
 }
 
-export type IssueFix = TagIssueFix | GeometryIssueFix;
+export interface ContainmentIssueFix {
+  kind: "snap-part-to-outline";
+  entity: string;
+  parent: string;
+  /** Exact geometry snapshots prevent applying a stale suggestion. */
+  partGeometry: string;
+  parentGeometry: string;
+}
+
+export type IssueFix = TagIssueFix | GeometryIssueFix | ContainmentIssueFix;
 
 export function issue(
   level: Issue["level"],
@@ -58,5 +67,27 @@ export function sortIssues(issues: Issue[]): Issue[] {
       Number(b.level === "error") - Number(a.level === "error") ||
       a.check.localeCompare(b.check) ||
       (a.entities[0] ?? "").localeCompare(b.entities[0] ?? ""),
+  );
+}
+
+/** Quality findings can be accepted; missing upload data and API limits cannot. */
+export function canIgnoreIssue(found: Issue): boolean {
+  return (
+    found.level === "error" &&
+    new Set([
+      "part-outside-outline",
+      "part-parent-missing-height",
+      "part-parent-not-found",
+      "self-intersecting-way",
+      "self-touching-way",
+      "duplicated-way-nodes",
+      "negative-levels",
+      "levels-format",
+      "length-format",
+      "height-not-positive",
+      "min-height-above-height",
+      "roof-height-above-height",
+      "min-level-above-levels",
+    ]).has(found.check)
   );
 }

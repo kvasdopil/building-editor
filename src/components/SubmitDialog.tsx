@@ -22,7 +22,7 @@ import {
   toChangesetXml,
 } from "@/lib/osm/changeset";
 import type { Issue, IssueFix } from "@/lib/osm/issues";
-import { sortIssues } from "@/lib/osm/issues";
+import { canIgnoreIssue, sortIssues } from "@/lib/osm/issues";
 import { COMMENT_MIN_LENGTH, commentIssues, isUsableComment } from "@/lib/osm/validate";
 import { buildSubmissionReview } from "@/lib/osm/submission-review";
 import { OsmBuildingLookup } from "@/lib/osm/building-lookup";
@@ -132,7 +132,11 @@ function IssueRow({
   onNavigate,
   onLocate,
   onFix,
+  ignored,
+  onToggleIgnore,
 }: {
+  ignored: boolean;
+  onToggleIgnore: () => void;
   found: Issue;
   onNavigate: (entity: string) => void;
   onLocate: (at: [number, number], entity?: string) => void;
@@ -152,6 +156,7 @@ function IssueRow({
         <FiAlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" aria-hidden />
       )}
       <div className="min-w-0">
+        {ignored && <p className="mb-1 font-semibold text-slate-600">Ignored for this upload</p>}
         <p className={error ? "text-rose-900" : "text-amber-900"}>{found.message}</p>
         <p className="mt-1 flex flex-wrap items-center gap-1.5">
           <code className="rounded bg-white/70 px-1 py-0.5 font-mono text-[10px] text-slate-600">
@@ -177,13 +182,23 @@ function IssueRow({
               Show
             </button>
           )}
+          {canIgnoreIssue(found) && (
+            <button
+              type="button"
+              onClick={onToggleIgnore}
+              aria-pressed={ignored}
+              className="rounded border border-slate-300 bg-white px-2 py-0.5 font-semibold text-slate-700 hover:bg-slate-100"
+            >
+              {ignored ? "Undo ignore" : "Ignore"}
+            </button>
+          )}
           {fix && (
             <button
               type="button"
               onClick={() => onFix(fix)}
               className="rounded bg-amber-700 px-2 py-0.5 font-semibold text-white hover:bg-amber-800"
             >
-              Fix
+              {fix.kind === "snap-part-to-outline" ? "Fix tiny overhang" : "Fix"}
             </button>
           )}
         </p>
@@ -378,6 +393,11 @@ export function SubmitDialog({
     () => (open ? buildSubmissionReview({ input, displayed }) : null),
     [displayed, input, open],
   );
+  const [ignoredIssues, setIgnoredIssues] = useState<Set<Issue>>(new Set());
+  // Findings belong to this exact review. New edits or reopening require review again.
+  useEffect(() => {
+    setIgnoredIssues(new Set());
+  }, [review]);
   const plan = review?.plan ?? null;
   const validation = review?.validation ?? null;
   const xml = review?.xml ?? "";
@@ -423,6 +443,10 @@ export function SubmitDialog({
   const commentOk = isUsableComment(comment);
   const changesetXml = toChangesetXml(changesetTags({ comment, source }));
   const errors = issues.filter((found) => found.level === "error");
+  const blockingErrors = errors.filter(
+    (found) => !canIgnoreIssue(found) || !ignoredIssues.has(found),
+  );
+  const ignoredCount = errors.length - blockingErrors.length;
   const warnings = issues.filter((found) => found.level === "warning");
   const createdWays = plan.ways.filter((way) => way.action === "create").length;
   const modifiedWays = plan.ways.filter((way) => way.action === "modify").length;
@@ -431,8 +455,8 @@ export function SubmitDialog({
 
   /** Why the upload cannot be attempted, or null when it can. */
   const blocked =
-    errors.length > 0
-      ? `${pluralize(errors.length, "error")} must be fixed first.`
+    blockingErrors.length > 0
+      ? `${pluralize(blockingErrors.length, "error")} must be resolved first. Use Ignore where available.`
       : auth.status === "loading"
         ? "Checking your OpenStreetMap session…"
         : auth.status !== "signed-in"
@@ -452,6 +476,7 @@ export function SubmitDialog({
 
   const upload = async () => {
     setConfirming(false);
+    if (blocked !== null || uploading) return;
     setUploading(true);
     setUploadError(null);
     try {
@@ -662,12 +687,27 @@ export function SubmitDialog({
                     <IssueRow
                       key={`${found.check}-${found.entities.join()}-${position}`}
                       found={found}
+                      ignored={ignoredIssues.has(found)}
+                      onToggleIgnore={() =>
+                        setIgnoredIssues((current) => {
+                          const next = new Set(current);
+                          if (next.has(found)) next.delete(found);
+                          else next.add(found);
+                          return next;
+                        })
+                      }
                       onNavigate={navigate}
                       onLocate={onLocate}
                       onFix={onFix}
                     />
                   ))}
                 </ul>
+              )}
+              {ignoredCount > 0 && (
+                <p className="text-xs font-medium text-amber-800">
+                  {pluralize(ignoredCount, "error")} ignored for this upload. The reported issues
+                  remain in the data.
+                </p>
               )}
               {plan.dropped.length > 0 && (
                 <p className="text-xs text-slate-500">
@@ -781,7 +821,7 @@ export function SubmitDialog({
                     : "bg-violet-700 text-white hover:bg-violet-800"
                 }`}
               >
-                {uploading ? "Uploading…" : "Upload"}
+                {uploading ? "Uploading…" : ignoredCount > 0 ? "Upload anyway" : "Upload"}
               </button>
             </div>
           </footer>
@@ -801,6 +841,12 @@ export function SubmitDialog({
           <strong className="font-semibold">{auth.user?.name}</strong>, visible to everyone and
           permanent in the history. A mistake can be reverted, but not erased.
         </p>
+        {ignoredCount > 0 && (
+          <p>
+            {pluralize(ignoredCount, "validation error")} will be ignored. The reported issues
+            remain in the data.
+          </p>
+        )}
         <p className="rounded-md bg-slate-50 px-2 py-1.5 text-xs text-slate-700 italic">
           “{comment}”
         </p>

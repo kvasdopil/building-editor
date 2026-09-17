@@ -1,3 +1,4 @@
+import { containmentGeometryKey, containmentRepair } from "./containment-repair";
 import area from "@turf/area";
 import difference from "@turf/difference";
 import { featureCollection } from "@turf/helpers";
@@ -626,17 +627,26 @@ function checkBuilding(
   for (const part of parts) {
     const inside = overlapFraction(part, building);
     if (inside < 0.999) {
-      issues.push(
-        issue(
-          // Only block on a part this changeset writes. The same defect on a part
-          // we merely happen to sit next to is somebody else's, and pre-existing.
-          written.has(part.id) ? "error" : "warning",
-          "part-outside-outline",
-          `${part.id} has ${Math.round((1 - inside) * 100)}% of its footprint outside ${building.id}; a part must stay within its outline.`,
-          [part.id, building.id],
-          ringCenter(part.polygons[0].outer),
-        ),
+      const partGeometry = elementFeature(part).geometry;
+      const parentGeometry = elementFeature(building).geometry;
+      const repair = containmentRepair(partGeometry, parentGeometry);
+      const finding = issue(
+        written.has(part.id) ? "error" : "warning",
+        "part-outside-outline",
+        `${part.id} has ${((1 - inside) * 100).toFixed(1)}% of its footprint outside ${building.id}; a part must stay within its outline.`,
+        [part.id, building.id],
+        repair?.[0].from ?? ringCenter(part.polygons[0].outer),
       );
+      if (repair) {
+        finding.fix = {
+          kind: "snap-part-to-outline",
+          entity: part.id,
+          parent: building.id,
+          partGeometry: containmentGeometryKey(partGeometry),
+          parentGeometry: containmentGeometryKey(parentGeometry),
+        };
+      }
+      issues.push(finding);
     }
     const partArea = safeArea(polygonal(part));
     if (partArea > 0 && partArea < MIN_PART_AREA_M2) {
