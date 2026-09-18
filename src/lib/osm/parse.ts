@@ -260,15 +260,23 @@ function multiPolygonFromMemberWays(members: RelationMemberWay[]): MultiPolygon 
 export function mergeTileReads(previous: Feature, next: Feature): Feature {
   // A version bump means the element changed upstream between the two reads, so
   // the older one may describe members the relation no longer has.
-  if (previous.properties?.version !== next.properties?.version) return next;
+  if (previous.properties?.version !== next.properties?.version) {
+    return Number(previous.properties?.version) > Number(next.properties?.version)
+      ? previous
+      : next;
+  }
 
   const known = relationMemberWays(previous.properties?.member_ways);
   const incoming = relationMemberWays(next.properties?.member_ways);
   if (known.length === 0 || incoming.length === 0) return next;
 
   const byId = new Map(known.map((member) => [member.id, member]));
-  for (const member of incoming) byId.set(member.id, member);
-  if (byId.size === incoming.length) return next;
+  for (const member of incoming) {
+    const existing = byId.get(member.id);
+    if (!existing || member.version >= existing.version) byId.set(member.id, member);
+  }
+  if (byId.size === incoming.length && incoming.every((member) => byId.get(member.id) === member))
+    return next;
 
   // Follow the relation's own member order, so the merged list does not depend
   // on which tile arrived first.

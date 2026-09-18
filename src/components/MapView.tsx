@@ -1455,6 +1455,7 @@ export function MapView() {
   const sliceDraftRef = useRef<SliceDraft>(EMPTY_SLICE_DRAFT);
   const addPartDraftRef = useRef<AddPartDraft>(EMPTY_ADD_PART_DRAFT);
   const sliceBoundaryCacheRef = useRef<SliceBoundaryCache | null>(null);
+  const addPartPreparationRef = useRef(0);
   const addPartBoundaryCacheRef = useRef<SliceBoundaryCache | null>(null);
   const nextPartIdRef = useRef(1);
   const geometryEditsRef = useRef(geometryEdits);
@@ -2084,6 +2085,7 @@ export function MapView() {
   }, []);
 
   const cancelAddPartDrawing = useCallback(() => {
+    addPartPreparationRef.current++;
     addPartBoundaryCacheRef.current = null;
     updateAddPartDraft(EMPTY_ADD_PART_DRAFT);
     setAddPartActive(false);
@@ -2763,12 +2765,22 @@ export function MapView() {
       setNotice("Could not find the target building");
       return;
     }
-    const result = sliceBuilding(target.building, target.parts, nodes, mode === "loop");
+    let failureMessage: string | undefined;
+    const result = sliceBuilding(
+      target.building,
+      target.parts,
+      nodes,
+      mode === "loop",
+      (message) => {
+        failureMessage = message;
+      },
+    );
     if (!result) {
       setNotice(
-        mode === "loop"
-          ? "The loop must be simple and fully inside the building"
-          : "The polyline must stay inside, end on a boundary, and divide something",
+        failureMessage ??
+          (mode === "loop"
+            ? "The loop must be simple and fully inside the building"
+            : "Could not split this geometry; try a different boundary point"),
       );
       return;
     }
@@ -2979,7 +2991,7 @@ export function MapView() {
     updateSliceDraft,
   ]);
 
-  const toggleAddPart = useCallback(() => {
+  const toggleAddPart = useCallback(async () => {
     if (addPartActiveRef.current) {
       cancelAddPartDrawing();
       return;
@@ -2989,13 +3001,42 @@ export function MapView() {
       setNotice("Select a building or part before adding a part");
       return;
     }
+    const preparation = ++addPartPreparationRef.current;
+    cancelAddNode();
+    cancelHoleDrawing();
+    cancelSliceDrawing();
+    if (selected.building.id.startsWith("relation/")) {
+      setNotice("Loading the complete building outline…");
+      try {
+        await loaderRef.current?.ensureCompleteRelation(selected.building.id);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Could not load the building outline");
+        return;
+      }
+      if (
+        !mapRef.current ||
+        selectionRef.current?.selected.id !== selected.selected.id ||
+        preparation !== addPartPreparationRef.current
+      )
+        return;
+    }
+    const refreshed = selectFromLocalGeometry(
+      liveFeaturesRef.current,
+      selected.selected.id,
+      geometryEditsRef.current,
+      createdPartsRef.current,
+    );
+    if (!refreshed) {
+      setNotice("Could not find the target building");
+      return;
+    }
     // A part is commonly the topmost map feature. Add part always expands its
     // parent outline, so retarget it directly instead of requiring a click on
     // a visible fragment of that parent first.
     const target =
-      selected.selected.id === selected.building.id
-        ? selected
-        : { ...selected, selected: selected.building };
+      refreshed.selected.id === refreshed.building.id
+        ? refreshed
+        : { ...refreshed, selected: refreshed.building };
     cancelAddNode();
     cancelHoleDrawing();
     cancelSliceDrawing();
@@ -3362,8 +3403,12 @@ export function MapView() {
         finishSliceDrawing();
         return;
       }
-      if (!pointInsideBuilding(point, target)) {
-        setNotice("Polyline nodes must stay inside the same building");
+      if (
+        ![target, ...boundaryCache.selection.parts].some((element) =>
+          pointInsideBuilding(point, element),
+        )
+      ) {
+        setNotice("Polyline nodes must stay inside the building or one of its parts");
         return;
       }
       updateSliceDraft({ ...draft, nodes: [...draft.nodes, point], snap: null, cursor: null });

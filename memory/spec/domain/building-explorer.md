@@ -199,6 +199,18 @@ must be simple. This union tolerates small disagreements between a parent courty
 courtyard, including a cut that reaches, follows, and leaves the part's inner boundary. A closed
 tower loop must remain inside the solid building outline itself.
 
+Straight cuts must work in either direction at concave corners and at a node shared by an outer
+ring and a courtyard ring. They stop at their drawn endpoints; extending their supporting line
+must not divide other wings or parts. Existing multipart parts remain unchanged unless the cut
+actually increases their number of regions. Open-path bends may lie in a part extending beyond
+the parent outline, under the same coverage rule as the completed cut. Failure notices distinguish
+uncovered gaps, missing boundary endpoints, non-dividing paths, and geometry-operation failures.
+
+The offline [Slice regressions](../../../scripts/lib/slice.test.mjs) use an attributed geometry
+snapshot of relation/29065, including way/1560006184, to verify both drawing directions, shared
+courtyard/exterior corners, preserved area, non-overlapping pieces, finite endpoints, multipart
+sources, overhanging parts, and rejected uncovered gaps.
+
 If a building is already selected when the first Slice node is placed, its building group is tested
 first for both boundary snaps and interior-loop containment. Only a click that is not on or inside
 that selected building falls back to the global rendered-feature search. This makes a shared wall
@@ -284,7 +296,9 @@ changeset-upload feature exists.
 
 At live-OSM zoom, **Add part** is enabled while a `building=*` outline or one of its parts is
 selected. Activating it from a part immediately retargets selection to that part's parent outline,
-then fixes the outline as the target and makes the geometry tools mutually exclusive. The first node
+then fixes the outline as the target and makes the geometry tools mutually exclusive. Before drawing
+on a multipolygon, missing boundary members are loaded through the cached element endpoint; partial
+map tiles are not sufficient for an outline-changing edit. The first node
 must snap to an outer-ring edge or existing node, and the last node must snap to a different point
 on the same outline. Edge snaps use the same 12-pixel tolerance as Slice
 and exact nodes take priority within nine pixels. A click honors the visible snap preview when it is
@@ -306,10 +320,17 @@ outer ring between the final and initial snaps are evaluated, including every in
 corner; the valid non-overlapping candidate with the smaller part area is used. This permits an
 addition to wrap around one or several corners while rejecting the opposite boundary path, which
 would enclose or cross the original building. The two snaps must resolve to the same outer ring.
+Small three-point additions beside an entrance must be accepted without relying on a polygon union
+to rediscover their shared wall. Existing unrelated geometry defects are preserved, while newly
+introduced crossings or repeated nodes are rejected. The [Add part regressions](../../../scripts/lib/add-part.test.mjs)
+cover relation/29065 and way/1560006185, tiny triangles in both directions, entrance-node identity,
+complete relation loading, late partial reads, and invalid additions.
+
 Completion performs one atomic local operation:
 
-- union the drawn footprint into the existing `building=*` outline and record an `add-part` geometry
-  modification on that element;
+- expand the existing `building=*` outline by replacing only the attachment arc with the exterior
+  path, preserving all other OSM nodes and recording an `add-part` geometry modification. Avoid
+  simplifying unrelated collinear nodes or existing backtracks as a side effect;
 - create a pending `building:part=yes` using the drawn exterior footprint, with an explicit copy of
   the outline's `height` when available; omitted physical values continue to use the outline as
   effective editor defaults;

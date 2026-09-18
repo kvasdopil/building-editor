@@ -3,6 +3,7 @@
 import type { Feature, FeatureCollection } from "geojson";
 import type { Bounds } from "../geometry";
 import { idbDelete, idbGet, idbPut, TILE_STORE } from "../idb";
+import { relationMemberWays } from "./member-way";
 import { mergeTileReads } from "./parse";
 import { OSM_TILE_SCHEMA, type TileId, tileKey, tilesInBounds } from "./tiles";
 
@@ -44,7 +45,25 @@ export interface TileLoader {
    * lands: the cached tiles still describe the data it replaced.
    */
   refresh(bounds: Bounds): void;
+  /** Load missing multipolygon members before an outline-changing gesture. */
+  ensureCompleteRelation(id: string): Promise<void>;
   stop(): void;
+}
+
+function completeRelation(feature: Feature | undefined): boolean {
+  const properties = feature?.properties;
+  const ways = relationMemberWays(properties?.member_ways);
+  const members = properties?.members;
+  return (
+    Array.isArray(members) &&
+    members.length > 0 &&
+    members.every(
+      (member) =>
+        member.type !== "way" ||
+        !["", "outer", "inner"].includes(member.role) ||
+        ways.some((way) => way.id === member.ref && way.version > 0),
+    )
+  );
 }
 
 export interface LoaderStatus {
@@ -69,6 +88,7 @@ export function createTileLoader(
   const claimed = new Set<string>();
   /** Queued work; `fresh` tiles bypass every cache on the way out. */
   const queue: { tile: TileId; fresh: boolean }[] = [];
+  const relationRequests = new Map<string, Promise<void>>();
   let active = 0;
   let failed = 0;
   let stopped = false;
@@ -129,6 +149,28 @@ export function createTileLoader(
   };
 
   return {
+    async ensureCompleteRelation(id) {
+      if (!/^relation\/\d+$/.test(id) || completeRelation(features.get(id))) return;
+      if (stopped) throw new Error("The map was closed");
+      const pending = relationRequests.get(id);
+      if (pending) return pending;
+      const request = (async () => {
+        const response = await fetch(`/api/osm/element/${id}`);
+        if (!response.ok) throw new Error(`Could not load the complete outline of ${id}`);
+        const collection = (await response.json()) as FeatureCollection;
+        if (!completeRelation(collection.features.find((feature) => feature.properties?.id === id)))
+          throw new Error(`The boundary members of ${id} are still incomplete`);
+        if (stopped) return;
+        absorb(collection);
+        emit();
+      })();
+      relationRequests.set(id, request);
+      try {
+        await request;
+      } finally {
+        relationRequests.delete(id);
+      }
+    },
     load(bounds) {
       if (stopped) return;
       for (const tile of tilesInBounds(bounds, MAX_TILES_PER_VIEW)) {

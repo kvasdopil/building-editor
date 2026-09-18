@@ -809,6 +809,44 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         // every original boundary node survives unchanged. Pair rings by their
         // ordered anchors rather than array position; array position carries no
         // OSM topology and made harmless multipolygon reordering unuploadable.
+        // An exterior addition can turn part of one closed outer member into
+        // an internal shared wall. Those old nodes survive on the new part;
+        // ownership of the remaining outer ring is still that same closed way.
+        const additionVertices = new Set(
+          Object.values(createdParts)
+            .filter((part) => part.properties.parent_id === ref)
+            .flatMap((part) => ringsOf(part.geometry).flat(2))
+            .map((point) => coordinateKey(roundToOsmGrid(point))),
+        );
+        const survivingAnchors = (rawRing: RoleRing, edited: RoleRing, anchors: LngLat[]) => {
+          if (
+            override.kind !== "add-part" ||
+            rawRing.role !== "outer" ||
+            !memberWays.some(
+              (member) =>
+                member.role === "outer" &&
+                sameCoordinate(
+                  member.coordinates[0],
+                  member.coordinates[member.coordinates.length - 1],
+                ) &&
+                orientMemberInRing(member.coordinates, rawRing.coordinates) !== null,
+            )
+          )
+            return anchors;
+          const editedKeys = new Set(
+            edited.coordinates.map((point) => coordinateKey(roundToOsmGrid(point))),
+          );
+          const kept = anchors.filter((point) =>
+            editedKeys.has(coordinateKey(roundToOsmGrid(point))),
+          );
+          const retired = anchors.filter(
+            (point) => !editedKeys.has(coordinateKey(roundToOsmGrid(point))),
+          );
+          return new Set(kept.map((point) => coordinateKey(roundToOsmGrid(point)))).size >= 3 &&
+            retired.every((point) => additionVertices.has(coordinateKey(roundToOsmGrid(point))))
+            ? kept
+            : anchors;
+        };
         const unmatchedEdited = [...editedRings];
         const ringPairs =
           !ambiguousMove && rawRings.length === editedRings.length
@@ -819,7 +857,11 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
                   .filter(
                     ({ edited }) =>
                       edited.role === rawRing.role &&
-                      editedMemberPath(edited.coordinates, anchors, true) !== null,
+                      editedMemberPath(
+                        edited.coordinates,
+                        survivingAnchors(rawRing, edited, anchors),
+                        true,
+                      ) !== null,
                   );
                 if (matches.length !== 1) return null;
                 const [{ edited, index }] = matches;
@@ -864,7 +906,11 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
                 movedByCoordinate.get(coordinateKey(roundToOsmGrid(point))) ??
                 roundToOsmGrid(point),
             );
-            const coordinates = editedMemberPath(pair.edited.coordinates, effectiveAnchors, closed);
+            const coordinates = editedMemberPath(
+              pair.edited.coordinates,
+              closed ? survivingAnchors(pair.raw, pair.edited, effectiveAnchors) : effectiveAnchors,
+              closed,
+            );
             if (!coordinates) {
               mappingFailed = true;
               break;

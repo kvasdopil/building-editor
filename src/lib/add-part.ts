@@ -1,11 +1,10 @@
 import area from "@turf/area";
 import intersect from "@turf/intersect";
-import union from "@turf/union";
-import { featureCollection, polygon } from "@turf/helpers";
+import { feature, featureCollection, polygon } from "@turf/helpers";
 import type { Feature, MultiPolygon, Polygon } from "geojson";
 import type { BuildingElement, LngLat } from "./buildings";
 import { closestPointOnSegment, closeRing, elementFeature, openRing } from "./geometry";
-import { type EditableGeometry, repairGeometryBacktracks, ringIsSimple } from "./geometry-edits";
+import { type EditableGeometry, ringIsSimple, ringIntersections } from "./geometry-edits";
 import { firstPartTags, inheritedPartTags } from "./part-tags";
 
 const MIN_PART_AREA_M2 = 0.1;
@@ -92,10 +91,13 @@ function boundaryVertices(ring: LngLat[], from: number, to: number, forward: boo
  * outer ring. Following the ring, rather than drawing one chord between the
  * snaps, lets a new part wrap around one or several building corners.
  */
-function additionRings(building: BuildingElement, nodes: LngLat[]): LngLat[][] {
+function additionRings(
+  building: BuildingElement,
+  nodes: LngLat[],
+): { ring: LngLat[]; outline: MultiPolygon }[] {
   const starts = boundaryLocations(building, nodes[0]);
   const ends = boundaryLocations(building, nodes[nodes.length - 1]);
-  const candidates: LngLat[][] = [];
+  const candidates: { ring: LngLat[]; outline: MultiPolygon }[] = [];
   for (const start of starts) {
     for (const end of ends) {
       if (start.polygonIndex !== end.polygonIndex) continue;
@@ -106,23 +108,70 @@ function additionRings(building: BuildingElement, nodes: LngLat[]): LngLat[][] {
           ...boundaryVertices(ring, end.position, start.position, forward),
         ]);
         if (
-          ringIsSimple(openRing(candidate)) &&
-          !candidates.some((existing) => JSON.stringify(existing) === JSON.stringify(candidate))
-        )
-          candidates.push(candidate);
+          simpleRing(candidate) &&
+          !candidates.some(
+            (existing) => JSON.stringify(existing.ring) === JSON.stringify(candidate),
+          )
+        ) {
+          // Splice only the attachment arc. A boolean union simplifies unrelated
+          // collinear OSM nodes, including entrances and relation-member anchors.
+          const outline = elementGeometry(building);
+          outline.coordinates[start.polygonIndex] = [
+            closeRing([
+              ...nodes,
+              ...boundaryVertices(ring, end.position, start.position, !forward),
+            ]),
+            ...outline.coordinates[start.polygonIndex].slice(1),
+          ];
+          candidates.push({ ring: candidate, outline });
+        }
       }
     }
   }
   return candidates;
 }
 
-function polygonCount(geometry: Polygon | MultiPolygon): number {
-  return geometry.type === "Polygon" ? 1 : geometry.coordinates.length;
+/** Intersection tolerance must be in local meters, not squared degrees. */
+function localRing(ring: LngLat[]): LngLat[] {
+  const [longitude, latitude] = ring[0];
+  const scale = METERS_PER_DEGREE * Math.cos((latitude * Math.PI) / 180);
+  return openRing(ring).map(([x, y]) => [
+    (x - longitude) * scale,
+    (y - latitude) * METERS_PER_DEGREE,
+  ]);
 }
 
-function geometryIsSimple(geometry: Polygon | MultiPolygon): boolean {
+function simpleRing(ring: LngLat[]): boolean {
+  return ringIsSimple(localRing(ring));
+}
+
+/** Preserve unrelated pre-existing ring defects instead of silently deleting OSM nodes. */
+function geometryIssues(geometry: Polygon | MultiPolygon): Set<string> {
   const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
-  return polygons.every((rings) => rings.every((ring) => ringIsSimple(openRing(ring as LngLat[]))));
+  const issues = new Set<string>();
+  for (const rings of polygons)
+    for (const coordinates of rings) {
+      const ring = openRing(coordinates as LngLat[]);
+      const seen = new Map<string, number>();
+      for (const point of ring) {
+        const key = JSON.stringify(point);
+        const count = (seen.get(key) ?? 0) + 1;
+        seen.set(key, count);
+        if (count > 1) issues.add(`repeat:${key}:${count}`);
+      }
+      for (const crossing of ringIntersections(localRing(ring))) {
+        const edges = crossing.segments
+          .map((index) =>
+            [ring[index], ring[(index + 1) % ring.length]]
+              .map((point) => JSON.stringify(point))
+              .sort()
+              .join("/"),
+          )
+          .sort();
+        issues.add(`cross:${edges.join("|")}`);
+      }
+    }
+  return issues;
 }
 
 /**
@@ -140,12 +189,13 @@ export function addPartToBuilding(
   if (nodes.length < 3 || samePoint(nodes[0], nodes[nodes.length - 1])) return null;
 
   const original: Feature<Polygon | MultiPolygon> = elementFeature(building);
+  const existingIssues = geometryIssues(original.geometry);
   const valid: {
     addition: Feature<Polygon>;
     merged: Feature<Polygon | MultiPolygon>;
     area: number;
   }[] = [];
-  for (const ring of additionRings(building, nodes)) {
+  for (const { ring, outline } of additionRings(building, nodes)) {
     const addition = polygon([ring]);
     const additionArea = area(addition);
     if (additionArea < MIN_PART_AREA_M2) continue;
@@ -154,12 +204,10 @@ export function addPartToBuilding(
       const overlap = intersect(shapes);
       if (overlap && area(overlap) > MAX_INTERIOR_OVERLAP_M2) continue;
 
-      const merged = union(shapes) as Feature<Polygon | MultiPolygon> | null;
-      if (!merged || polygonCount(merged.geometry) > polygonCount(original.geometry)) continue;
+      const merged = feature(outline);
       if (area(merged) - area(original) < MIN_PART_AREA_M2) continue;
-      const repaired = repairGeometryBacktracks(merged.geometry);
-      if (!geometryIsSimple(repaired)) continue;
-      valid.push({ addition, merged: { ...merged, geometry: repaired }, area: additionArea });
+      if ([...geometryIssues(outline)].some((issue) => !existingIssues.has(issue))) continue;
+      valid.push({ addition, merged, area: additionArea });
     } catch {
       // Try the other direction around the existing outer ring.
     }

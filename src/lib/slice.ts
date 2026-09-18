@@ -1,4 +1,5 @@
 import Flatten from "@flatten-js/core";
+import { cutStraight } from "./straight-cut";
 import type { MultiPolygon, Polygon } from "geojson";
 import type { BuildingElement, LngLat } from "./buildings";
 import { orientRing, segmentsIntersect } from "./geometry";
@@ -139,7 +140,12 @@ function partition(
 ): Region[] {
   if (polygon.isEmpty()) return [];
   if (!closed) {
-    return polygonRegions(polygon.cut(new Flatten.Multiline(cuttingSegments)), projection);
+    return polygonRegions(
+      cuttingSegments.length === 1
+        ? cutStraight(polygon, cuttingSegments[0])
+        : polygon.cut(new Flatten.Multiline(cuttingSegments)),
+      projection,
+    );
   }
   const loop = new Flatten.Polygon(cuttingSegments.map((edge) => edge.start));
   const inside = Flatten.BooleanOperations.intersect(polygon, loop);
@@ -150,7 +156,11 @@ function partition(
 /** Count an open cut's output without converting every island back to GeoJSON. */
 function partitionCount(polygon: Flatten.Polygon, cuttingSegments: Flatten.Segment[]): number {
   if (polygon.isEmpty()) return 0;
-  return meaningfulIslandCount(polygon.cut(new Flatten.Multiline(cuttingSegments)));
+  return meaningfulIslandCount(
+    cuttingSegments.length === 1
+      ? cutStraight(polygon, cuttingSegments[0])
+      : polygon.cut(new Flatten.Multiline(cuttingSegments)),
+  );
 }
 
 /**
@@ -201,6 +211,20 @@ function onAnyBoundary(point: Flatten.Point, polygons: Flatten.Polygon[]): boole
   return polygons.some((polygon) => polygon.findEdgeByPoint(point) !== undefined);
 }
 
+/** A path may switch between overlapping footprints, but never jump a gap. */
+function segmentCovered(segment: Flatten.Segment, polygons: Flatten.Polygon[]): boolean {
+  const points = [
+    segment.start,
+    segment.end,
+    ...polygons.flatMap((polygon) => polygon.intersect(segment)),
+  ].sort((a, b) => a.distanceTo(segment.start)[0] - b.distanceTo(segment.start)[0]);
+  return points.every((point, i) => {
+    if (i === 0 || point.equalTo(points[i - 1])) return true;
+    const midpoint = Flatten.segment(points[i - 1], point).middle();
+    return polygons.some((polygon) => polygon.contains(midpoint));
+  });
+}
+
 /**
  * Divide a building with one path, in one of two modes.
  *
@@ -218,44 +242,44 @@ export function sliceBuilding(
   parts: BuildingElement[],
   nodes: LngLat[],
   closed: boolean,
+  onFailure?: (message: string) => void,
 ): SliceResult | null {
-  if (!simplePath(nodes, closed)) return null;
+  const fail = (message: string): null => {
+    onFailure?.(message);
+    return null;
+  };
+  if (!simplePath(nodes, closed))
+    return fail("The cut must be a simple path without repeated nodes or crossings");
   const projection = makeProjection(building);
   const buildingPolygon = geometryPolygon(elementGeometry(building), projection);
-  if (!buildingPolygon.isValid()) return null;
+  if (!buildingPolygon.isValid())
+    return fail("The building outline has invalid geometry; repair it before slicing");
 
   const partShapes: PartShape[] = parts.map((element) => ({
     element,
     polygon: geometryPolygon(elementGeometry(element), projection),
   }));
 
-  // Parts normally sit inside the building outline, but real OSM geometry can
-  // disagree slightly at courtyards and other shared boundaries. A slice that
-  // stays inside an existing part is still meaningful even where the parent
-  // outline calls the same sliver a hole. Validate against everything Slice
-  // can divide instead of rejecting such a path against the outline alone.
-  let sliceablePolygon = buildingPolygon;
-  if (!closed) {
-    sliceablePolygon = buildingPolygon.clone();
-    try {
-      for (const { polygon } of partShapes) {
-        sliceablePolygon = Flatten.BooleanOperations.unify(sliceablePolygon, polygon);
-      }
-    } catch {
-      return null;
-    }
-  }
+  // Test coverage between every boundary crossing instead of boolean-unioning
+  // the complete building group. Stacked and touching parts need no dissolve.
+  const boundaries = [buildingPolygon, ...partShapes.map((shape) => shape.polygon)];
 
   // A closed path has to wind counter-clockwise: Flatten reads a clockwise face
   // as a hole, and then intersect and subtract both hand back the loop itself
   // instead of the two sides of the cut, duplicating the region.
   const points = (closed ? orientRing(nodes, "ccw") : nodes).map((node) => projection.point(node));
   const cuttingSegments = segments(points, closed);
-  if (cuttingSegments.some((segment) => !sliceablePolygon.contains(segment))) return null;
+  if (
+    cuttingSegments.some((segment) =>
+      closed ? !buildingPolygon.contains(segment) : !segmentCovered(segment, boundaries),
+    )
+  )
+    return fail("The cut crosses an uncovered courtyard or leaves the building and its parts");
   if (!closed) {
-    const boundaries = [buildingPolygon, ...partShapes.map((shape) => shape.polygon)];
-    if (!onAnyBoundary(points[0], boundaries)) return null;
-    if (!onAnyBoundary(points[points.length - 1], boundaries)) return null;
+    if (!onAnyBoundary(points[0], boundaries))
+      return fail("Start the cut on an outline, hole, or part boundary");
+    if (!onAnyBoundary(points[points.length - 1], boundaries))
+      return fail("End the cut on an outline, hole, or part boundary");
   } else {
     const loop = new Flatten.Polygon(points);
     if (!loop.isValid() || loop.area() < MIN_PART_AREA_M2 || !buildingPolygon.contains(loop))
@@ -310,7 +334,7 @@ export function sliceBuilding(
       const regions = partition(polygon, cuttingSegments, closed, projection).sort(
         (a, b) => b.area - a.area,
       );
-      if (regions.length <= 1) continue;
+      if (regions.length <= meaningfulIslandCount(polygon)) continue;
       divided = true;
       replacements[element.id] = regions[0].geometry;
       additions.push(
@@ -323,7 +347,8 @@ export function sliceBuilding(
 
     const uncoveredRegions = partition(uncovered, cuttingSegments, closed, projection);
     if (uncoveredRegions.length > meaningfulIslandCount(uncovered)) divided = true;
-    if (!divided) return null;
+    if (!divided)
+      return fail("The cut does not divide a footprint; choose boundaries that separate an area");
 
     additions.push(
       ...uncoveredRegions.map((region) => ({
@@ -338,6 +363,6 @@ export function sliceBuilding(
       ? { replacements, additions }
       : null;
   } catch {
-    return null;
+    return fail("Could not split this geometry; try a different boundary point");
   }
 }
