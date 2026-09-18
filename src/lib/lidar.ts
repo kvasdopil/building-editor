@@ -1,7 +1,7 @@
 import type { BuildingElement } from "./buildings";
 import { type Bounds, boundsOverlap, elementBounds, padBounds } from "./geometry";
 import { LIDAR_SOURCE_ID, type RawTile, classOf, decodeTile } from "./lidar-format";
-import { type TileId, tileBounds, tilesForBounds } from "./osm/tiles";
+import { type TileId, tileBounds, tileKey, tilesForBounds } from "./osm/tiles";
 
 /**
  * Airborne laser point clouds for the selected building, from four sources that
@@ -214,8 +214,87 @@ export interface LoadedTile {
   source: LidarSurvey;
 }
 
+/**
+ * Decoded tiles, kept between selections. A z16 tile is about 300 m across and
+ * a cloud reaches 100 m past its building, so the next building clicked is
+ * usually inside the tiles the last one already read. Without this they are
+ * fetched, decoded and merged again, and the dots are missing until they are.
+ *
+ * Tiles are cached rather than clouds because a cloud is clipped to one
+ * building's own box: the tiles behind it are reusable, the merge is not.
+ *
+ * The budget counts points, which is what the arrays cost — nine bytes each,
+ * so four million points is about 36 MB. Evicting the least recently used tile
+ * drops, in practice, the one furthest from wherever the editing moved.
+ */
+const TILE_CACHE_POINTS = 4_000_000;
+
+/**
+ * A second cap, on entries rather than points, because a tile with no points
+ * costs nothing against the point budget: panning far enough over an area no
+ * survey covers would otherwise keep adding entries that nothing ever evicts.
+ * 256 z16 tiles is several square kilometres of remembered answers.
+ */
+const TILE_CACHE_ENTRIES = 256;
+
+/** Insertion order is the LRU order: a hit is re-inserted at the end. */
+const tileCache = new Map<string, LoadedTile[]>();
+let tileCachePoints = 0;
+
+function pointsIn(loaded: LoadedTile[]): number {
+  return loaded.reduce((total, { raw }) => total + raw.count, 0);
+}
+
+function cachedTile(tile: TileId): LoadedTile[] | undefined {
+  const key = tileKey(tile);
+  const hit = tileCache.get(key);
+  if (!hit) return undefined;
+  tileCache.delete(key);
+  tileCache.set(key, hit);
+  return hit;
+}
+
+/**
+ * A tile that answered no points is remembered too. Every route replies to an
+ * uncovered area with an empty tile and a day of cache headers, so asking again
+ * within a session cannot learn anything the first answer did not say.
+ */
+function rememberTile(tile: TileId, loaded: LoadedTile[]): void {
+  const key = tileKey(tile);
+  const previous = tileCache.get(key);
+  if (previous) tileCachePoints -= pointsIn(previous);
+  tileCache.delete(key);
+  tileCache.set(key, loaded);
+  tileCachePoints += pointsIn(loaded);
+  for (const [other, entry] of tileCache) {
+    if (tileCachePoints <= TILE_CACHE_POINTS && tileCache.size <= TILE_CACHE_ENTRIES) break;
+    // The tile just asked for is the one being looked at; evict around it.
+    if (other === key) continue;
+    tileCache.delete(other);
+    tileCachePoints -= pointsIn(entry);
+  }
+}
+
+/**
+ * The cloud around a building when every tile it needs is already decoded, with
+ * no network at all. The 3D view reads this as it builds the scene, so
+ * selecting a neighbour of the last building keeps its points on screen instead
+ * of clearing them and reporting a read that has nothing left to do.
+ */
+export function cachedLidarCloud(building: BuildingElement): LidarCloud | null {
+  const loaded: LoadedTile[] = [];
+  for (const tile of lidarTilesFor(building)) {
+    const hit = cachedTile(tile);
+    if (!hit) return null;
+    loaded.push(...hit);
+  }
+  return loaded.length > 0 ? mergeTiles(loaded, cloudBounds(building)) : null;
+}
+
 /** Every applicable survey for a tile; overlap is resolved after decoding. */
 async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[]> {
+  const cached = cachedTile(tile);
+  if (cached) return cached;
   const routes: { route: string; source: LidarSurvey | null }[] = [
     { route: "lidar", source: null },
     { route: "skog", source: "Laserdata Skog" as const },
@@ -239,7 +318,12 @@ async function loadTile(tile: TileId, signal?: AbortSignal): Promise<LoadedTile[
       }
     }),
   );
-  return loaded.filter((entry): entry is LoadedTile => entry !== null);
+  const tiles = loaded.filter((entry): entry is LoadedTile => entry !== null);
+  // An abandoned selection resolves to no tiles because every fetch threw, not
+  // because the tile is empty. Remembering that would blank the cloud for every
+  // later selection that overlaps it.
+  if (!signal?.aborted) rememberTile(tile, tiles);
+  return tiles;
 }
 
 /**

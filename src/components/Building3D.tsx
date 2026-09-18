@@ -10,7 +10,7 @@ import {
   updatePointCloudSelection,
 } from "@/lib/extrude";
 import { levelHeight, verticalExtent } from "@/lib/heights";
-import { fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
+import { cachedLidarCloud, fetchLidarCloud, type LidarCloud, type LidarSource } from "@/lib/lidar";
 import { fetchTerrain, type TerrainModel } from "@/lib/terrain";
 import { mountCanvas } from "@/lib/three-canvas";
 import { initializeHippedRoofGeometry } from "@/lib/roofs";
@@ -204,7 +204,13 @@ export function Building3D({
 
     const id = activeSelection.building.id;
     let terrain = terrainRef.current?.id === id ? terrainRef.current.terrain : null;
-    let cloud = cloudRef.current?.id === id ? cloudRef.current.cloud : null;
+    // The previous building's cloud, or — for a neighbour inside the tiles it
+    // already read — one merged from those tiles, so the dots are in the first
+    // frame instead of after a round of reads that would answer the same bytes.
+    let cloud =
+      cloudRef.current?.id === id
+        ? cloudRef.current.cloud
+        : cachedLidarCloud(activeSelection.building);
     let built = buildScene(activeSelection, terrain);
     scene.add(built.root);
 

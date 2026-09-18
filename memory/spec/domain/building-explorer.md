@@ -825,6 +825,14 @@ immediate neighbors suppress national returns, so imported data wins over its ac
 Skog fills a Stockholm scan that ends partway through a tile. Points are kept within 100 m of the footprint. A stored classification byte
 carries the LAS class in its low bits and a single-return flag in `0x80`.
 
+Decoded tiles stay in the browser between selections, bounded to four million points and 256 tiles — the second cap
+because a tile with no points weighs nothing against the first — with the least recently used
+dropped first, and a building is merged out of them rather than out of a fresh read.
+Because a z16 tile is far wider than one building's 100 m of padding, selecting a neighbour usually
+reads nothing and shows its points in the first frame of its scene, and only the tiles its padding
+newly reaches are fetched. A read abandoned by a selection that moved on is not remembered, so it
+cannot leave an area looking empty for the rest of the session.
+
 Within the selected element's footprint, returns above its rendered roof are recoloured by their
 vertical distance from that roof: green below 1 m, orange from 1-5 m, yellow from 5-10 m, and red
 above 10 m, with soft gradients between bands. A selected building follows the visible roof of any
