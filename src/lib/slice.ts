@@ -3,7 +3,7 @@ import { cutStraight } from "./straight-cut";
 import type { MultiPolygon, Polygon } from "geojson";
 import type { BuildingElement, LngLat } from "./buildings";
 import { orientRing, segmentsIntersect } from "./geometry";
-import type { EditableGeometry } from "./geometry-edits";
+import { repairGeometryBacktracks, type EditableGeometry } from "./geometry-edits";
 import {
   copiedPartTags,
   firstPartTags,
@@ -251,7 +251,14 @@ export function sliceBuilding(
   if (!simplePath(nodes, closed))
     return fail("The cut must be a simple path without repeated nodes or crossings");
   const projection = makeProjection(building);
-  const buildingPolygon = geometryPolygon(elementGeometry(building), projection);
+  const sourceGeometry = elementGeometry(building);
+  let buildingPolygon = geometryPolygon(sourceGeometry, projection);
+  if (!buildingPolygon.isValid()) {
+    // OSM multipolygons occasionally contain narrow, unambiguous zero-area
+    // backtracks. Use a repaired outline for partitioning without silently
+    // editing the source relation itself.
+    buildingPolygon = geometryPolygon(repairGeometryBacktracks(sourceGeometry), projection);
+  }
   if (!buildingPolygon.isValid())
     return fail("The building outline has invalid geometry; repair it before slicing");
 

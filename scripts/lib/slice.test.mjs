@@ -157,6 +157,26 @@ const rectangle = (x0, y0, x1, y1) =>
     [x0, y0],
   ].map(([x, y]) => [x / 100000, y / 100000]);
 
+test("an exact A-B-A spike in the parent outline does not block slicing", () => {
+  const spiked = rectangle(0, 0, 20, 20);
+  spiked.splice(3, 0, [0.0001, 0.0002], [0.0001, 0.00018], [0.0001, 0.0002]);
+  let failure;
+  const result = sliceBuilding(
+    element("relation/29065", "building", spiked),
+    [],
+    [
+      [0.00005, 0],
+      [0.00005, 0.0002],
+    ],
+    false,
+    (message) => {
+      failure = message;
+    },
+  );
+  assert.ok(result, failure);
+  assert.equal(result.additions.length, 2);
+});
+
 test("a cut ending inside another part must not continue through that part", () => {
   const building = element("b", "building", rectangle(0, 0, 20, 20));
   const part = element("p", "part", rectangle(0, 0, 10, 20));

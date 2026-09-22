@@ -198,6 +198,8 @@ remain in the solid area covered by the building outline or one of its existing 
 must be simple. This union tolerates small disagreements between a parent courtyard and a part
 courtyard, including a cut that reaches, follows, and leaves the part's inner boundary. A closed
 tower loop must remain inside the solid building outline itself.
+An exact zero-area `A-B-A` spike in an otherwise usable parent outline is ignored for the partition
+calculation without changing that upstream outline. Other invalid source geometry remains blocked.
 
 Straight cuts must work in either direction at concave corners and at a node shared by an outer
 ring and a courtyard ring. They stop at their drawn endpoints; extending their supporting line

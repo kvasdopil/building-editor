@@ -656,6 +656,17 @@ export function repairGeometryBacktracks(geometry: EditableGeometry): EditableGe
     rings.map((ring) => {
       let open = openRing(ring);
       for (;;) {
+        const spike = open.findIndex((point, index) =>
+          sameCoordinate(point, open[(index + 2) % open.length]),
+        );
+        if (spike >= 0 && open.length > 4) {
+          // A → B → A is a zero-area excursion. Keep the first A and remove
+          // both the excursion tip B and the repeated A. OSM relation/29065
+          // contains this exact topology in its otherwise usable outer ring.
+          const remove = new Set([(spike + 1) % open.length, (spike + 2) % open.length]);
+          open = open.filter((_, index) => !remove.has(index));
+          continue;
+        }
         const repair = localBacktrackRepair(open);
         if (!repair) break;
         open = withoutRingNode(open, repair.nodeIndex);
