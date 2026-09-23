@@ -141,3 +141,80 @@ test("relation/1658671-shaped geometry survives reordered inner rings", () => {
     ["way/103210683"],
   );
 });
+
+test("a sliced relation member transfers retired anchors to the new sibling part", () => {
+  const outline = [
+    [0, 0],
+    [0.001, 0],
+    [0.002, 0],
+    [0.002, 0.001],
+    [0.001, 0.001],
+    [0, 0.001],
+    [0, 0],
+  ];
+  const kept = [outline[0], outline[1], outline[2], outline[3], outline[4], outline[0]];
+  const sibling = [outline[0], outline[4], outline[5], outline[0]];
+  const relationMember = {
+    ...member(21, [101, 102, 103, 104, 105, 106, 101], outline),
+    role: "outer",
+  };
+  const relationPart = {
+    type: "Feature",
+    id: "relation/2",
+    geometry: { type: "MultiPolygon", coordinates: [[outline]] },
+    properties: {
+      ...normalizeOsmTags({ type: "multipolygon", "building:part": "yes" }, "part"),
+      id: "relation/2",
+      osm_type: "relation",
+      osm_id: 2,
+      version: 1,
+      members: [{ type: "way", ref: 21, role: "outer" }],
+      member_ways: [relationMember],
+    },
+  };
+  const parent = {
+    type: "Feature",
+    id: "way/1",
+    geometry: { type: "Polygon", coordinates: [outline] },
+    properties: {
+      ...normalizeOsmTags({ building: "yes", height: "10" }, "building"),
+      id: "way/1",
+      osm_type: "way",
+      osm_id: 1,
+      version: 1,
+      node_ids: [201, 202, 203, 204, 205, 206, 201],
+      node_versions: [1, 1, 1, 1, 1, 1, 1],
+    },
+  };
+  const plan = buildChangeset({
+    features: { type: "FeatureCollection", features: [relationPart, parent] },
+    tagEdits: {},
+    geometryEdits: {
+      "relation/2": {
+        kind: "slice",
+        geometry: { type: "Polygon", coordinates: [kept] },
+      },
+    },
+    createdParts: {
+      "way/-1": {
+        type: "Feature",
+        id: "way/-1",
+        geometry: { type: "Polygon", coordinates: [sibling] },
+        properties: {
+          ...normalizeOsmTags({ "building:part": "yes", height: "10" }, "part"),
+          id: "way/-1",
+          parent_id: "way/1",
+          osm_type: "way",
+          osm_id: -1,
+        },
+      },
+    },
+  });
+
+  assert.equal(
+    plan.issues.some((issue) => issue.check === "relation-geometry-unsupported"),
+    false,
+  );
+  assert.ok(plan.ways.find((way) => way.ref === "way/21").nodes.includes(105));
+  assert.ok(plan.ways.find((way) => way.ref === "way/-1").nodes.includes(106));
+});

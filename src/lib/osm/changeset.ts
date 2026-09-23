@@ -813,18 +813,19 @@ export function buildChangeset(input: ChangesetInput): ChangesetPlan {
         // an internal shared wall. Those old nodes survive on the new part;
         // ownership of the remaining outer ring is still that same closed way.
         const additionVertices = new Set(
-          Object.values(createdParts)
-            .filter((part) => part.properties.parent_id === ref)
+          Object.entries(createdParts)
+            .filter(([partRef]) => groupOf(partRef).has(ref))
+            .map(([, part]) => part)
             .flatMap((part) => ringsOf(part.geometry).flat(2))
             .map((point) => coordinateKey(roundToOsmGrid(point))),
         );
         const survivingAnchors = (rawRing: RoleRing, edited: RoleRing, anchors: LngLat[]) => {
           if (
-            override.kind !== "add-part" ||
-            rawRing.role !== "outer" ||
+            !["add-part", "slice"].includes(override.kind) ||
+            (override.kind === "add-part" && rawRing.role !== "outer") ||
             !memberWays.some(
               (member) =>
-                member.role === "outer" &&
+                member.role === rawRing.role &&
                 sameCoordinate(
                   member.coordinates[0],
                   member.coordinates[member.coordinates.length - 1],
