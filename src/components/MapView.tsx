@@ -4232,8 +4232,13 @@ export function MapView() {
     lidarLayerRef.current?.setDifferences(differences);
   }, []);
 
+  // Identifies the cloud currently published to the map layer. A newly
+  // selected building can already have a cached cloud, which the child 3D
+  // viewer publishes before this component's selection effect runs.
+  const lidarCloudBuildingIdRef = useRef<string | null>(null);
   const onLidarCloudChange = useCallback((buildingId: string, cloud: LidarCloud | null) => {
     if (selectionRef.current?.building.id !== buildingId) return;
+    lidarCloudBuildingIdRef.current = buildingId;
     // The whole building's outline rides along for the grid mode's raster,
     // whichever part is selected.
     lidarLayerRef.current?.setCloud(cloud, selectionRef.current?.building.polygons ?? []);
@@ -4244,7 +4249,14 @@ export function MapView() {
   // previous building's points under the new footprint.
   const hadSelection = useRef(false);
   useEffect(() => {
-    lidarLayerRef.current?.setCloud(null);
+    // Keep a cloud that the newly selected building's 3D viewer has already
+    // published from cache. React runs the child's effect before this parent
+    // effect, so an unconditional clear would make LiDAR disappear on the map
+    // while the same cached points remain visible in 3D.
+    if (lidarCloudBuildingIdRef.current !== selectionBuildingId) {
+      lidarCloudBuildingIdRef.current = null;
+      lidarLayerRef.current?.setCloud(null);
+    }
     // A band chosen over one building's roof means nothing over the next one's.
     setLidarHeightWindow(null);
     // Only a selection that goes away closes LiDAR. On the first run there is
